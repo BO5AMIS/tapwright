@@ -289,18 +289,23 @@ class Hands:
         try:
             await self._open_now()
         except HandsUnavailable as e:
-            if not self.dirty:
-                raise
-            loop = asyncio.get_running_loop()
-            if loop.time() - self._dirty_at >= DIRTY_HOLD:
-                self._say(getattr(self.device, "rsd", None),
-                          f"hands: what an earlier gesture left down ({', '.join(self.dirty)}) couldn't be let go of "
-                          f"for {DIRTY_HOLD:g} s; given up")
-                self.dirty = {}
-                raise
-            raise HandsError(f"a finger, key or button from an earlier gesture may still be down on the phone, and "
-                             f"CoreDevice HID can't be reached to let go of it ({e.reason}); nothing was touched: wait "
-                             "a few seconds, then look") from None
+            self._hold(e)
+            raise
+
+    def _hold(self, e: HandsUnavailable) -> None:
+        """Before a HandsUnavailable sends a gesture to the runner: while something from an earlier gesture may still
+        be down (`dirty`), raise a HandsError instead for DIRTY_HOLD seconds (see _ready); after that, forget it."""
+        if not self.dirty:
+            return
+        if asyncio.get_running_loop().time() - self._dirty_at >= DIRTY_HOLD:
+            self._say(getattr(self.device, "rsd", None),
+                      f"hands: what an earlier gesture left down ({', '.join(self.dirty)}) couldn't be let go of "
+                      f"for {DIRTY_HOLD:g} s; given up")
+            self.dirty = {}
+            return
+        raise HandsError(f"a finger, key or button from an earlier gesture may still be down on the phone, and this "
+                         f"touch can't go through CoreDevice HID to let go of it first ({e.reason}); nothing was "
+                         "touched: wait a few seconds, then look") from None
 
     async def judged(self, changed: bool) -> str | None:
         """The caller's word on a touchscreen gesture these hands just played: did the screen change after it? The phone
@@ -527,7 +532,16 @@ class Hands:
                           "played: look before acting again")
 
     def _portrait(self, screen: tuple[float, float] | None, turn: int) -> tuple[tuple[float, float], int]:
-        screen = screen or self.screen
+        """The screen and turn a touch is mapped with; HandsUnavailable (the runner plays it) when they can't be
+        mapped, unless something may still be down (_hold: CodeRabbit, PR #26)."""
+        try:
+            return self._mapped(screen or self.screen, turn)
+        except HandsUnavailable as e:
+            self._hold(e)
+            raise
+
+    @staticmethod
+    def _mapped(screen: tuple[float, float], turn: int) -> tuple[tuple[float, float], int]:
         if turn not in TURNS:
             raise HandsUnavailable(f"unknown turn {turn!r}")
         if turn != 0 and not LANDSCAPE:

@@ -108,6 +108,27 @@ def test_m2_while_a_finger_may_be_down_an_unreachable_hid_is_no_fallback(monkeyp
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("screen,turn", [((H, W), TURN_UNKNOWN), ((W, H), 90)])
+def test_m2_while_a_finger_may_be_down_a_turn_the_hands_cant_map_is_no_fallback_either(screen, turn):
+    # (CodeRabbit, PR #26) _portrait refused before _ready's hold was looked at: the session took that for "use the
+    # runner", which then touched as a second finger
+    async def go():
+        hands, wire, _ = make()
+        wire.fail[1] = ConnectionResetError("reset")
+        with pytest.raises(Unanswered):
+            await hands.tap(10, 10, 5)
+        assert hands.dirty
+        sent = len(wire.sent)
+        with pytest.raises(HandsError) as e:
+            await hands.tap(20, 20, 5, screen=screen, turn=turn)
+        assert not isinstance(e.value, HandsUnavailable) and "may still be down" in str(e.value)
+        assert len(wire.sent) == sent
+        hands._dirty_at -= hands_module.DIRTY_HOLD + 1  # after the hold: the fallback is allowed again
+        with pytest.raises(HandsUnavailable):
+            await hands.tap(20, 20, 5, screen=screen, turn=turn)
+    asyncio.run(go())
+
+
 def test_m2_the_release_goes_out_first_when_hid_is_back():
     async def go():
         hands, wire, _ = make()
