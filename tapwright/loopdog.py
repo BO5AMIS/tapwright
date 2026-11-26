@@ -16,6 +16,7 @@ from collections.abc import Callable
 STALL = 1.0  # seconds without a tick of the loop before its stack is written
 EVERY = 0.25  # seconds between the thread's looks
 FRAMES = 15  # the innermost frames written
+THREAD = "tapwright-loop-dog"  # the thread's name: the log's account scrub lets its lines pass (server.RedactAccounts)
 
 
 def stack_of(thread_id: int, frames: int = FRAMES) -> list[str]:
@@ -45,7 +46,7 @@ class LoopDog:
     def start(self) -> "LoopDog":
         self._loop_thread = threading.get_ident()
         self.beat()
-        self._thread = threading.Thread(target=self._run, name="tapwright-loop-dog", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=THREAD, daemon=True)
         self._thread.start()
         return self
 

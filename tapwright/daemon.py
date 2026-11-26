@@ -6629,8 +6629,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         (the next touch is refused, and the agent looks again)."""
         if after is None:
             return None
-        if compare and before != after:
+        if compare and not after.same(before):
             return session_module.Front(session_module.FRONT_UNKNOWN)
+        if compare and before is not None and before.guessed and not after.guessed:
+            after = before  # (review RF H1) one of the two only guessed: the record is the weaker
         if after.kind == session_module.FRONT_APP and read_bundle and read_bundle != after.app:
             return session_module.Front(session_module.FRONT_UNKNOWN)
         return after
@@ -6653,11 +6655,26 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         left = polled and isinstance(state, session_module.Front) and state.kind != session_module.FRONT_OVER
         return (state if isinstance(state, session_module.Front) else None), left
 
+    @staticmethod
+    def _front_moved(before: "session_module.Front | None", after: "session_module.Front | None") -> str:
+        """(review RP2 H2, RF L2) What changed in front between the questions before and after a read: "" (nothing, or
+        one couldn't be asked), "banner" (SpringBoard came over the same app, or left it: a notification passing), or
+        "app" (another app, or the home screen)."""
+        if before is None or after is None or after.same(before):
+            return ""
+        kinds = {before.kind, after.kind}
+        if kinds <= {session_module.FRONT_APP, session_module.FRONT_OVER} and before.app == after.app:
+            return "banner"
+        return "app"
+
     def _over_line(self, view) -> str | None:
         """(2.0.3) The first line of an answer whose screen SpringBoard is over (a notification that stayed, Notification or
         Control Center), the tree no alert's: what the agent saw is that state, never the home screen."""
         front = getattr(view, "seen_front", None)
-        if getattr(view, "front_moved", False):
+        moved = getattr(view, "front_moved", "")
+        if moved == "banner":
+            return "Note: a notification passed over the app while this was read; look again."
+        if moved:
             return "Note: another app came to the front while this was read; look again."
         if (isinstance(front, session_module.Front) and front.kind == session_module.FRONT_OVER
                 and getattr(view, "alert", None) is None):
@@ -6671,7 +6688,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         read's app, `read_bundle`, must be the one in front: review RP2 H2)."""
         state = await self._read(self._front_state_now)
         view.seen_front = self._front_agreed(None, state, read_bundle, compare=False)
-        view.front_moved = False
+        view.front_moved = ""
 
     async def _banner_shown(self) -> bool:
         """Is a notification banner over the app now (the runner names SpringBoard in front while the newest read is of
@@ -9439,8 +9456,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._dry(a, "Would close the sheet.")
             await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
             return "Closed the sheet."
-        own = None if back.point is not None or back.hosted else \
-            ui.own_back(getattr(s, "front_items", None) or view.items, s.screen)
+        # (review RF M2) from `back`'s own read only, and only a whole one: the agent's older list may be another screen,
+        # and on a cut read "exactly one" can't be proven
+        own_items = getattr(s, "front_items", None) or []
+        whole = bool(own_items) and getattr(s, "last_tier", "full") == "full"
+        own = None if back.point is not None or back.hosted or not whole else ui.own_back(own_items, s.screen)
+        if own is not None and (word := self._needs_person(own)) is not None:
+            # (review RF M1) a control a touch on which would need a person's OK is never `back`'s to tap
+            raise Refused("not_actionable", f"no_action: the control in the corner, {self._own_back_line(view, own)}, "
+                                            f"says \"{word}\": back doesn't tap it. Nothing was touched; tap it yourself "
+                                            "if that is what you mean.")
         if own is not None:
             # (2.0.3) no bar's back button, and the screen shows its own in the top-left corner (ui.own_back): a person
             # taps that, never the edge swipe or the sheet's ways out (a shopping app's search results: a header strip
@@ -9475,7 +9500,20 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._dry(a, "Would swipe from the left edge.")
         await self._back_before(view, a, listed is not None)
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
+        if not whole:  # (review RF M2) a screen's own back control couldn't be looked for
+            return ("Swiped from the left edge. This screen's elements weren't read, so no back control of its own was "
+                    "looked for: if nothing went back, look, then aim at the back control yourself.")
         return "Swiped from the left edge."
+
+    @staticmethod
+    def _needs_person(own: ui.Element) -> str | None:
+        """(review RF M1) The word that would make a touch on this control need a person's OK (policy.DEFAULT_CONFIRM, and
+        the skip floor's own words while explore or a repair runs), in its label or as parts of its id; None if none."""
+        floor = _FLOOR_RULES.get()
+        words = (*safety.DEFAULT_CONFIRM, *(floor.confirm if floor is not None else ()),
+                 *(floor.block if floor is not None else ()))
+        id_words = " ".join(ui.name_parts(own.identifier))
+        return next((w for w in words if safety._matches(w, own.label) or safety._matches(w, id_words)), None)
 
     @staticmethod
     def _own_back_line(view, own: ui.Element) -> str:
@@ -9641,11 +9679,21 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return None
             return behind[0][1].line(ref=False, actions=False) if behind[0][1] is not None else ""
         was = front()
-        box = ui.sheet_box(getattr(s, "behind")[0][1], getattr(s, "front_items", None) or view.items, s.screen)
+        items = getattr(s, "front_items", None) or view.items
+        box = ui.sheet_box(getattr(s, "behind")[0][1], items, s.screen)
+        if box is not None and not ui.sheet_like(box, s.screen):
+            # (review RF M3) a strip along the top read as a layer is no sheet: "beside" it would be the middle of the
+            # content (a result row), and its "top edge" no grip. Nothing is touched
+            raise Refused("not_actionable", "no_action: no back button, and what is in front is no sheet to close, so "
+                                            "nothing was touched; look, then aim at the way back yourself"
+                                            + self._still_open())
         if box is not None:
             top, bottom = s.last_insets
             beside = ui.beside_sheet(box, s.screen, SCROLL_TOP_INSET if top is None else top,
                                      s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
+            fresh = getattr(s, "front_items", None) or []
+            if beside is not None and (not fresh or not ui.clear_of_touches(beside, box, fresh)):
+                beside = None  # (review RF M3) something there takes a touch, or no read says: `back` doesn't tap it
             if beside is not None:
                 mark = self.hub.latest
                 await s.tap(ui.Target(x=beside[0], y=beside[1]))
@@ -10198,7 +10246,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 front = await self._front_state_now()
             app = getattr(self.session, "app", None)
             view.seen_front = self._front_agreed(before, front, app[1] if isinstance(app, tuple) else None)
-            view.front_moved = before != front and before is not None and front is not None
+            view.front_moved = self._front_moved(before, front)
             view.items = view.shown = self.session.items
             view.shown_off = self._off_screen_now()
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
@@ -10252,7 +10300,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 front = await self._front_state_now()
             bundle = read_now.app[1] if isinstance(read_now.app, tuple) else None
             view.seen_front = self._front_agreed(before, front, bundle, compare=snap is None)
-            view.front_moved = snap is None and before != front and before is not None and front is not None
+            view.front_moved = self._front_moved(before, front) if snap is None else ""
             s.items = read_now.tree.items
             app_changed = read_now.app is not None and view.app is not None and read_now.app != view.app
             head = _furniture(view, read_now.tree.alert, read_now.tree.keyboard)

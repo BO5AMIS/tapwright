@@ -581,9 +581,16 @@ FRONT_UNKNOWN = "unknown"  # the route or the process list couldn't say
 
 @dataclass(frozen=True)
 class Front:
-    """One of the states above; `app` is the app in front (FRONT_APP) or under SpringBoard (FRONT_OVER)."""
+    """One of the states above; `app` is the app in front (FRONT_APP) or under SpringBoard (FRONT_OVER). `guessed`
+    (review RF H1): FRONT_APP taken from iOS's process list alone because the route couldn't name the app (front_state).
+    That list never has SpringBoard, so it can't tell the app alone from a notification over it: the weakest state."""
     kind: str
     app: str | None = None
+    guessed: bool = False
+
+    def same(self, other: "Front | None") -> bool:
+        """The same state, whether or not either is a guess."""
+        return other is not None and self.kind == other.kind and self.app == other.app
 
 
 @dataclass(frozen=True)
@@ -606,6 +613,9 @@ COVERED_BANNER = ("covered: a notification is over the top of the screen, so not
                   "then look and try again.")
 COVERED_HOME = ("covered: a notification may be over the top of the home screen, so nothing was touched; aim at an "
                 "element (by ref, id or label), or look again.")
+# (review RF H1) the app in front known only from iOS's process list, which can't see a banner
+COVERED_GUESS = ("covered: can't tell whether a notification is over the top of {app} (the phone's runner couldn't name "
+                 "the app in front), so nothing was touched; aim at an element (by ref, id or label), or lower.")
 
 
 class _BannerUp(Exception):
@@ -1820,7 +1830,8 @@ class Session:
         names SpringBoard. None only on a runner that answered a route version older than 11 (it can't say in a few
         ms: no check). (Review RP2 M1) A version not known (its question failed, after a reconnect) is asked once; still
         unknown: FRONT_UNKNOWN, never "old". (M4) When the route can't name the app and the agent's newest open_app named
-        one that iOS's process list still has in the foreground, that app."""
+        one that iOS's process list still has in the foreground, that app, marked a guess (review RF H1: the list never
+        has SpringBoard, so a notification over the app looks the same)."""
         if not self.tw_version and getattr(self, "fast_tap", None) is None:
             routes = getattr(self, "_fast_routes", None)
             if callable(routes):
@@ -1844,7 +1855,7 @@ class Session:
                 except Exception:
                     return Front(FRONT_UNKNOWN)
                 if in_front == [opened]:
-                    return Front(FRONT_APP, opened)
+                    return Front(FRONT_APP, opened, guessed=True)
             return Front(FRONT_UNKNOWN)
         if front[0] != SPRINGBOARD:
             return Front(FRONT_APP, front[0])
@@ -1873,7 +1884,8 @@ class Session:
         tell that a touch is safe, it doesn't touch. Against what the agent's last answer showed (`touch_rules.seen`),
         `element` meaning the touch is aimed at an element of that answer's list (by ref, id or label):
         - the same app in front (or that app, after the system the agent saw over it has gone): yes (and the agent's
-          record becomes that app alone: `found_front`);
+          record becomes that app alone: `found_front`); but when only iOS's process list names it (`guessed`, review RF
+          H1), a point, an `o` ref or a text of the picture in the banner zone is refused `covered`;
         - the home screen, seen as the home screen: yes; but a point in the banner zone is refused `covered` (a banner
           over the home screen can't be told from it);
         - SpringBoard over the app: an element-aimed touch when the agent's last answer showed that state; a point,
@@ -1906,6 +1918,9 @@ class Session:
         while True:
             if now.kind == FRONT_APP:
                 if seen.kind in (FRONT_APP, FRONT_OVER) and seen.app == now.app:
+                    if now.guessed and zone and not rules.element:
+                        # (review RF H1) only the process list says so: a banner over the top can't be ruled out
+                        raise Refused("not_actionable", COVERED_GUESS.format(app=self._words(now)))
                     self.found_front = now  # (review RP2 M2: what the agent saw over the app has gone)
                     return
                 break

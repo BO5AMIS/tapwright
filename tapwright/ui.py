@@ -1956,26 +1956,70 @@ OWN_BACK_UPRIGHT = (120.0, 140.0)
 OWN_BACK_LANDSCAPE = (180.0, 100.0)
 
 
-def names_back(text: str) -> bool:
-    """(2.0.3) Does an id or label say "back" as a word of its own: a word of a sentence, or a camel-case or snake-case
-    part (`searchResultBackButton`, `icBrutalBack`, `back_button`, "Back", "Go back")? Never inside another word
-    ("background", "feedback", "playback", "backup", "backspace"), and never "back to top" (a scroll to the top)."""
-    words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", text)]
-    return any(w == "back" and words[i + 1:i + 3] != ["to", "top"] for i, w in enumerate(words))
+# (review RF M1) a label in words is a back control only when "back" is its whole meaning: these, case-folded and trimmed.
+# The repo keeps no translations of the bar's back button; Arabic's two are the owner's apps'
+BACK_LABELS = frozenset({"back", "go back", "back button", "navigate back", "رجوع", "عودة"})
+# the generic parts at the end of an id or asset name, left out before its last part is looked at
+# ("arrow" too: `go_back_arrow`, a back arrow's asset, is a back control as `backButton` is)
+BACK_GENERIC = frozenset({"button", "btn", "icon", "ic", "image", "img", "view", "item", "control", "id", "arrow"})
+# a part before "back" that makes it something else: "callBack", "sendBack", "playBack", "cashBack", "cameraBack"...
+NOT_BEFORE_BACK = frozenset({"call", "send", "bring", "give", "pay", "cash", "get", "take", "write", "talk", "play",
+                             "feed", "roll", "cut", "push", "pull", "step", "fall", "hold", "set", "look", "flash", "kick",
+                             "turn", "come", "switch", "camera", "money"})
+
+
+def name_parts(text: str) -> list[str]:
+    """An id or asset name in its parts, lower case: split at case changes, digits, `_`, `-` and `.` (digits dropped)."""
+    return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+", text)]
+
+
+def _back_meaning(text: str, label: bool) -> bool | None:
+    """(review RF M1) Is "back" this id's or label's whole meaning? True: yes. False: it says "back" as part of something
+    else ("Call back", `callBackButton`, `backCamera`): the element is then never a back control. None: it says
+    nothing of back."""
+    plain = text.strip().casefold()
+    if not plain:
+        return None
+    if label and plain in BACK_LABELS:
+        return True
+    if label and (" " in plain or not plain.isascii()):  # human words: only the list above
+        return False if "back" in re.findall(r"[a-z]+", plain) or any(w in plain for w in ("رجوع", "عودة")) else None
+    parts = name_parts(text)
+    if "back" not in parts:
+        return None
+    while parts and parts[-1] in BACK_GENERIC:
+        parts.pop()
+    return bool(parts) and parts[-1] == "back" and (len(parts) == 1 or parts[-2] not in NOT_BEFORE_BACK)
+
+
+def names_back(text: str, label: bool = False) -> bool:
+    """(2.0.3, review RF M1) Does an id (or, `label`, a label) say back and nothing else? A label: exactly one of
+    BACK_LABELS ("Back", "Go back"); one without spaces is read as a name. An id or a name: its parts (name_parts) with
+    the generic ones at the end left out (BACK_GENERIC) end in `back`, not after a part that makes it something else
+    (NOT_BEFORE_BACK): `searchResultBackButton`, `icBrutalBack`, `nav_back`, `backButton` yes; `callBackButton`,
+    `backCamera`, `backupButton`, `playbackButton`, `feedback`, `backgroundPicker`, "Call back", "Back up" no."""
+    return _back_meaning(text, label) is True
+
+
+def _means_back(e: Element) -> bool:
+    """(review RF M1) Its id or its label says back and nothing else, and neither says back as part of something else."""
+    said = (_back_meaning(e.identifier, False), _back_meaning(e.label, True))
+    return True in said and False not in said
 
 
 def own_back(items: list[Element], screen: tuple[float, float]) -> Element | None:
     """(2.0.3) The screen's own back control, for a screen with no navigation bar's back button (a shopping app's search
     results: `button "icBrutalBack" id=searchResultBackButton @16,59 40x40`, phone 2026-11-26): the one element that
     takes a tap (a button, or anything with the tap action), enabled, not in an alert nor in a view another process draws,
-    whose frame lies wholly in the top-left corner (OWN_BACK_UPRIGHT, OWN_BACK_LANDSCAPE) and whose id or label says back
-    (names_back). One thing listed twice (one_thing) counts once. None when none or several qualify: nothing is guessed."""
+    whose frame lies wholly in the top-left corner (OWN_BACK_UPRIGHT, OWN_BACK_LANDSCAPE), nothing drawn over it, and whose
+    id or label says back and nothing else (_means_back, review RF M1). One thing listed twice (one_thing) counts once.
+    None when none or several qualify: nothing is guessed."""
     across, down = OWN_BACK_LANDSCAPE if screen[0] > screen[1] else OWN_BACK_UPRIGHT
     found = [e for e in items
              if (e.role == "button" or "tap" in e.actions) and e.enabled and not e.in_alert and not e.placed
              and e.width > 0 and e.height > 0 and e.x >= -1 and e.y >= -1
-             and e.x + e.width <= across and e.y + e.height <= down
-             and (names_back(e.identifier) or names_back(e.label))]
+             and e.x + e.width <= across and e.y + e.height <= down and not e.covered_by
+             and _means_back(e)]
     return found[0] if len(found) == 1 else one_thing(found)
 
 
@@ -2108,6 +2152,28 @@ def sheet_box(front: Element | None, items: list[Element],
         return None
     x0, y0 = min(r[0] for r in rects), min(r[1] for r in rects)
     return x0, y0, max(r[0] + r[2] for r in rects) - x0, max(r[1] + r[3] for r in rects) - y0
+
+
+SHEET_TALL = 0.3  # (review RF M3) of the screen's height: a box this tall, or one that reaches the bottom, is a sheet
+SHEET_BOTTOM = 2.0  # points from the screen's bottom edge within which a box "reaches" it
+BESIDE_CLEAR = 8.0  # points the tap beside a sheet keeps from anything that takes a touch
+
+
+def sheet_like(box: tuple[float, float, float, float], screen: tuple[float, float]) -> bool:
+    """(review RF M3) Does the box look like a sheet: it reaches the screen's bottom edge, or covers at least SHEET_TALL
+    of its height? A strip along the top (a shopping app's 54 pt header, read as a layer, phone 2026-11-26) isn't one."""
+    _, y, _, h = box
+    return y + h >= screen[1] - SHEET_BOTTOM or h >= SHEET_TALL * screen[1]
+
+
+def clear_of_touches(point: tuple[float, float], box: tuple[float, float, float, float], items: list[Element]) -> bool:
+    """(review RF M3) Is the point inside no element of the read that takes a touch, and BESIDE_CLEAR from each? What
+    holds the whole sheet (its backdrop, a container) is left out: a touch on it beside the sheet is what closes it."""
+    def holds_box(e: Element) -> bool:
+        return (e.x <= box[0] + 1 and e.y <= box[1] + 1 and e.x + e.width >= box[0] + box[2] - 1
+                and e.y + e.height >= box[1] + box[3] - 1)
+    blocks = [e.rect for e in items if e.actions and e.role != "scroll" and not e.in_alert and not holds_box(e)]
+    return _clearance(point[0], point[1], blocks) >= BESIDE_CLEAR
 
 
 def beside_sheet(box: tuple[float, float, float, float], screen: tuple[float, float], top: float,
