@@ -27,8 +27,12 @@
     block holds across a reconnect to the phone (a service restart starts afresh);
   - a screen whose picture changes by more than the box across the read gets the same reads as in 2.0.2, plus a wait
     of up to 1 s (about 0.3 s on the phone) for one fresh picture after each cut 3 s read;
-  - a look that comes while the picture stream is opening again (it closes 30 s after the last call) waits up to
-    1.5 s for its frames, so there is a picture to compare;
+  - a read that could lead to an 8 s one, made while the picture stream has sent nothing for half a second (it closes
+    30 s after the last call and is opening again), waits up to 1.5 s for a picture to compare; never while pictures
+    arrive, and no read that can't lead to an 8 s one (a 1.5 s read, a read left unasked, a blocked app) waits for or
+    looks at the stream at all;
+  - an 8 s read answered by another app's screen (a notification banner over the app) counts for neither app: the
+    app it was for is read again as if it hadn't happened;
   - `TAPWRIGHT_TREE_LONG_PATH=direct` sends the 8 s read the direct way instead of XCTest's (for measuring).
   What it costs: the first look at such a screen takes 3 + 3.5-7.3 s instead of 3 s, once. After every cut 3 s read
   of an app that isn't blocked, the answer waits for one fresh picture (about 0.3 s on the phone, at most 1 s). A feed
