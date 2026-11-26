@@ -6461,8 +6461,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         element = (target is not None and target.kind in ("ref", "id", "label") and not _PICTURE_TEXT.get())
         return session_module.TouchRules(front if isinstance(front, session_module.Front) else None, element)
 
-    async def _front_now(self) -> "session_module.Front | None":
-        """Session.front_state, None without one (a fake, or a runner that answered a version below 11)."""
+    async def _front_state_now(self) -> "session_module.Front | None":
+        """Session.front_state, None without one (a fake, or a runner that answered a version below 11). (Not
+        journey_tool's _front_now, the bundle id in front, which the explorer uses.)"""
         front_state = getattr(self.session, "front_state", None)
         state = await front_state() if callable(front_state) else None
         return state if isinstance(state, session_module.Front) else None
@@ -6521,7 +6522,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """(2.0.3, review RP M4) What is in front now, as the agent's: after `open_app` and `open_url` (where they went,
         `look: false` too) and a run's step whose positive `expect` held (its read found what the agent expected; that
         read's app, `read_bundle`, must be the one in front: review RP2 H2)."""
-        state = await self._read(self._front_now)
+        state = await self._read(self._front_state_now)
         view.seen_front = self._front_agreed(None, state, read_bundle, compare=False)
         view.front_moved = False
 
@@ -9957,7 +9958,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         read with its picture in one request (_pairs_text) leaves the picture to _with_ocr."""
         async def read():
             self._mark_read(view)
-            before = await self._front_now()  # (review RP2 H2: what is in front as the read begins)
+            before = await self._front_state_now()  # (review RP2 H2: what is in front as the read begins)
             text, image = await self.session.look(screenshot=False)
             front, left = await self._front_answer(
                 self.session.last_alert is not None,
@@ -9965,7 +9966,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if left:  # a banner was over the app as it was read: read again, now that it has gone (review RP H1)
                 before = front
                 text, image = await self.session.look(screenshot=False)
-                front = await self._front_now()
+                front = await self._front_state_now()
             app = getattr(self.session, "app", None)
             view.seen_front = self._front_agreed(before, front, app[1] if isinstance(app, tuple) else None)
             view.front_moved = before != front and before is not None and front is not None
@@ -10011,7 +10012,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
         async def read():
             self._mark_read(view)
-            before = await self._front_now() if snap is None else None  # (review RP2 H2)
+            before = await self._front_state_now() if snap is None else None  # (review RP2 H2)
             read_now = snap or await s.snapshot()  # `snap`: a read the caller already made (wait_for's last poll)
             front, left = await self._front_answer(
                 read_now.tree.alert is not None,
@@ -10019,7 +10020,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if left and snap is None:  # a banner was over the app as it was read: read again (review RP H1)
                 before = front
                 read_now = await s.snapshot()
-                front = await self._front_now()
+                front = await self._front_state_now()
             bundle = read_now.app[1] if isinstance(read_now.app, tuple) else None
             view.seen_front = self._front_agreed(before, front, bundle, compare=snap is None)
             view.front_moved = snap is None and before != front and before is not None and front is not None
