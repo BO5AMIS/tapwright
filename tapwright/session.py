@@ -132,6 +132,7 @@ OCR_WAIT = 8.0  # seconds the runner's OCR may take (Vision's accurate level: ab
 # doesn't support fails the read, and the picture is then read on this computer instead
 OCR_LANGUAGES = os.environ.get("TAPWRIGHT_OCR_LANGUAGES", "").strip()
 TIERS = ("full", "shallow", "root")
+_TIER_RANK = {"root": 0, "shallow": 1, "full": 2}  # (2.0.3) how much of the tree a read got
 # (review R200v M4) the languages Vision's fast level reads (Latin script; Apple's fast revision lists English, French,
 # Italian, German, Spanish and Portuguese), by their primary subtag. A fast read asked in any other language fails with
 # `unknown error` (RUNNER-V9-PROTOCOL §4), so wait_for's polls read at the accurate level then.
@@ -205,9 +206,10 @@ LONG_NOTE = ("this screen took about {seconds:.0f} s to read, longer than the us
              "and its next reads are given that time while it stands still")
 
 
-# (2.0.3, review R203 L1) whose call a read belongs to: the daemon sets a fresh object for each tool call, and the
-# "took long" note goes only to that call's answer (None: a read of no call, whose note is dropped)
-READ_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("tapwright_read_owner", default=None)
+# (2.0.3, review R203 L1) whose call a read belongs to: the daemon sets a fresh list for each tool call, and the
+# "took long" note goes into it, for that call's answer only (None: a read of no call, whose note is dropped). Held by
+# the call (CodeRabbit, PR #30): two calls that overlap can't take or overwrite each other's note
+READ_OWNER: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("tapwright_read_owner", default=None)
 
 
 def read_wait(budget_ms: int | None, long: bool = False) -> float:
@@ -252,6 +254,8 @@ SHOT_QUALITY = 80  # the JPEG quality asked of the runner's shot (shot.render en
 # after every action. One real short-budget read goes out every UNASKED_FOR seconds, so a screen of that app that reads
 # (a profile, while a video plays in it) is found again; a still screen gets the normal budget at once (ReadBudget).
 UNASKED_FOR = 8.0
+LONG_SILENT_WHY = ("not read: a read of {bundle} with the long budget got no answer in its time, and the runner may "
+                   "still be reading it")
 UNASKED_WHY = ("not asked: {bundle} is still in front, its screen keeps moving, and its read {age:.1f} s ago gave no "
                "elements in time")
 
@@ -411,8 +415,9 @@ class ReadBudget:
             # (review K-H1) the screen in front reads: the next read is asked for real. Left unasked, it was made up
             # as a root with no elements, for a screen that had just given all of them
             self._tried.pop(bundle, None)
-            # (a long read that came back whole in 0.4 s is a warm read of a screen that took 4 s cold: it reads)
-            if took_ms is None or took_ms >= self.short_ms or long:
+            # (CodeRabbit, PR #30) a long read that came back whole in 0.4 s doesn't clear it either: a moving screen of
+            # the app is read as in 2.0.2 (the short budget); a still one has the long budget by `_readable`
+            if took_ms is None or took_ms >= self.short_ms:
                 self._cut.pop(bundle, None)
                 self._still_cut.pop(bundle, None)
         elif budget_ms >= self.normal_ms:
@@ -702,8 +707,7 @@ class Session:
         # straight after a 3 s read saw a 3 s old frame and always said no. Without them no long read is made.
         self.still_mark: Callable[[bool], Awaitable[object | None]] | None = None
         self.still_across: Callable[[object], Awaitable[bool]] | None = None
-        # (2.0.3) LONG_NOTE and the READ_OWNER of the call whose read made it, for the daemon to add to that answer once
-        self.slow_note: tuple[object, str] | None = None
+
         self.center_tier = "full"  # how much of Notification Center the newest read_center got (R200v L4)
         self.settles = SettleCap()  # (2.0) which apps' screens never stand still: their settles wait less
         self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
@@ -978,13 +982,16 @@ class Session:
         accessibility queries is named (AppNotAnswering), so the caller can say so instead of waiting on it."""
         try:
             # (asked a second time by _call when the first got no answer: a frozen app answers neither)
+            began = time.monotonic()
             source = await self._read_tree(timeout)
             await self._follow_orientation(source)
             waited = 0.0
             while await self._banner_over_an_app(source) and waited < min(BANNER_WAIT, timeout):
                 await asyncio.sleep(BANNER_POLL)
                 waited += BANNER_POLL
-                source = await self._read_tree(timeout)
+                # (CodeRabbit, PR #30) what is left of the read's time: a long read planned on all of it could end past
+                # wait_for's deadline and be cut there in flight
+                source = await self._read_tree(max(0.1, timeout - (time.monotonic() - began)))
             if waited:
                 still = " and it is still there" if await self._banner_over_an_app(source) else ""
                 getattr(self.device, "log", lambda *a: None)(
@@ -1048,12 +1055,17 @@ class Session:
                 return source
         if budget == long_ms and budget > normal:
             # a slow but readable app on a still screen: the long budget is this read's own
-            source = await self._long_read(timeout, bundle, normal)
+            source, silent = await self._long_read(timeout, bundle, normal)
             if source is not None:
                 self._note_long(source, began, tell=False)  # (the agent was told when the try made the first answer)
                 self.budget_app = _root_bundle(source) or bundle
                 return source
-            budget = normal  # (no answer in its time, or refused: counted as cut, and read as in 2.0.2)
+            if silent and bundle is not None:
+                # (CodeRabbit, PR #30) no answer in its time: the runner may still be reading it ("a request that timed
+                # out keeps running"), and a read sent now would queue behind it, get no answer either, be asked again
+                # and drop the line. Answered here as a cut read, the runner asked nothing more
+                return self._root_here(bundle, LONG_SILENT_WHY.format(bundle=bundle))
+            budget = normal  # (refused or unreadable: counted as cut, and read as in 2.0.2)
             mark = None
             timeout = max(0.1, timeout - (time.monotonic() - began))  # (re-check R203b L-b: what is left of it)
             began = time.monotonic()
@@ -1080,12 +1092,14 @@ class Session:
             # answers: 2.0.2's cost there), and not while the app is blocked (ReadBudget.long_try)
             tier, why, compact = self.last_tier, self.last_why, self.last_compact
             began_long = time.monotonic()
-            longer = await self._long_read(timeout - (time.monotonic() - began), app, normal)
-            if longer is not None:
+            longer, _ = await self._long_read(timeout - (time.monotonic() - began), app, normal)
+            if longer is not None and _TIER_RANK.get(self.last_tier, 0) > _TIER_RANK.get(tier, 0):
                 source, named = longer, _root_bundle(longer)
                 self._note_long(source, began_long)
             else:
-                # no answer in its time, refused or unreadable: the normal read's cut answer stands
+                # no answer in its time, refused, unreadable, or no more than the normal read gave (CodeRabbit, PR #30:
+                # a long root after a shallow normal read lost the elements a wait_for had found): the normal read's
+                # answer stands; the long read's block stays (answered, or long_sent)
                 self.last_tier, self.last_why, self.last_compact = tier, why, compact
         if source is not None:
             self.budget_app = named or bundle
@@ -1122,22 +1136,23 @@ class Session:
                 f"trace no long try: {left:.1f} s left after the stillness check, a long read needs {long_wait:.0f} s")
         return False
 
-    async def _long_read(self, timeout: float, app: str | None, normal: int) -> str | None:
+    async def _long_read(self, timeout: float, app: str | None, normal: int) -> tuple[str | None, bool]:
         """(2.0.3) One read of `app` with the long budget, by TAPWRIGHT_TREE_LONG_PATH (TAPWRIGHT_TREE_PATH forces
         every read). The app is blocked from the moment it goes out (ReadBudget.long_sent): only a whole answer lifts
-        that. None (counted as a cut read: the block stays) when it got no answer in its time, was refused, or couldn't
-        be used; a dropped line is raised as from any read."""
+        that. (the answer, or None, counted as a cut read: the block stays, when it got no answer in its time, was
+        refused, or couldn't be used; whether it got no answer: the runner may still be reading it). A dropped line is
+        raised as from any read."""
         long_ms = self.budgets.long_ms
         self.budgets.tried(app)
         self.budgets.long_sent(app)
         forced = TREE_PATH_FORCED if TREE_PATH_FORCED in ("direct", "xctest", "lean") else None
         path = tree_path(long_ms, normal) if forced else LONG_PATH
         try:
-            return await self._compact_tree(timeout, budget_ms=long_ms, budget_for=app, read_path=path)
+            return await self._compact_tree(timeout, budget_ms=long_ms, budget_for=app, read_path=path), False
         except Unanswered as e:
             getattr(self.device, "log", lambda *a: None)(
                 f"tree read with the long budget ({long_ms} ms) got no answer in its time: counted as cut ({e})")
-            return None
+            return None, True
 
     def _note_long(self, source: str, began: float, tell: bool = True) -> None:
         """A long read answered: when whole, a log line and (`tell`: the long try made the answer) the note for the call
@@ -1146,9 +1161,10 @@ class Session:
             return
         took = time.monotonic() - began
         if tell:
-            owner = READ_OWNER.get()
+            holder = READ_OWNER.get()
             # (review R203 L1) only the call whose own read it was hears it: a read of no call says nothing
-            self.slow_note = (owner, LONG_NOTE.format(seconds=max(1.0, took))) if owner is not None else None
+            if holder is not None:
+                holder.append(LONG_NOTE.format(seconds=max(1.0, took)))
         getattr(self.device, "log", lambda *a: None)(
             f"tree read whole with the long budget ({self.budgets.long_ms} ms) in {took:.1f} s: "
             f"{_root_bundle(source) or self.budget_app} reads slowly")
@@ -1164,14 +1180,10 @@ class Session:
         across = self.still_across
         return across is not None and bool(await across(mark))
 
-    def take_slow_note(self, owner: object | None = None) -> str | None:
-        """(2.0.3) The note that a long read made this call's answer (LONG_NOTE), once, for the call `owner` whose
-        read it was (READ_OWNER): None for any other."""
-        held = self.slow_note
-        if held is None or owner is None or held[0] is not owner:
-            return None
-        self.slow_note = None
-        return held[1]
+    def take_slow_note(self, owner: list[str] | None = None) -> str | None:
+        """(2.0.3) The note that a long read made this call's answer (LONG_NOTE), once, from the call's own holder
+        `owner` (READ_OWNER)."""
+        return owner.pop(0) if isinstance(owner, list) and owner else None
 
     async def _unasked_root(self, bundle: str) -> str | None:
         """(2.0, worker H) The `root` answer a read of `bundle` would get, made here without asking the runner for the
@@ -1192,16 +1204,21 @@ class Session:
             # (CodeRabbit, PR #26) turned over from one landscape side to the other, the screen keeps its shape: the
             # side is asked again as a real read asks it, else a hands touch goes to the opposite part of the screen
             await self._ask_turn()
+        age = self.budgets.tried_ago(bundle) or 0.0
+        return self._root_here(bundle, UNASKED_WHY.format(bundle=bundle, age=age), front[1])
+
+    def _root_here(self, bundle: str, why: str, pid: int | None = None) -> str:
+        """The `root` answer a read of `bundle` would get, made here (the application node, the screen in points), with
+        `why` as the read's reason: for a read left unasked, or a long read that got no answer (2.0.3)."""
         node: dict = {"t": "Application", "r": [0, 0, self.screen[0], self.screen[1]], "b": bundle}
-        if front[1] is not None:
-            node["pid"] = front[1]
+        if pid is not None:
+            node["pid"] = pid
         label = self.read_app[0] if isinstance(self.read_app, tuple) and self.read_app[1] == bundle else \
             self.app_names.get(bundle)
         if label and label != bundle:
             node["l"] = label
         source = self._made_root = ui.xml_of_tree(node)
-        age = self.budgets.tried_ago(bundle) or 0.0
-        self.last_tier, self.last_why = "root", UNASKED_WHY.format(bundle=bundle, age=age)
+        self.last_tier, self.last_why = "root", why
         self.last_compact = None  # (a cut-short tree is never the "unchanged" baseline)
         self.budget_app = bundle
         if TRACE and not QUIET.get():

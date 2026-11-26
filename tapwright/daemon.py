@@ -497,6 +497,10 @@ class StillMark:
     frame, fresh then, and whether stillness up to it was proven then (else it is proven after a cut answer)."""
     frame: Frame
     proven: bool
+    # (CodeRabbit, PR #30) the frames and their pace as the read began, for a proof made after it: the video source
+    # sends frames during a read, and a 3 s read outlasts the hub's 64 (the mark's own frame was gone)
+    frames: "tuple[tuple[float, Frame], ...]" = ()
+    gap: float | None = None
 
 
 def _unlike_box(x: "Image.Image", y: "Image.Image") -> tuple[int, int, int, int] | None:
@@ -4052,7 +4056,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         granted: list[bool] = []
         grant_token, scope_token = _GRANTED.set(granted), _SCOPE.set(scope)
         caller_token = _CALLER.set(client_id)
-        owner = object()  # (2.0.3) the reads of this call: their "took long" note is this answer's only (R203 L1)
+        owner: list[str] = []  # (2.0.3) the reads of this call put their "took long" note here, for this answer only
         owner_token = session_module.READ_OWNER.set(owner)
         said = _GRANT_CALL.get()  # (one made for this call's log line; a nested call's own otherwise)
         own_grants = said is None or said.taken
@@ -7501,7 +7505,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return min(room, session_module.read_wait(budgets.normal_ms) +
                    session_module.read_wait(budgets.long_ms, long=True))
 
-    def _take_slow_note(self, owner: object) -> str | None:
+    def _take_slow_note(self, owner: list[str]) -> str | None:
         """(2.0.3) Session.take_slow_note: once, the note that a read of this call (`owner`, READ_OWNER) took the long
         budget to answer whole."""
         take = getattr(self.session, "take_slow_note", None)
@@ -9575,10 +9579,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         feeding = getattr(getattr(self, "_feeder", None), "feeding", False)
         if getattr(self.pump, "viewers", 0) <= 0 and not feeding:
             return "no stream is open"
-        if latest is not None and latest.seq == self._stream_wait_failed:
+        seq = latest.seq if latest is not None else 0  # (CodeRabbit, PR #30: 0 before the first frame, as recorded)
+        if seq == self._stream_wait_failed:
             return "the stream has sent nothing since the last wait for it"
         loop = asyncio.get_running_loop()
-        began, seq, got = loop.time(), (latest.seq if latest is not None else 0), 0
+        began, got = loop.time(), 0
         while not (got >= 2 and self._frame_fresh()):
             left = STREAM_WAIT - (loop.time() - began)
             frame = await self.hub.next_after(seq, left) if left > 0 else None
@@ -9604,7 +9609,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if prove and not self._still_upto(latest.seq):
                 self._trace_not_still_before("frames differ", latest.seq)
                 return None
-            return StillMark(latest, prove)
+            return StillMark(latest, prove, tuple(self.hub.recent()), self.hub.gap())
         except Exception as e:  # noqa: BLE001 - a picture that can't be compared proves nothing
             self._trace_not_still_before(f"{type(e).__name__}")
             return None
@@ -9625,7 +9630,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return False
         if not mark.proven:
             try:
-                before = self._still_upto(mark.frame.seq)
+                before = bool(mark.gap) and bool(mark.frames) and \
+                    self._still_window(list(mark.frames), mark.gap)  # type: ignore[arg-type]
             except Exception:  # noqa: BLE001 - as above
                 before = False
             if not before:

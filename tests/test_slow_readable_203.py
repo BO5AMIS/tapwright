@@ -40,6 +40,17 @@ def state(monkeypatch):
     # (no frame after a read: not a whole second here; raising=False: the file also runs against ee2b930)
     monkeypatch.setattr(daemon_module, "STILL_AFTER_READ", 0.05, raising=False)
     monkeypatch.setattr(daemon_module, "STREAM_WAIT", 0.05, raising=False)
+    # (CodeRabbit, PR #30) what the environment may set at import: the defaults, whatever the shell running pytest has
+    monkeypatch.setattr(session_module, "LONG_PATH", "xctest", raising=False)
+    monkeypatch.setattr(session_module, "TREE_PATH_FORCED", "")
+    monkeypatch.setattr(session_module, "TREE_ATTRS", "lean")
+    monkeypatch.setattr(daemon_module, "STILL_BOX", 0.35, raising=False)
+
+
+def budget(**kw) -> ReadBudget:
+    """A ReadBudget with 3000 / 8000 ms whatever TAPWRIGHT_TREE_BUDGET and TAPWRIGHT_TREE_LONG_BUDGET say (its defaults
+    are read at import)."""
+    return ReadBudget(**{"normal_ms": 3000, "short_ms": 1500, "long_ms": 8000, **kw})
 
 
 def run(go):
@@ -65,6 +76,7 @@ class Stream:
         self.pending: bytes | None = None  # the picture the stream comes back with after the newest read
         self.reopens = True
         self.read_last = False  # (a read came after the newest idle frames: what follows it is `pending`, if anything)
+        self.during: bytes | None = None  # (the video source) a frame every GAP while the runner reads
         self.d.pump.viewers = 1  # (as run_tool's `pump.watching()`)
         real = self.d.hub.next_after
 
@@ -93,7 +105,12 @@ class Stream:
             self.d.hub.publish(pictures[n % len(pictures)] if pictures else self.picture)
 
     def reading(self, seconds: float) -> None:
-        self.now[0] += seconds
+        if self.during is not None:
+            for _ in range(round(seconds / self.GAP)):
+                self.now[0] += self.GAP
+                self.d.hub.publish(self.during)
+        else:
+            self.now[0] += seconds
         self.pending, self.read_last = self.after, True
 
     def attach(self, s: Session) -> None:
@@ -116,6 +133,7 @@ class ShopRunner(V9Runner):
         self.timeouts: list[tuple[int | None, float]] = []
         self.raise_for: dict[int, Exception] = {}
         self.hold: set[int] = set()
+        self.held = asyncio.Event()  # set when a read of `hold` went out
         self.long_at: list[float] = []
 
     async def http(self, method, path, payload=None, timeout=30.0):
@@ -131,6 +149,7 @@ class ShopRunner(V9Runner):
             if ms == 8000:
                 self.long_at.append(self.stream.clock())
             if ms in self.hold:
+                self.held.set()
                 await asyncio.Event().wait()
             self.stream.reading(TOOK.get(ms or 0, 0.2))
             if ms in self.raise_for:
@@ -145,7 +164,7 @@ class ShopRunner(V9Runner):
 def shop(stream: Stream, runner=None, long_ms=8000, app=("Shop", SHOP)):
     runner = runner or ShopRunner(stream)
     s = Session(runner)
-    s.budgets = ReadBudget(clock=stream.clock, long_ms=long_ms)
+    s.budgets = budget(clock=stream.clock, long_ms=long_ms)
     s.read_app = app
     stream.attach(s)
     return s, runner
@@ -218,7 +237,7 @@ def test_a_playing_feed_asks_what_2_0_2_asked(state):
     clock = [100.0]
     runner = _v11()
     s = Session(runner)
-    s.budgets = ReadBudget(clock=lambda: clock[0])
+    s.budgets = budget(clock=lambda: clock[0])
     s.read_app = ("TikTok", TIKTOK)
     async def never(prove: bool) -> None:  # (the stream never proves it still)
         return None
@@ -256,7 +275,9 @@ def test_a_slow_apps_moving_screen_gets_2_0_2s_rules_and_keeps_the_mark(state):
         runner.answers = {}  # an autoplay page of the same app: nothing answers in time
         await look(s, stream, moving=True)
         await look(s, stream, moving=True)
-        assert runner.budgets() == [3000, 8000, 3000, 1500]  # no 8 s for a moving screen (review R203 M1)
+        # no 8 s for a moving screen (review R203 M1), and 2.0.2's short budget at once: the whole long read was fast
+        # (a warm read), which keeps the normal read's cut for moving screens (CodeRabbit, PR #30; 3000 before)
+        assert runner.budgets() == [3000, 8000, 1500, 1500]
         assert s.budgets.slow(SHOP)
         runner.answers = {3000: CUT, 8000: WHOLE}  # back on the home screen, still: its long budget at once
         stream.now[0] += 1.0
@@ -341,11 +362,16 @@ def test_a_cancelled_long_read_keeps_the_block(state):
         s, runner = shop(stream)
         runner.hold.add(8000)
         task = asyncio.create_task(look(s, stream))
-        while runner.budgets() != [3000, 8000]:
-            await asyncio.sleep(0.01)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        held = asyncio.create_task(runner.held.wait())
+        try:
+            # (CodeRabbit, PR #30) bounded: a look that never sends the long read ends the test, not hangs it
+            done, _ = await asyncio.wait({task, held}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+            assert held in done and task not in done, runner.budgets()
+        finally:
+            for t in (task, held):
+                t.cancel()
+            results = await asyncio.gather(task, held, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError) and runner.budgets() == [3000, 8000]
         assert s.budgets.blocked(SHOP)
     run(go)
 
@@ -394,8 +420,9 @@ def test_a_caller_that_cant_wait_for_a_long_read_gets_none(state):
         assert runner.budgets() == [3000] and not s.budgets.blocked(SHOP)
         await look(s, stream, timeout=60.0)
         assert s.budgets.slow(SHOP)
-        await look(s, stream, timeout=5.0)  # (wait_for's usual cap) a slow app's read planned as in 2.0.2
-        assert runner.budgets()[-1] == 3000 and s.budgets.slow(SHOP)  # (a cut normal read doesn't end it)
+        await look(s, stream, timeout=5.0)  # (wait_for's usual cap) a slow app's read planned as in 2.0.2: the
+        # normal read's cut is fresh (the whole long reads were fast), so the short budget
+        assert runner.budgets()[-1] == 1500 and s.budgets.slow(SHOP)  # (a cut short read doesn't end it)
     run(go)
 
 
@@ -420,11 +447,10 @@ def test_the_long_budget_and_its_path_are_read_from_the_environment(monkeypatch)
         monkeypatch.setenv("TAPWRIGHT_TREE_LONG_BUDGET", raw)
         assert session_module._env_ms_or_off("TAPWRIGHT_TREE_LONG_BUDGET", 8000) == want, raw
     for long_ms in (0, 2000, 3000):  # off, and not above the normal budget: off too
-        assert not ReadBudget(long_ms=long_ms).long_on
+        assert not budget(long_ms=long_ms).long_on
     for raw, want in (("direct", "direct"), (" Direct ", "direct"), ("xctest", "xctest"), ("", "xctest"),
                       ("lean", "xctest")):
         assert session_module._long_path_of(raw) == want, raw
-    assert session_module.LONG_PATH == "xctest"  # (the default)
 
 
 @pytest.mark.parametrize("long_ms", [0, 2500])
@@ -434,7 +460,7 @@ def test_with_the_long_budget_off_a_still_slow_screen_reads_as_in_2_0_2(state, l
         s, runner = shop(stream, long_ms=long_ms)
         tree = await look(s, stream)
         await look(s, stream, moving=True)
-        assert runner.budgets() == [3000, 1500] and tree.tier == "root" and s.slow_note is None
+        assert runner.budgets() == [3000, 1500] and tree.tier == "root"
     run(go)
 
 
@@ -466,11 +492,11 @@ def test_a_quick_cut_is_asked_again_within_its_own_budget_and_is_not_the_long_tr
 def test_wait_for_gives_its_reads_the_long_budget_only_when_its_deadline_has_room():
     d = make(DescribingSession())
     assert d._wait_for_read_cap(30.0) == daemon_module.WAIT_FOR_READ_MAX  # (a fake session: no ReadBudget)
-    d.session.budgets = ReadBudget()
+    d.session.budgets = budget()
     assert d._wait_for_read_cap(10.0) == daemon_module.WAIT_FOR_READ_MAX  # (the default timeout: never a long read)
     assert d._wait_for_read_cap(13.4) == daemon_module.WAIT_FOR_READ_MAX  # (13 s and the margin don't fit)
     assert d._wait_for_read_cap(13.5) == 13.0 and d._wait_for_read_cap(60.0) == 8.0 + 13.0
-    d.session.budgets = ReadBudget(long_ms=0)
+    d.session.budgets = budget(long_ms=0)
     assert d._wait_for_read_cap(60.0) == daemon_module.WAIT_FOR_READ_MAX  # off: 2.0.2's cap
 
 
@@ -481,7 +507,7 @@ def test_wait_for_decides_its_reads_time_once_the_turn_is_taken(budgets, timeout
     async def go():
         s = DescribingSession()
         if budgets is not None:
-            s.budgets = ReadBudget(long_ms=budgets)
+            s.budgets = budget(long_ms=budgets)
         d = make(s)
         stop, task = await started(d)
         s.read_timeouts.clear()
@@ -500,29 +526,45 @@ def test_wait_for_decides_its_reads_time_once_the_turn_is_taken(budgets, timeout
 
 # ---- the note (review R203 L1) ----
 
+async def _looked_for(s: Session, stream: Stream, holder: list[str], **kw):
+    """A look made by the call whose note holder (READ_OWNER) is `holder`."""
+    token = session_module.READ_OWNER.set(holder)
+    try:
+        return await look(s, stream, **kw)
+    finally:
+        session_module.READ_OWNER.reset(token)
+
+
 def test_the_note_is_for_the_call_whose_read_made_it_and_is_said_once(state):
     async def go():
         stream = Stream()
         s, runner = shop(stream)
-        mine, other = object(), object()
-        token = session_module.READ_OWNER.set(mine)
-        try:
-            await look(s, stream)
-        finally:
-            session_module.READ_OWNER.reset(token)
-        assert s.take_slow_note(other) is None and s.take_slow_note(None) is None
+        mine: list[str] = []
+        await _looked_for(s, stream, mine)
+        assert s.take_slow_note([]) is None and s.take_slow_note(None) is None
         note = s.take_slow_note(mine)
         assert note is not None and "took about" in note and "elements are listed" in note
         assert s.take_slow_note(mine) is None
-        token = session_module.READ_OWNER.set(mine)
-        try:
-            await look(s, stream)  # a warm read with the long budget: no note
-        finally:
-            session_module.READ_OWNER.reset(token)
-        assert s.take_slow_note(mine) is None
-        s.budgets = ReadBudget(clock=stream.clock)
-        await look(s, stream)  # a read of no call (the live view's): its note is dropped
-        assert s.slow_note is None
+        await _looked_for(s, stream, mine)  # a warm read with the long budget: no note
+        assert mine == []
+        s.budgets = budget(clock=stream.clock)
+        await look(s, stream)  # a read of no call (the live view's): no note anywhere
+        assert mine == [] and not hasattr(s, "slow_note")
+    run(go)
+
+
+def test_two_calls_that_overlap_each_keep_their_note(state):
+    # (CodeRabbit, PR #30) call A's long try answered; before A built its answer, call B's did too. With one slot in
+    # the session, B's note replaced A's and A's answer said nothing
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream)
+        a: list[str] = []
+        b: list[str] = []
+        await _looked_for(s, stream, a)
+        s.budgets = budget(clock=stream.clock)  # (another app's first look, for B)
+        await _looked_for(s, stream, b)
+        assert s.take_slow_note(a) is not None and s.take_slow_note(b) is not None
     run(go)
 
 
@@ -531,14 +573,14 @@ class NotingSession(DescribingSession):
 
     def __init__(self):
         super().__init__()
-        self.slow_note = None
         self.note_next = False
 
     async def look(self, screenshot=True):
         if self.note_next:
             self.note_next = False
-            owner = session_module.READ_OWNER.get()
-            self.slow_note = (owner, session_module.LONG_NOTE.format(seconds=4.1)) if owner is not None else None
+            holder = session_module.READ_OWNER.get()
+            if holder is not None:
+                holder.append(session_module.LONG_NOTE.format(seconds=4.1))
         return await super().look(screenshot)
 
     take_slow_note = Session.take_slow_note
@@ -553,13 +595,11 @@ def test_the_daemon_adds_the_note_to_the_answer_of_the_call_whose_read_made_it()
         mine = await d.run_tool("a", "look", {"screenshot": False})
         theirs = await d.run_tool("b", "look", {"screenshot": False})
         again = await d.run_tool("a", "look", {"screenshot": False})
-        s.slow_note = (object(), "a note of another call")  # made by a call that never took it
-        later = await d.run_tool("b", "look", {"screenshot": False})
         await finish(stop, task)
-        return mine["text"], theirs["text"], again["text"], later["text"]
-    mine, theirs, again, later = run(go)
+        return mine["text"], theirs["text"], again["text"]
+    mine, theirs, again = run(go)
     assert mine.count("Note: this screen took about 4 s to read") == 1
-    assert "took about" not in theirs and "took about" not in again and "another call" not in later
+    assert "took about" not in theirs and "took about" not in again
 
 
 # ---- re-check R203b N1: an unchanged answer to a long read is a whole one ----
@@ -765,4 +805,97 @@ def test_every_reason_for_no_long_try_is_in_the_trace(state, monkeypatch, case, 
             await look(s, stream, timeout=12.0 if case == "time" else 60.0)
         assert 8000 not in runner.budgets()
         assert any(want in line for line in lines), lines
+    run(go)
+
+
+# ---- CodeRabbit, PR #30 ----
+
+SHALLOW = {"token": "s", "tree": _app(SHOP, "Shop", [ITEM]), "tier": "shallow", "truncated": True,
+           "why": "full: kAXErrorIPCTimeout (after 1800 ms)"}
+
+
+def test_a_long_try_that_reads_less_keeps_the_normal_reads_tree(state):
+    # (4709753259) the normal read gave part of the tree, with the element a wait_for looks for; the long try only the
+    # root: the root replaced the part, and the element was gone
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream, ShopRunner(stream, answers={3000: SHALLOW, 8000: CUT}))
+        tree = await look(s, stream)
+        assert runner.budgets() == [3000, 8000]
+        assert tree.tier == "shallow" and [e.label for e in tree.items] == ["Deal of the day"]
+        assert s.last_tier == "shallow" and s.budgets.blocked(SHOP)  # (the long read's block stays)
+    run(go)
+
+
+def test_a_slow_apps_long_read_that_gets_no_answer_sends_nothing_after_it(state):
+    # (4709753249) its fallback read queued behind the long read the runner was still reading, got no answer either,
+    # was asked again, and the line was taken for dropped
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream)
+        await look(s, stream)  # 3000 cut, 8000 whole: slow but readable
+        runner.raise_for[8000] = ConnectionLost("WebDriverAgent didn't answer GET /wda/tw/tree within 13 s")
+        stream.now[0] += 1.0
+        tree = await look(s, stream)
+        assert runner.budgets() == [3000, 8000, 8000]  # (no 3000 after the silent 8000)
+        assert tree.tier == "root" and tree.app == ("Shop", SHOP) and s.sid == "S"
+        assert s.last_why.startswith("not read: a read of com.example.shop with the long budget got no answer")
+        assert s.budgets.blocked(SHOP)
+    run(go)
+
+
+def test_a_banners_reread_gets_what_is_left_of_the_reads_time(state, monkeypatch):
+    # (4709753183) each reread was given the whole time again
+    monkeypatch.setattr(session_module, "BANNER_POLL", 0.01)
+
+    async def go():
+        s = Session(V9Runner())
+        timeouts: list[float] = []
+        banners = [True]  # (a banner at the first read, then none)
+
+        async def read_tree(timeout, center=False):
+            timeouts.append(timeout)
+            await asyncio.sleep(0.2)
+            return "<XCUIElementTypeApplication/>"
+
+        async def banner(source):
+            return banners.pop() if banners else False
+
+        async def nothing(source):
+            return None
+        s._read_tree, s._banner_over_an_app, s._follow_orientation = read_tree, banner, nothing
+        await s._source(10.0)
+        assert timeouts[0] == 10.0 and timeouts[1] < 10.0 - 0.2
+    run(go)
+
+
+def test_a_stream_that_never_sent_a_frame_is_waited_for_once(state):
+    # (4709753195) with no frame at all the failed wait was recorded as 0 and never matched: every read waited again
+    async def go():
+        stream = Stream()
+        stream.reopens = False
+        waits = []
+        real = stream.d.hub.next_after
+
+        async def counted(seq, timeout=None):
+            waits.append(timeout)
+            return await real(seq, timeout)
+        stream.d.hub.next_after = counted
+        first = await stream.d._stream_ready()
+        second = await stream.d._stream_ready()
+        assert len(waits) == 1 and "waited" in first and "sent nothing since the last wait" in second
+        stream.idle(0.5)  # a frame came: a wait may be made again later
+        assert await stream.d._stream_ready() == ""
+    run(go)
+
+
+def test_frames_during_the_read_dont_undo_the_proof_from_before_it(state):
+    # (4709753203) the video source sends frames while the runner reads: a 2.8 s read at 25 fps outlasts the hub's 64
+    # frames, the mark's frame was gone, and the screen was taken for not still before the read
+    async def go():
+        stream = Stream()
+        stream.during = b"A"
+        s, runner = shop(stream)
+        await look(s, stream)
+        assert runner.budgets() == [3000, 8000]
     run(go)
