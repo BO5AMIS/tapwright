@@ -723,7 +723,7 @@ class Session:
         self.screen_still: Callable[[], bool] | None = None
         self.budget_app: str | None = None  # the app the newest bounded read was budgeted for or named (L2)
         # (2.0.3) the picture across a read, from the daemon's stream: `still_mark` before the read ((the newest frame,
-        # fresh, kept, or None; with `check`, whether the two newest frames say something plays)), `still_across` after
+        # fresh, kept, or None; with `check`, whether something plays (Daemon._plays))), `still_across` after
         # a cut read (may the long try go out: did a fresh frame change no more than STILL_BOX from the kept one?). The
         # runner sends no frames while it reads (review R203 H1). Without them (no daemon) no long read is made.
         self.still_mark: Callable[[bool], Awaitable[tuple[object | None, bool]]] | None = None
@@ -1066,7 +1066,7 @@ class Session:
         bundle_long = self.budgets.long_on and timeout >= long_wait and (
             bundle is None or slow or self.budgets.long_try(bundle))
         # (the lead, after the phone test) the newest frame is kept, to compare with the frame after a cut read; a slow
-        # app's planned long read is given up only when the two newest frames before it say something plays
+        # app's planned long read is given up only when something plays (Daemon._plays: the picture a second ago)
         mark, plays = await self._still_mark(check=slow) if bundle_long else (None, False)
         long_ok = slow and not plays and self.still_mark is not None and \
             timeout - (time.monotonic() - began) >= long_wait
@@ -1202,7 +1202,7 @@ class Session:
 
     async def _still_mark(self, check: bool) -> tuple[object | None, bool]:
         """(2.0.3) The daemon's still_mark: (the newest frame, fresh, kept before the read, or None; with `check`,
-        whether its two newest frames say something plays). Without the daemon: (None, False)."""
+        whether something plays: Daemon._plays). Without the daemon: (None, False)."""
         mark = self.still_mark
         return await mark(check) if mark is not None else (None, False)
 

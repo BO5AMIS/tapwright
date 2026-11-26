@@ -565,8 +565,8 @@ def _still_box_of(raw: str) -> float:
 # (2.0.3, the lead's decision after the phone test) the long try goes out after a cut normal read unless the picture
 # changed across the read inside a box of more than this share of the compared picture (unlike_share): a playing feed
 # changes all of it, while a heavy home screen's banner moved on over 36 % of it during a read (phone, 2026-11-26), and a
-# spinner of 21 x 5 thumb pixels changed before it. The same share between the two newest frames before a slow app's
-# planned long read gives that read 2.0.2's rules. 0: any change (above the stream's tolerance, outside the left-out
+# spinner of 21 x 5 thumb pixels changed before it. The same share between the newest frame and another picture at
+# least a second older, before a slow app's planned long read, gives that read 2.0.2's rules (_plays). 0: any change (above the stream's tolerance, outside the left-out
 # strips) stops the try; 1: nothing does. For measuring.
 STILL_BOX = _still_box_of(os.environ.get("TAPWRIGHT_STILL_BOX", ""))
 WAIT_FOR_LONG_MARGIN = 0.5  # (2.0.3) seconds of `wait_for`'s deadline a long read leaves unused (its clock is not ours)
@@ -9607,8 +9607,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     async def _still_mark(self, check: bool = False) -> "tuple[StillMark | None, bool]":
         """(2.0.3) Session.still_mark, before a read that could lead to a long one: (the newest frame, when fresh, kept to
         be compared with the frame after the read (_still_across), else None; whether the screen plays: `check` (a slow
-        app's planned long read) and its two newest frames differ inside a box of more than STILL_BOX). Too few frames
-        to tell: it doesn't. No stillness is asked of the screen before the read any more (the lead, after the phone
+        app's planned long read) and _plays says so). A picture that can't be judged: (StillMark(None), True), a
+        video. No stillness is asked of the screen before the read any more (the lead, after the phone
         test: a 21 x 5 thumb-pixel spinner stopped the try on the screen it was made for)."""
         try:
             waited = await self._stream_ready()

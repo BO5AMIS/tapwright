@@ -13,27 +13,31 @@
     (`TAPWRIGHT_STILL_BOX`; the status bar and the screen's edge strips are left out): a playing feed changes all of
     it, while on the phone the heavy home screen's banner moved on over 36 % of it during a read, and a spinner changed
     before it. Nothing is asked of the screen before the read. When no fresh picture comes within 1 s of the answer,
-    or none was kept before the read, the 8 s read goes out. Whole, it is the answer, with one note that the screen
-    took long to read;
-  - that app's next reads are given 8 s, never 1.5 s and never left unasked, unless its two newest pictures before the
-    read differ by more than that box (something plays there: then 2.0.2's rules, and the app keeps its 8 s for its
-    next screen). A warm read still takes what it takes (0.4-0.7 s);
+    or none was kept before the read (a stalled stream, or one that is opening again), the 8 s read goes out; when the
+    pictures can't be compared, it doesn't (counted as a video). Nor for an app the read can't name (no block could
+    count it). Whole, it is the answer, with one note that the screen took long to read;
+  - that app's next reads are given 8 s, never 1.5 s and never left unasked, unless its newest picture differs by more
+    than that box from another picture at least 1 s older (something plays there: then 2.0.2's rules, and the app keeps
+    its 8 s for its next screen). A warm read still takes what it takes (0.4-0.7 s);
   - an 8 s read that is cut, or gets no answer, is never asked again (one the runner gave up within its first quarter,
     with nothing to answer yet, is asked again within what is left of the 8 s, as any read is), and blocks that app's
-    next 8 s read: for an app that never read whole with 8 s, 5 minutes, then 10, 20, 40 and so on for each such read
-    in a row, up to 6 hours; for an app that has, 1 minute, so one screen of it doesn't leave its readable ones unread.
-    A whole 8 s read ends it. The 2.0.2 rules apply meanwhile. The block holds across a reconnect to the phone (a
-    service restart starts afresh);
-  - a screen whose picture changes by more than the box across the read is read exactly as in 2.0.2;
+    next 8 s read, for longer each time in a row: for an app that never read whole with 8 s, 5 minutes, then 10, 20,
+    40 and so on; for an app that has, 1 minute, then 2, 4, 8 and so on (so one screen of it doesn't leave its readable
+    ones unread for long); up to 6 hours either way. A whole 8 s read ends it. The 2.0.2 rules apply meanwhile. The
+    block holds across a reconnect to the phone (a service restart starts afresh);
+  - a screen whose picture changes by more than the box across the read gets the same reads as in 2.0.2, plus a wait
+    of up to 1 s (about 0.3 s on the phone) for one fresh picture after each cut 3 s read;
   - a look that comes while the picture stream is opening again (it closes 30 s after the last call) waits up to
     1.5 s for its frames, so there is a picture to compare;
   - `TAPWRIGHT_TREE_LONG_PATH=direct` sends the 8 s read the direct way instead of XCTest's (for measuring).
   What it costs: the first look at such a screen takes 3 + 3.5-7.3 s instead of 3 s, once. After every cut 3 s read
   of an app that isn't blocked, the answer waits for one fresh picture (about 0.3 s on the phone, at most 1 s). A feed
-  can now cost an 8 s read too, when its picture happens to change little across a read (a paused video, a photo
-  post, a moment between two videos): one 8 s read, then none for 5 minutes, then 10, 20 minutes and so on while it
-  keeps not answering. In an app that has read whole with 8 s before, a screen that never answers costs one 8 s read
-  at most every minute, and up to 13 s when it gets no answer. While a long read runs, the phone's runner answers
+  can now cost 8 s reads too, when its picture happens to change little across a read (a paused video, a photo post,
+  a moment between two videos) or no fresh picture comes (a stalled stream). Each costs 8 s, up to 13 s when it gets
+  no answer. At worst, on a screen that never answers: in an app that never read whole with 8 s, 4 in the first hour
+  (at 0, 5, 15 and 35 minutes), then about one an hour, then fewer, down to one every 6 hours; in an app that has, 6
+  in the first hour (at 0, 1, 3, 7, 15 and 31 minutes), then about one an hour, then fewer, down to one every 6
+  hours. Each app pays this on its own. While a long read runs, the phone's runner answers
   nothing else: the live view's picture stands still for up to its time (the stream may reopen), and a person's touch
   waits for it. `wait_for` uses 8 s only when its own time left covers the read and 5 s more, so not with its default
   10 s timeout.

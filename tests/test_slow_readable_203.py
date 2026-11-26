@@ -1,10 +1,12 @@
 """Tapwright 2.0.3: a screen that is slow to read but does read. A shopping app's home screen (about 1,000 elements)
 reads whole every time in 3.5-7.3 s cold, never within the normal budget (3 s): it answered "0 elements" for as long as
 the agent stayed. A cut normal read is asked once more with the long budget (8 s) unless the picture changed across the
-read inside a box of more than STILL_BOX (0.6) of it; an app whose long read came back whole keeps it unless its two
-newest frames say something plays; every long read blocks the next one until a whole answer lifts that (5 minutes,
-doubling each time in a row up to 6 hours; 1 minute for an app that read whole before), through reconnects. A screen
-whose picture changes by more than the box across the read costs exactly what it cost in 2.0.2.
+read inside a box of more than STILL_BOX (0.6) of it; an app whose long read came back whole keeps it unless its newest
+frame and another picture a second older say something plays; every long read blocks the next one until a whole answer
+lifts that (from 5 minutes, or 1 for an app that read whole before, doubling each time in a row up to 6 hours), through
+reconnects. A screen whose picture changes by more than the box across the read gets the same reads as in 2.0.2, plus
+a wait for one fresh frame after each cut normal read (here at no cost on the clock, so that the comparison holds; one
+test puts the wait on the clock).
 
 Stillness comes from a fake stream on the daemon's own hub and checks (Stream): like the runner's MJPEG it sends a frame
 every GAP seconds while the runner isn't reading and none while it reads, so the newest frame ages by the length of the
@@ -261,8 +263,8 @@ MOVING = [(0.0, False), (1.0, False), (8.0, False), (0.5, None), (30.0, False), 
 
 
 def test_a_playing_feed_asks_what_2_0_2_asked(state):
-    # (checked once against 2.0.2's own session.py, f9a229a, on this scenario and 200 random moving ones: the same
-    # requests; pinned here)
+    # (a session with no stream (no still_across): the path without the daemon. Pinned from 2.0.2's own session.py,
+    # f9a229a; the gate itself is compared with 2.0.2 in the tests below and in the one-off comparison of STATUS-O)
     clock = [100.0]
     runner = _v11()
     s = Session(runner)
