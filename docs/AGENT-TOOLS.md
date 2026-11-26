@@ -40,7 +40,7 @@ Taps, long presses, swipes, scrolls, drags, `pinch` and the buttons go from the 
 - It needs iOS 18 or later (proven on iOS 26) and pymobiledevice3 11.63 or later. On older iOS, and on iOS 27 until the display stream lands, touches go through the runner as before. `pinch` and `press_button lock` have no runner path: they answer `unsupported`, with nothing touched.
 - `TAPWRIGHT_HANDS=runner` sends every touch through the runner. `TAPWRIGHT_HANDS_LANDSCAPE=0` leaves landscape to the runner. `TAPWRIGHT_HUMAN=0` keeps swipes straight.
 - A touch that may have been sent is never sent again another way. If the link drops in the middle of a gesture the call answers `timeout` ("the action may have happened: look before you retry"); look first. For 5 s after a release that could not be sent, nothing is touched through the runner either.
-- `back`, `swipe`, taps and scrolls are quick and their answers wait for the screen to settle, so no `wait` after them. After a touch from the computer `No visible change.` is only said once the screen has stayed as it was for 0.8 s.
+- `back`, `swipe`, taps and scrolls are quick and their answers wait for the screen to settle, so no `wait` after them. After a touch from the computer `No visible change.` is only said once the screen has stayed as it was for 0.8 s; after a tap, long press or toggle aimed at an element that has an action (by ref, id, label or text), only once 1.5 s have passed since the touch (2.0.3: an app may start its navigation late). Its note says what was waited: look or `wait_for` next, and touch again only if the screen is still the same.
 
 ### Reads that are bounded
 

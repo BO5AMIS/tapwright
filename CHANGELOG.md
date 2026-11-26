@@ -82,6 +82,20 @@
   nothing else: the live view's picture stands still for up to its time (the stream may reopen), and a person's touch
   waits for it. `wait_for` uses 8 s only when its own time left covers the read and 5 s more, so not with its default
   10 s timeout.
+- A tap that worked is no longer answered "No visible change." because the app was slow to show it. In a read-only
+  sweep of a React Native app, two taps on buttons were answered "No visible change." after 0.38 s, and the look right
+  after showed the next screen: the app had started its navigation a few hundred ms later. Since 2.0 a tap takes about
+  0.1 s (3 s in 1.10, which hid this), and the settle believed an unchanged screen after about 0.3 s (0.8 s after a
+  touch from the computer). The note then said "try once more", so the next tap would have landed on the new screen.
+  Now a tap, long press or toggle aimed at an element that has an action (by ref, id, label or text) is answered
+  "No visible change." only once 1.5 s have passed since the touch with nothing changed; a change that starts within
+  them settles as before, and the answer shows the new screen. The same holds for the settle a `look: false` touch
+  leaves to the next call. The note now says what was waited and that a look or a `wait_for` comes next: "nothing on
+  screen changed within 1.5 s. The app may still be on its way: look, or wait_for what you expect, next; only if the
+  screen is still the same, try the touch again, ...". A point, an `o` ref, a picture text, an element with no action,
+  a scroll, a swipe or a drag keep their times, and so does an app whose screen never stands still (its 0.5 s cap).
+  What it costs: a touch on a button that does nothing now answers in about 1.5 s instead of 0.3 s (0.9 s with a touch
+  from the computer); a touch whose screen changes costs nothing more.
 
 ## 2.0.2
 
