@@ -577,6 +577,29 @@ def test_the_notifications_answer_says_when_the_center_was_read_in_part(tmp_path
     run(go)
 
 
+def test_opening_a_notification_past_a_center_read_in_part_isnt_told_absent(tmp_path):
+    # (CodeRabbit, PR #26) n20 may be among what the cut-short read left out: "isn't there" would be a guess
+    from test_notifications import BUNDLE, center_daemon
+    from tapwright.daemon import Scope
+    from tapwright import center_tool
+
+    async def go():
+        d, s = center_daemon(tmp_path, [])
+        s.center_tier = "shallow"
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "notifications", {"open": 20}, scope=Scope((BUNDLE,)))
+        said = str(e.value)
+        assert e.value.code == "not_found" and "isn't there" not in said and "couldn't be checked" in said
+        assert center_tool.CENTER_CUT in said and "nothing was opened" in said
+        s.center_tier = "full"
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "notifications", {"open": 20}, scope=Scope((BUNDLE,)))
+        assert "n20 isn't there" in str(e.value) and center_tool.CENTER_CUT not in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
 # ---- lead's addition 1: the runner's way of reading ----
 
 def test_the_read_path_follows_the_budget_unless_forced(monkeypatch):

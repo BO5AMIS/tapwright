@@ -337,6 +337,12 @@ class CenterTools:
         apps = "your apps" if given is not None else "the phone's apps"
         note = NOTE_ON_SCREEN.format(whose=whose)
         if n is not None:
+            if opened is None and getattr(self, "_center_cut", False):
+                # (CodeRabbit, PR #26) n may be among what the cut-short read left out: never told absent
+                raise Refused("not_found", f"{len(found)} notification{'' if len(found) == 1 else 's'} from {apps} "
+                                           f"{'was' if len(found) == 1 else 'were'} read, so n{n} couldn't be checked; "
+                                           f"nothing was opened. Call notifications to read the list again.\n"
+                                           f"Note: {CENTER_CUT}\nNote: {note}")
             if opened is None:
                 raise Refused("not_found", f"there {'is' if len(found) == 1 else 'are'} {len(found)} notification"
                                            f"{'' if len(found) == 1 else 's'} from {apps} now, so n{n} isn't "
