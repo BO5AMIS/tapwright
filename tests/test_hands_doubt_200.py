@@ -205,6 +205,44 @@ def test_a_new_tunnel_during_a_time_on_the_runner_starts_afresh():
     asyncio.run(go())
 
 
+def test_a_new_tunnel_after_touches_that_landed_has_no_history():
+    """(CodeRabbit, PR #29) Tunnel A landed a touch and was never doubted; the phone reconnected. Tunnel B, none of
+    whose touches lands, gives the connection tried after a time on the runner one touch, not three."""
+    async def go():
+        hands, wire, phone = make()
+        await tap(hands)
+        assert await hands.judged(True) is None and hands._landed
+        phone.rsd = type(phone.rsd)()
+        verdict = None
+        for _ in range(DOUBT_AFTER * 2):
+            await tap(hands)
+            verdict = await hands.judged(False)
+        assert verdict == "runner" and not hands._landed
+        hands._failed = (hands._failed[0], hands._failed[1], asyncio.get_running_loop().time() - 1.0)
+        await tap(hands)
+        assert await hands.judged(False) == "runner"  # one touch
+    asyncio.run(go())
+
+
+def test_a_verdict_for_a_connection_that_is_gone_is_dropped():
+    """(CodeRabbit, PR #29; review R202 L1) The verdict comes after the screen settled; another connection may be open
+    by then. What a touch of the old one did says nothing of the new one, for it or against it."""
+    async def go():
+        hands, wire, _ = make()
+        await tap(hands)
+        old = hands.connection
+        for _ in range(DOUBT_AFTER - 1):
+            assert await hands.judged(False, None, old) is None
+        async with hands._lock:
+            await hands._drop()
+        await tap(hands)  # a new connection
+        assert hands.connection == old + 1
+        assert await hands.judged(False, None, old) is None and hands._unchanged == 0  # not counted against the new one
+        assert await hands.judged(True, None, old) is None and not hands._proven  # nor does it prove it
+        assert await hands.judged(True, None, hands.connection) is None and hands._proven
+    asyncio.run(go())
+
+
 def test_nothing_is_judged_without_an_open_connection():
     async def go():
         hands, wire, _ = make()
@@ -214,10 +252,11 @@ def test_nothing_is_judged_without_an_open_connection():
 
 class Judge:
     def __init__(self):
-        self.heard, self.says = [], None
+        self.heard, self.says, self.connections = [], None, []
 
-    async def judged(self, changed, key=None):
+    async def judged(self, changed, key=None, connection=None):
         self.heard.append((changed, key))
+        self.connections.append(connection)
         return self.says if not changed else None
 
 
@@ -243,16 +282,23 @@ def test_the_answer_says_when_the_touch_connection_was_opened_again_and_when_the
         # (2.0.2) nor does a change after a scroll or a swipe prove them: the screen may have changed by itself
         for name in ("swipe", "scroll", "back"):
             assert await d._judge_hands(name, 10.0, LANDED) is None and judge.heard == [], name
+        d.session.hands_connection = 4
         assert await d._judge_hands("tap", 10.0, LANDED, row) is None  # an element's tap that landed does
-        assert judge.heard == [(True, ("tap", "label", "General", None))]
+        assert judge.heard == [(True, ("tap", "label", "General", 0))] and judge.connections == [4]
         judge.heard.clear()
         judge.says = "reopened"
         assert await d._judge_hands("tap", 10.0, UNCHANGED, row) == daemon_module.NOTE_HANDS_REOPENED
-        assert judge.heard == [(False, ("tap", "label", "General", None))]
+        # (CodeRabbit, PR #29) no index and index 0 name the same element: one key
+        first = daemon_module.ui.Target(label="General", index=0)
+        assert await d._judge_hands("tap", 10.0, UNCHANGED, first) == daemon_module.NOTE_HANDS_REOPENED
+        assert judge.heard == [(False, ("tap", "label", "General", 0))] * 2
+        second = daemon_module.ui.Target(label="General", index=1)
+        await d._judge_hands("tap", 10.0, UNCHANGED, second)
+        assert judge.heard[-1] == (False, ("tap", "label", "General", 1))
         judge.says = "runner"
         assert await d._judge_hands("long_press", 10.0, UNCHANGED, row) == daemon_module.NOTE_HANDS_RUNNER
 
-        async def broken(changed, key=None):
+        async def broken(changed, key=None, connection=None):
             raise RuntimeError("no")
         judge.judged = broken
         assert await d._judge_hands("tap", 10.0, UNCHANGED, row) is None  # a nicety: never a failed call
@@ -274,7 +320,7 @@ def test_only_what_the_screen_showed_for_certain_counts_either_way():
             assert await d._judge_hands("tap", 10.0, done, row) is None and judge.heard == [], done
         assert await d._judge_hands("toggle", 10.0, UNCHANGED, row) is None and judge.heard == []
         assert await d._judge_hands("toggle", 10.0, LANDED, row) is None
-        assert judge.heard == [(True, ("toggle", "id", "row", None))]
+        assert judge.heard == [(True, ("toggle", "id", "row", 0))]
         judge.heard.clear()
         d._fed_by_video = lambda: True  # the AirPlay video is the picture's source
         assert await d._judge_hands("tap", 10.0, UNCHANGED, row) is None and judge.heard == []

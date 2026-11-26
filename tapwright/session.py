@@ -578,6 +578,7 @@ class Session:
         # hands): every touch goes through the runner. motion_rng shapes human-like taps and swipes (motion.py).
         self.hands: "hands_module.Hands | None" = None
         self.hands_at: float | None = None  # time.monotonic() when the hands last finished a gesture
+        self.hands_connection: int | None = None  # Hands.connection as that gesture went out
         self.motion_rng = random.Random()
         # (2.0, route version 9) how the newest tree read came back: "full", "shallow" (part of the tree, the runner's
         # budget ran out) or "root" (the application node alone: the screen doesn't answer accessibility reads); and
@@ -1485,6 +1486,8 @@ class Session:
         if pending:
             trace.response(pending[0], {})
         self.hands_at = time.monotonic()  # (the daemon's settle believes "nothing changed" later after a hands touch)
+        # the touch connection it went through, for the verdict that comes after the settle (Hands.judged)
+        self.hands_connection = getattr(self.hands, "connection", None)
         if TRACE and not QUIET.get():
             getattr(self.device, "log", lambda *a: None)(
                 f"trace hands {what} {(time.monotonic() - began) * 1000:.0f} ms{detail}")

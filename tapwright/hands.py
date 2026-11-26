@@ -246,6 +246,10 @@ class Hands:
         self._doubted: Any = None  # the tunnel whose touch connection was opened again for doubt, once
         self._spells = 0  # times on the runner in a row for this tunnel (judged), with no touch landed between
         self._landed = False  # a touch of this tunnel has landed (judged): some connection of it reached the screen
+        self._tunnel: Any = None  # the tunnel _doubted, _spells and _landed are of (CodeRabbit, PR #29)
+        # How many touch connections these hands have opened: the one a gesture went through is told from the one
+        # open when its verdict comes (judged), which may be another (CodeRabbit, PR #29; review R202 L1)
+        self.connection = 0
         self._last_key: object = None  # what the last touch that changed nothing was aimed at (judged)
 
     # ---- state ----
@@ -315,7 +319,7 @@ class Hands:
                          f"touch can't go through CoreDevice HID to let go of it first ({e.reason}); nothing was "
                          "touched: wait a few seconds, then look") from None
 
-    async def judged(self, changed: bool, key: object = None) -> str | None:
+    async def judged(self, changed: bool, key: object = None, connection: int | None = None) -> str | None:
         """The caller's word on a touch these hands just played that should change the screen (a tap, long press or
         toggle aimed at something: the caller leaves every other gesture out, and every touch whose outcome the screen
         didn't show for certain): did it? The phone acks a report as it is written, whether or not it does anything,
@@ -334,8 +338,12 @@ class Hands:
         either, touches go through the runner for RUNNER_FOR ("runner"), then the hands are tried again, and each
         time on the runner is twice the one before (up to RUNNER_MAX). A tunnel none of whose touches ever landed
         gives the connection tried after a time on the runner one touch to land, so a connection that never reaches
-        the screen costs one touch now and then, not three every ten minutes. None otherwise."""
-        if self._touch is None:
+        the screen costs one touch now and then, not three every ten minutes. None otherwise.
+
+        `connection`: the one the touch went through (Hands.connection as it was sent). The verdict comes after the
+        screen settled, and another connection may be open by then (opened again for doubt, or by the next call):
+        a verdict for a connection that is gone says nothing of this one, and is dropped (CodeRabbit, PR #29)."""
+        if self._touch is None or (connection is not None and connection != self.connection):
             return None
         if changed:
             self._proven, self._unchanged, self._landed, self._last_key = True, 0, True, None
@@ -352,7 +360,7 @@ class Hands:
         async with self._lock:
             rsd = self._rsd
             # (CodeRabbit, PR #26) asked again under the lock: a connection opened while this call waited counts anew
-            if rsd is None or self._unchanged < after:
+            if rsd is None or self._unchanged < after or (connection is not None and connection != self.connection):
                 return None
             landed = self._proven
             await self._drop()
@@ -414,8 +422,13 @@ class Hands:
         self._rsd, self._touch, self._buttons, self._keyboard = rsd, touch, buttons, keyboard
         self._failed = None
         self._proven, self._unchanged, self._last_key = False, 0, None
-        if self._doubted is not None and self._doubted is not rsd:
-            self._doubted, self._spells, self._landed = None, 0, False  # another tunnel: a new connection altogether
+        self.connection += 1
+        if self._tunnel is not rsd:
+            # another tunnel: a new connection altogether, with no history. Told by the tunnel itself, not by _doubted
+            # (CodeRabbit, PR #29: a tunnel whose touches had landed left _doubted empty, and the next tunnel kept
+            # its "has landed")
+            self._tunnel = rsd
+            self._doubted, self._spells, self._landed = None, 0, False
         self._say(rsd, f"hands: CoreDevice HID (touchscreen {TOUCHSCREEN})")
         if self.dirty:
             try:

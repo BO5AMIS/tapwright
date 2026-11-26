@@ -6408,11 +6408,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         else:
             return None
         if target.point is None:
-            key: tuple = (name, target.kind, getattr(target, target.kind), target.index)
+            # (CodeRabbit, PR #29) no index and index 0 name the same element
+            key: tuple = (name, target.kind, getattr(target, target.kind), target.index or 0)
         else:
             key = (name, "point", round(target.point[0]), round(target.point[1]))
         try:
-            verdict = await hands.judged(landed, key)
+            verdict = await hands.judged(landed, key, getattr(s, "hands_connection", None))
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
