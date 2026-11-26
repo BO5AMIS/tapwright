@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -48,9 +49,17 @@ RUNNER_MIN = 0.3  # Vision's own confidence below which a reading is left out (i
 
 
 def _number(value: object) -> float:
+    """A finite number of the runner's answer, else ValueError (CodeRabbit, PR #26: 1e309 or a huge int gave an
+    infinity, or an OverflowError past the caller's ValueError)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{value!r} isn't a number")
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        raise ValueError("a number too large") from None
+    if not math.isfinite(number):
+        raise ValueError(f"{number!r} isn't a finite number")
+    return number
 
 
 def of_runner(value: object, screen: tuple[float, float]) -> list[Seen]:
@@ -61,15 +70,18 @@ def of_runner(value: object, screen: tuple[float, float]) -> list[Seen]:
     its points would be elsewhere; the caller reads the picture another way."""
     if not isinstance(value, dict) or not isinstance(value.get("lines"), list):
         raise ValueError("no lines")
-    sx = sy = 1.0
+    # (CodeRabbit, PR #26) the rects are placed by the screen the runner says (RUNNER-V9-PROTOCOL §4 always sends it):
+    # without a usable one they can't be, and taking them as session points put a touch where nothing was
     size = value.get("screen")
-    if isinstance(size, list) and len(size) == 2:
-        w, h = _number(size[0]), _number(size[1])
-        if w > 0 and h > 0:
-            if (w > h) != (screen[0] > screen[1]):
-                raise ValueError(f"the runner's screen ({w:g}x{h:g}) is turned from the session's "
-                                 f"({screen[0]:g}x{screen[1]:g})")
-            sx, sy = screen[0] / w, screen[1] / h
+    if not isinstance(size, list) or len(size) != 2:
+        raise ValueError("no screen size")
+    w, h = _number(size[0]), _number(size[1])
+    if w <= 0 or h <= 0:
+        raise ValueError(f"the runner's screen ({w:g}x{h:g}) has no size")
+    if (w > h) != (screen[0] > screen[1]):
+        raise ValueError(f"the runner's screen ({w:g}x{h:g}) is turned from the session's "
+                         f"({screen[0]:g}x{screen[1]:g})")
+    sx, sy = screen[0] / w, screen[1] / h
     found = []
     for line in value["lines"]:
         if not isinstance(line, dict):
@@ -81,7 +93,10 @@ def of_runner(value: object, screen: tuple[float, float]) -> list[Seen]:
         score = _number(line.get("confidence", 1.0))
         if score < RUNNER_MIN or not text.strip() or w <= 0 or h <= 0:
             continue
-        found.append(Seen(text.strip(), (x * sx, y * sy, w * sx, h * sy), score))
+        placed = (x * sx, y * sy, w * sx, h * sy)
+        if not all(math.isfinite(v) for v in placed):
+            raise ValueError("a line can't be placed on the screen")
+        found.append(Seen(text.strip(), placed, score))
     return sorted(found, key=lambda s: (round(s.rect[1] / 8), s.rect[0]))
 
 

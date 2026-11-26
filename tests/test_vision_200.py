@@ -258,6 +258,15 @@ def test_the_runners_ocr_answer_is_placed_in_points_in_reading_order():
     for bad in (None, {"lines": "x"}, {"lines": [{"text": "A"}]}, {"lines": [{"text": "A", "rect": [1, 2, "x", 4]}]}):
         with pytest.raises(ValueError):
             ocr.of_runner(bad, (430.0, 932.0))
+    # (CodeRabbit, PR #26) no usable screen size: the rects can't be placed (a half-size capture taken as points put a
+    # touch at half its place); a number that isn't finite: an OverflowError past the caller's ValueError
+    line = {"text": "A", "rect": [10, 10, 20, 10]}
+    for bad in ({"lines": [line]}, {"screen": [0, 466], "lines": [line]}, {"screen": [430], "lines": [line]},
+                {"screen": [430, 932], "lines": [{"text": "A", "rect": [10, 1e309, 20, 10]}]},
+                {"screen": [430, 932], "lines": [{"text": "A", "rect": [10, 10 ** 400, 20, 10]}]},
+                {"screen": [1e-300, 932], "lines": [{"text": "A", "rect": [1e300, 10, 20, 10]}]}):
+        with pytest.raises(ValueError):
+            ocr.of_runner(bad, (430.0, 932.0))
 
 
 def test_the_session_reads_text_on_the_phone(state, monkeypatch):
