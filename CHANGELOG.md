@@ -13,8 +13,9 @@
   read whole as well (a canvas, a web view that exposes nothing, a picture with words), not only on one whose elements
   weren't read: a look had listed the text as an `o` ref and `tap {text}` answered `not_found`. There it matches only
   what a look lists as `o` refs: text no element carries, above the keyboard (never a key or a word suggestion, so a
-  return key that reads "Send" is not pressed), and not for a step of a replayed script. A `not_found` of such a tap
-  now costs one read of the picture's text.
+  return key that reads "Send" is not pressed), and not for a step of a replayed script. With the keyboard up the
+  touch goes where the text was read and the keyboard is not closed first (closing it can move the form). A
+  `not_found` of such a tap now costs one read of the picture's text.
 - A touch aimed by a `{text}` found in the picture never takes a notification banner's own words for the app's, and
   waits a banner out as a touch aimed at an element does (on a screen whose elements weren't read too).
 - `type_text` into a field that takes the keyboard's focus a moment after the tap (a field of an in-app browser sheet)

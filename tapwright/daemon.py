@@ -7854,6 +7854,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         s = self.session
         if name not in KEYBOARD_TOOLS or target is None or not view.read_keyboard or view.alert_now is not None:
             return ""  # (an OS alert in front is modal: a touch outside it closes nothing, and behind_alert decides)
+        if _PICTURE_TEXT.get():
+            # (CodeRabbit, PR #28) the point is where the picture showed the text, above the keyboard, a moment ago.
+            # Closing the keyboard first can move the form, and the touch would go to the text's old place with
+            # nothing to say so (no element is there to compare). The touch goes where the text was read; in an app
+            # where a first touch outside the field only closes the keyboard, the answer shows that, and the next
+            # call reads the picture again.
+            return ""
         top, bottom = s.last_insets
         top = SCROLL_TOP_INSET if top is None else top
         bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)

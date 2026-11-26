@@ -186,14 +186,15 @@ def test_on_a_screen_read_whole_a_key_of_the_keyboard_is_never_what_a_text_means
         assert e.value.code == "not_found" and "tap" not in s.calls
         s.runner_text = [KEY, DRAWN]  # the same word drawn above the keyboard is the app's
         r = await d.run_tool("a", "tap", {"target": {"text": "Send"}, "screenshot": False})
-        assert r["text"].startswith("Tapped (340, 408).")
-        touches = s.calls.count("tap")  # (with the keyboard up a tap outside the field may close it first, as always)
-        assert touches >= 1
-        # the keyboard is up (again) and the read doesn't say where: nothing is matched
+        # (CodeRabbit, PR #28) one touch, where the text was read: the keyboard is not closed first, which could move
+        # the form and leave the point on the text's old place
+        assert r["text"].startswith("Tapped (340, 408).") and s.calls.count("tap") == 1
+        assert not any(c == "dismiss_keyboard" or (isinstance(c, tuple) and c[0] == "dismiss_keyboard") for c in s.calls)
+        # the keyboard is up and the read doesn't say where: nothing is matched
         s.last_keyboard, s.last_insets = True, (None, None)
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"text": "Send"}})
-        assert e.value.code == "not_found" and s.calls.count("tap") == touches
+        assert e.value.code == "not_found" and s.calls.count("tap") == 1
         await finish(stop, task)
     run(go)
 
