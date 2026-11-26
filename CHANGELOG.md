@@ -21,7 +21,7 @@
 - `press_button lock` locks the phone (the runner can't); `home` and the volume buttons are pressed through HID too.
 - `pinch`: two fingers spread (`scale` above 1, zoom in) or pinched (below 1, zoom out) about a point. Needs HID.
 - Needs pymobiledevice3 11.63 or later.
-- The runner is now at route version 11 (`tw-16.15.3.11`). A phone with an older runner keeps working (without the
+- The runner is now at route version 12 (`tw-16.15.3.12`). A phone with an older runner keeps working (without the
   new reads, as in 1.10.0); to install the new one, run `tapwright doctor --fix` (phone on USB, `tapwright serve`
   stopped: it signs the runner again with your stored profile and installs it) or `tapwright setup --force`.
 - Screens that never answer accessibility reads in time (TikTok's For You feed, games, canvases, some web views) no

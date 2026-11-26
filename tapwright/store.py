@@ -41,12 +41,14 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # A tree read without `budget` (a client older than 2.0) is answered the version 8 way.
 # tw-16.15.3.10 (tw version 10, 2.0.0) lets the direct tree read ask for chosen attributes (`attrs=lean|std|names`), with
 # `arraycap`, `modal`, and GET /wda/tw/attrs to see the phone's attribute lists. Every v9 behaviour is kept.
+# tw-16.15.3.12 (tw version 12, 2.0.0): the OCR route draws a turned screenshot upright before Vision reads it (in
+# landscape Vision, told the screenshot's orientation, read the text upside down on iOS 26.5).
 # tw-16.15.3.11 (tw version 11, 2.0.0) adds GET /wda/tw/front (the app in front in milliseconds, without reading it),
 # GET /wda/tw/shot (the screen as a JPEG) and `image=1` on the OCR route (the picture the text was read from).
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
-    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.11", "68bc8298f9f597e874576d5cdc9c1fba2c96ae456fa0ee1626764fcba3ca3395", "fork-tw-16.15.3.11"),
+    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.12", "66187b42f052317d4bfd309e59b47d1b61193fbc213ec4256a021d6e4830576c", "fork-tw-16.15.3.12"),
 }
 WDA_DEFAULT = "fork"
 WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]
