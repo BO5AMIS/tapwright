@@ -724,6 +724,15 @@ class Device:
         """That app's running processes, each with its start time (empty: it isn't running)."""
         return [p for p in await self.processes() if p.bundle == bundle_id]
 
+    async def processes_of(self, bundle_ids: list[str]) -> dict[str, list["Proc"]]:
+        """(2.0.3) The running processes of each of those apps, from one read of iOS's process list: the daemon's log
+        watchers share it (one question for all of them, where each asked the whole list for its own app)."""
+        out: dict[str, list[Proc]] = {b: [] for b in bundle_ids}
+        for p in await self.processes():
+            if p.bundle in out:
+                out[p.bundle].append(p)
+        return out
+
     @_traced
     async def phone_time_ms(self) -> int | None:
         """The phone's own clock now, epoch ms: the log entries' times are on it, not on this computer's."""
