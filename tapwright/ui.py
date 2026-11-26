@@ -1949,6 +1949,36 @@ def _says_back(name: str) -> bool:
     return words[-1:] == ["back"] or words[-2:] == ["back", "button"]
 
 
+# (2.0.3) where a screen's own back control sits when there is no navigation bar's: wholly within this many points
+# across and down from the top-left corner, upright; in landscape the status bar is gone and the left safe area (the
+# camera's side, about 60 pt) comes first, so the corner is wider and shorter
+OWN_BACK_UPRIGHT = (120.0, 140.0)
+OWN_BACK_LANDSCAPE = (180.0, 100.0)
+
+
+def names_back(text: str) -> bool:
+    """(2.0.3) Does an id or label say "back" as a word of its own: a word of a sentence, or a camel-case or snake-case
+    part (`searchResultBackButton`, `icBrutalBack`, `back_button`, "Back", "Go back")? Never inside another word
+    ("background", "feedback", "playback", "backup", "backspace"), and never "back to top" (a scroll to the top)."""
+    words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", text)]
+    return any(w == "back" and words[i + 1:i + 3] != ["to", "top"] for i, w in enumerate(words))
+
+
+def own_back(items: list[Element], screen: tuple[float, float]) -> Element | None:
+    """(2.0.3) The screen's own back control, for a screen with no navigation bar's back button (a shopping app's search
+    results: `button "icBrutalBack" id=searchResultBackButton @16,59 40x40`, phone 2026-11-26): the one element that
+    takes a tap (a button, or anything with the tap action), enabled, not in an alert nor in a view another process draws,
+    whose frame lies wholly in the top-left corner (OWN_BACK_UPRIGHT, OWN_BACK_LANDSCAPE) and whose id or label says back
+    (names_back). One thing listed twice (one_thing) counts once. None when none or several qualify: nothing is guessed."""
+    across, down = OWN_BACK_LANDSCAPE if screen[0] > screen[1] else OWN_BACK_UPRIGHT
+    found = [e for e in items
+             if (e.role == "button" or "tap" in e.actions) and e.enabled and not e.in_alert and not e.placed
+             and e.width > 0 and e.height > 0 and e.x >= -1 and e.y >= -1
+             and e.x + e.width <= across and e.y + e.height <= down
+             and (names_back(e.identifier) or names_back(e.label))]
+    return found[0] if len(found) == 1 else one_thing(found)
+
+
 def _is_back(node: ET.Element) -> bool:
     """A Back control by its own id or label (_says_back): the only control a bar's cover is lifted from (_on_bar). The
     tree's order can't tell a control laid on a bar from content under it (both come after the bar in real trees), so

@@ -9256,6 +9256,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._dry(a, "Would close the sheet.")
             await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
             return "Closed the sheet."
+        own = None if back.point is not None or back.hosted else \
+            ui.own_back(getattr(s, "front_items", None) or view.items, s.screen)
+        if own is not None:
+            # (2.0.3) no bar's back button, and the screen shows its own in the top-left corner (ui.own_back): a person
+            # taps that, never the edge swipe or the sheet's ways out (a shopping app's search results: a header strip
+            # read as a layer in front sent `back` there, 15.7 s and four reads, and nothing went back). Shown, so it
+            # is in front: the touch passes the same checks and the same banner wait as the bar's button.
+            said = self._own_back_line(view, own)
+            self._dry(a, f"Would tap the screen's back button: {said}.")
+            await self._back_before(view, a, listed is not None)
+            await s.tap(ui.Target(x=own.center[0], y=own.center[1]))
+            return f"Tapped the screen's back button: {said}."
         behind = getattr(s, "behind", [])
         # A sheet in front with no region of its own to tap. A back button it hides belongs to the screen behind
         # (it can't be reached, and where the backdrop lets a touch through it would leave that screen with the
@@ -9281,6 +9293,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         await self._back_before(view, a, listed is not None)
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
+
+    @staticmethod
+    def _own_back_line(view, own: ui.Element) -> str:
+        """The screen's own back control as the answer names it: by the agent's ref when its list has that very element
+        (the read `back` made numbers its own elements), else without a ref."""
+        mine = next((e for e in view.items if e.identifier == own.identifier and e.label == own.label
+                     and ui._same_rect(e.rect, own.rect)), None)
+        return (mine or own).line(ref=mine is not None, actions=False, place=False)
 
     async def _back_from_list(self, view) -> ui.Back | None:
         """(2.0, worker H) What `back` would touch, from the agent's own list when nothing can have changed since it was
@@ -9384,10 +9404,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             front = behind[0][1] if behind else None
             box = ui.sheet_box(front, getattr(s, "front_items", None) or [], s.screen) if behind else None
             return back.dismiss, back.point, box
+        before = self.hub.latest
         back = await s.back_point()
         seen = where(back)
         if back.dismiss is None and not getattr(s, "behind", []):
             return back  # nothing is open on top: a bar's back button doesn't slide
+        if await self._still_across_read(before):
+            return back  # (2.0.3) the picture didn't move across the read: one read does (each costs seconds on a heavy page)
         for _ in range(BACK_STILL_TRIES):
             await asyncio.sleep(BACK_STILL_PAUSE)
             back = await s.back_point()
@@ -9396,6 +9419,32 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return back
             seen = now
         raise Refused("not_actionable", "no_action: what is open on top is still moving; call back again in a moment")
+
+    async def _still_across_read(self, before: "Frame | None") -> bool:
+        """(2.0.3) Did nothing move across `back`'s read: the first frame that comes after it (waited for up to
+        BACK_STILL_PAUSE, the pause a second read would have waited anyway) is like the newest one before it? The runner
+        sends no frames while it reads, so a sheet that slid during the read shows only as a different picture after it.
+        False with no stream, on the AirPlay video (a stalled mirror repeats its picture), or with no frame in time:
+        read again, as before."""
+        if before is None or self._fed_by_video():
+            return False
+        try:
+            now = self.hub.latest
+            after = await self.hub.next_after(max(before.seq, now.seq if now is not None else 0),
+                                              timeout=BACK_STILL_PAUSE)
+            return after is not None and self._alike(before, after)
+        except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: read again as before
+            return False
+
+    async def _sheet_unmoved(self, before: "Frame | None") -> bool:
+        """(2.0.3) After a touch meant to close the sheet: did the stream show no change at all once it settled (the
+        frames' word, as `back` with `look: false` takes it)? Then the sheet is still there and no read is spent to say
+        so. False with no stream or on the AirPlay video: read, as before."""
+        if before is None or self._fed_by_video():
+            return False
+        done = await self._settle(self._mark()[0], cap=RESOLVE_SETTLE, since=before)
+        self.unsettled = False
+        return not done.changed
 
     async def _close_sheet(self, view) -> str:
         """Close the sheet in front the two ways a person tries from outside it: a touch beside it, on what it
@@ -9415,15 +9464,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             beside = ui.beside_sheet(box, s.screen, SCROLL_TOP_INSET if top is None else top,
                                      s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
             if beside is not None:
+                mark = self.hub.latest
                 await s.tap(ui.Target(x=beside[0], y=beside[1]))
-                await self._silent_read(view)
-                if front() != was:
-                    return "Closed the sheet."
+                if not await self._sheet_unmoved(mark):
+                    await self._silent_read(view)
+                    if front() != was:
+                        return "Closed the sheet."
             if (pull := ui.sheet_pull(box, s.screen)) is not None:
+                mark = self.hub.latest
                 await s.swipe(*pull, 300)
-                await self._silent_read(view)
-                if front() != was:
-                    return "Closed the sheet."
+                if not await self._sheet_unmoved(mark):
+                    await self._silent_read(view)
+                    if front() != was:
+                        return "Closed the sheet."
         raise Refused("not_actionable", "no_action: nothing changed after back" + self._still_open())
 
     async def _settle_pending(self) -> None:
