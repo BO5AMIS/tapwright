@@ -204,7 +204,7 @@ LONG_MEMORY = 300.0  # seconds no long try is made for an app after a long-budge
 LONG_MEMORY_MAX = 6 * 3600.0  # the longest that block grows to
 LONG_RETRY = 60.0  # (review R203 M2) the same for an app that has read whole with the long budget: one cut screen of it
 #                    (a video page) mustn't leave its readable screens unread for 5 minutes
-LONG_NOTE = ("this screen took about {seconds:.0f} s to read, longer than the usual time given; its elements are listed, "
+LONG_NOTE = ("this screen took about {seconds:.1f} s to read, longer than the usual time given; its elements are listed, "
              "and its next reads are given that time unless something plays on it")
 
 
@@ -780,6 +780,9 @@ class Session:
         self.last_tier = "full"
         self.last_why = ""
         self.budgets = ReadBudget()
+        # (2.0.3, brief Q fix 3) apps whose slowness a call's answer was told of (LONG_NOTE): not again until a long read
+        # of the app is cut (_long_read); a session's own memory, kept through reconnects as the budgets are
+        self.slow_told: set[str] = set()
         # Set by the daemon: does the stream show the screen still right now (Daemon._proven_still)? A still screen's
         # read gets the normal budget even while its app is on the short one (ReadBudget). None: never taken as still.
         self.screen_still: Callable[[], bool] | None = None
@@ -1190,7 +1193,7 @@ class Session:
             if (longer is not None and _root_bundle(longer) in (None, app)
                     and _TIER_RANK.get(self.last_tier, 0) > _TIER_RANK.get(tier, 0)):
                 source, named = longer, _root_bundle(longer)
-                self._note_long(source, began_long)
+                self._note_long(source, began_long, read_began=began)
             else:
                 # no answer in its time, refused, unreadable, or no more than the normal read gave (CodeRabbit, PR #30:
                 # a long root after a shallow normal read lost the elements a wait_for had found): the normal read's
@@ -1252,23 +1255,33 @@ class Session:
         forced = TREE_PATH_FORCED if TREE_PATH_FORCED in ("direct", "xctest", "lean") else None
         path = tree_path(long_ms, normal) if forced else LONG_PATH
         try:
-            return await self._compact_tree(timeout, budget_ms=long_ms, budget_for=app, read_path=path), False
+            source = await self._compact_tree(timeout, budget_ms=long_ms, budget_for=app, read_path=path)
         except Unanswered as e:
             getattr(self.device, "log", lambda *a: None)(
                 f"tree read with the long budget ({long_ms} ms) got no answer in its time: counted as cut ({e})")
+            self.slow_told.discard(app)  # (brief Q fix 3) a long read of it was cut: the next whole one is news again
             return None, True
+        if source is None or self.last_tier != "full":
+            self.slow_told.discard(app)
+        return source, False
 
-    def _note_long(self, source: str, began: float, tell: bool = True) -> None:
+    def _note_long(self, source: str, began: float, tell: bool = True, read_began: float | None = None) -> None:
         """A long read answered: when whole, a log line and (`tell`: the long try made the answer) the note for the call
-        that made it (READ_OWNER)."""
+        that made it (READ_OWNER). (2.0.3, brief Q fix 3: on the phone it came on answer after answer, "about 1 s" for
+        quick reads) The note is said once per app, the first time a call's own read of it needed the long try, until a
+        long read of it is cut (slow_told), with the time the whole read took (`read_began`: when it began, the cut
+        normal read included), never rounded up."""
         if self.last_tier != "full":
             return
         took = time.monotonic() - began
-        if tell:
+        app = _root_bundle(source) or self.budget_app
+        if tell and app not in self.slow_told:
             holder = READ_OWNER.get()
             # (review R203 L1) only the call whose own read it was hears it: a read of no call says nothing
             if holder is not None:
-                holder.append(LONG_NOTE.format(seconds=max(1.0, took)))
+                holder.append(LONG_NOTE.format(seconds=time.monotonic() - (began if read_began is None else read_began)))
+                if app is not None:
+                    self.slow_told.add(app)
         getattr(self.device, "log", lambda *a: None)(
             f"tree read whole with the long budget ({self.budgets.long_ms} ms) in {took:.1f} s: "
             f"{_root_bundle(source) or self.budget_app} reads slowly")
