@@ -41,11 +41,11 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # A tree read without `budget` (a client older than 2.0) is answered the version 8 way.
 # tw-16.15.3.10 (tw version 10, 2.0.0) lets the direct tree read ask for chosen attributes (`attrs=lean|std|names`), with
 # `arraycap`, `modal`, and GET /wda/tw/attrs to see the phone's attribute lists. Every v9 behaviour is kept.
-# tw-16.15.3.14 (tw version 14, 2.0.0): a turned screen is read both ways up and the better reading kept; the answer says `turn`.
-# tw-16.15.3.12 (tw version 12, 2.0.0): the OCR route draws a turned screenshot upright before Vision reads it (in
-# landscape Vision, told the screenshot's orientation, read the text upside down on iOS 26.5).
 # tw-16.15.3.11 (tw version 11, 2.0.0) adds GET /wda/tw/front (the app in front in milliseconds, without reading it),
 # GET /wda/tw/shot (the screen as a JPEG) and `image=1` on the OCR route (the picture the text was read from).
+# tw-16.15.3.12 (tw version 12, 2.0.0): the OCR route draws a turned screenshot upright before Vision reads it (in
+# landscape Vision, told the screenshot's orientation, read the text upside down on iOS 26.5).
+# tw-16.15.3.14 (tw version 14, 2.0.0): a turned screen is read both ways up and the better reading kept; the answer says `turn`.
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
