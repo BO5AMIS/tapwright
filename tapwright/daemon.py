@@ -113,12 +113,13 @@ LOCK_PRESS_WAIT = 1.5  # seconds `press_button lock` waits for the phone to say 
 LOCK_PRESS_POLL = 0.15
 LOCKED_BY_PRESS = "Locked the phone."  # (the note every answer of a locked phone carries says how to go on)
 HANDS_EXPECTED = frozenset({"tap", "long_press", "toggle"})  # ... of which these, aimed at an element, should show
-NOTE_HANDS_REOPENED = ("no touch has changed the screen since the touch connection was opened (the phone acknowledges "
-                       "them either way), so the connection may not be reaching the screen: it was opened again. If "
-                       "this touch should have changed something, look, then repeat it.")
-NOTE_HANDS_RUNNER = ("still no touch from this computer has changed the screen, also after the touch connection was "
-                     "opened again: to be safe, touches go through the runner on the phone from now on (slower, about "
-                     "0.3 s each). If this touch should have changed something, look, then repeat it.")
+NOTE_HANDS_REOPENED = ("the last touches aimed at an element changed nothing on the screen (the phone acknowledges a "
+                       "touch either way), so the touch connection may not be reaching the screen: it was opened "
+                       "again. If this touch should have changed something, look, then repeat it.")
+NOTE_HANDS_RUNNER = ("touches from this computer still change nothing on the screen, also after the touch connection "
+                     "was opened again: to be safe, touches go through the runner on the phone for a while (10 minutes "
+                     "the first time; slower, about 0.3 s each). If this touch should have changed something, look, "
+                     "then repeat it.")
 # (2.0) TAPWRIGHT_RUNNER_OCR=0: text is read from the picture on this computer only (RapidOCR), never by the runner
 RUNNER_OCR = os.environ.get("TAPWRIGHT_RUNNER_OCR", "1")
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
@@ -4570,6 +4571,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             finally:
                 _SCOPE_TOUCHED.reset(touched_token)
                 if self.control.holds_turn():  # (an action that let go of its turn and ended without it set nothing now)
+                    # (CodeRabbit, PR #29) when and through which touch connection the hands played this action's
+                    # gesture, taken while the turn is held: the verdict comes after the settle, with the turn let
+                    # go, and another agent's gesture may have set the session's own by then (_judge_hands)
+                    box["hands"] = (getattr(self.session, "hands_at", None),
+                                    getattr(self.session, "hands_connection", None))
                     self.session.touch_hook, self.session.banner_guard = None, False
                     self.session.before_input = None
                     self.session.execution_guard = None
@@ -4727,7 +4733,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         trace.settled()
         if session_module.TRACE:
             self.log(f"trace {name} settle {done.seconds:.2f} s, changed={done.changed}")
-        if (doubt := await self._judge_hands(name, box.get("began"), done.changed, target)) is not None:
+        if (doubt := await self._judge_hands(name, box.get("began"), done, target, box.get("hands"))) is not None:
             notes = [*notes, doubt]
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
@@ -6375,22 +6381,45 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return False
             await asyncio.sleep(LOCK_PRESS_POLL)
 
-    async def _judge_hands(self, name: str, began: float | None, changed: bool,
-                           target: "ui.Target | None" = None) -> str | None:
-        """After the settle of a touchscreen gesture the hands played (Session.hands_at is from this call): tell the
-        hands whether the screen changed (Hands.judged), and give the note for the answer when they doubt their
-        connection. Any gesture that changed the screen proves the connection. Against it counts only a tap, long press
-        or toggle aimed at an element that changed nothing (review L-L3): a scroll at a list's end, a `back` with
-        nothing to go back to and a tap at a point the agent chose change nothing by right. A nicety that never
-        fails a call."""
-        s = self.session
-        hands, at = getattr(s, "hands", None), getattr(s, "hands_at", None)
+    async def _judge_hands(self, name: str, began: float | None, done: Settled, target: "ui.Target | None" = None,
+                           played: "tuple[float | None, int | None] | None" = None) -> str | None:
+        """After the settle of a touchscreen gesture the hands played (`played`: Session.hands_at and
+        Session.hands_connection as this action left them while it held its turn; the time is from this call): tell
+        the hands whether the touch landed (Hands.judged), and give the note for the answer when they doubt their
+        connection. A nicety that never fails a call.
+
+        Only a tap, long press or toggle aimed at something counts, for the connection or against it (review L-L3;
+        2.0.2 for "for it"): at an element, or at a text of the picture (an o ref, a {text} found there: review R202
+        M3, a screen with no elements has no other touch to judge by). A scroll at a list's end, a `back` with nothing
+        to go back to and a tap at a point the agent chose change nothing by right, and a screen that changed after a
+        scroll or a swipe may have changed by itself (that proved a connection that reached nothing, 2026-11-26).
+
+        And only what the screen showed for certain (review R202 H1, M1). Landed: the frames changed and then stood
+        still. A wait that ended on a stall, on its cap or with no frames says "changed" too, and on a screen that
+        never stands still (a spinner, a video) it would prove a connection that reaches nothing with every touch.
+        Not landed: the frames stood unchanged, the stream is the phone's own (a stalled AirPlay mirror repeats its
+        last picture) and the touch is no toggle (the tree, not the stream, says whether a switch flipped). Anything
+        else says nothing, either way."""
+        hands = getattr(self.session, "hands", None)
+        at, connection = played if played is not None else (None, None)
         if name not in HANDS_GESTURES or hands is None or began is None or at is None or at < began:
             return None
-        if not changed and not (name in HANDS_EXPECTED and target is not None and target.point is None):
+        aimed = target is not None and (target.point is None or _PICTURE_AIM.get() is not None)
+        if name not in HANDS_EXPECTED or target is None or not aimed:
             return None
+        if done.changed and done.still:
+            landed = True
+        elif not done.changed and name != "toggle" and not self._fed_by_video():
+            landed = False
+        else:
+            return None
+        if target.point is None:
+            # (CodeRabbit, PR #29) no index and index 0 name the same element
+            key: tuple = (name, target.kind, getattr(target, target.kind), target.index or 0)
+        else:
+            key = (name, "point", round(target.point[0]), round(target.point[1]))
         try:
-            verdict = await hands.judged(changed)
+            verdict = await hands.judged(landed, key, connection)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
