@@ -170,7 +170,8 @@ def _gave_up_ms(why: str) -> float | None:
     tier it tried). None when it doesn't say: nothing is concluded then."""
     found = _AFTER_MS.findall(why or "")
     return float(sum(int(n) for n in found)) if found else None
-BUDGET_MEMORY = 20.0  # seconds a cut-short read keeps its app on the short budget
+BUDGET_MEMORY = 60.0  # seconds a cut-short read keeps its app on the short budget (20 until the phone tests of 2026-11-26:
+#                       on a feed that never answers, the normal-budget read that asks again cost 2.7 s every 20 s)
 # (2.0) how the runner reads a tree (RUNNER-V9-PROTOCOL §1 `path`). Measured on the phone (lead, 2026-11-26): `direct`
 # keeps to its budget on TikTok's feed (1500 ms -> 1.43 s) where `xctest` takes 2.9-3.9 s whatever the budget, but on
 # a screen that reads (Settings > General, 264 nodes) `xctest` is about 30 % faster (0.97 s against 1.25-1.32 s). So
@@ -217,7 +218,9 @@ class ReadBudget:
     budget asks again (a screen that is only slow to read gets its whole tree back within BUDGET_MEMORY seconds).
     A screen that is still (the caller's `still`: the stream's pictures show nothing moving) gets the normal budget even
     then: a playing feed is never still, and a still screen of the same app (a profile, a settings page) is usually one
-    that reads whole (review R200v H1)."""
+    that reads whole (review R200v H1). When such a read is cut short too (the feed showing a photo, a paused video:
+    still, and it doesn't answer), stillness gives the normal budget again only after BUDGET_MEMORY seconds: on the phone
+    every read of that screen cost the normal budget, and none was left unasked (lead, 2026-11-26)."""
 
     def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
                  memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic,
@@ -225,6 +228,8 @@ class ReadBudget:
         self.normal_ms, self.short_ms, self.memory, self.clock = normal_ms, short_ms, memory, clock
         self.unasked_for = unasked_for
         self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
+        self._still_cut: dict[str, float] = {}  # bundle id -> when a read its stillness gave the normal budget was
+        self._by_still: str | None = None  # the app whose next read has the normal budget because its screen is still
         self._tried: dict[str, float] = {}  # bundle id -> when a real read of it last went out
 
     def plan(self, bundle: str | None, still: Callable[[], bool] | None = None) -> tuple[int, bool]:
@@ -255,8 +260,13 @@ class ReadBudget:
             return self.normal_ms
         if self.clock() - self._cut[bundle] >= self.memory:
             del self._cut[bundle]
+            self._still_cut.pop(bundle, None)
+            if still is not None and still():
+                self._by_still = bundle  # (cut short again, this read is the still screen's one too)
             return self.normal_ms
-        if still is not None and still():
+        at = self._still_cut.get(bundle)
+        if still is not None and (at is None or self.clock() - at >= self.memory) and still():
+            self._by_still = bundle
             return self.normal_ms
         return self.short_ms
 
@@ -265,16 +275,22 @@ class ReadBudget:
 
     def answered(self, bundle: str | None, truncated: bool, budget_ms: int, took_ms: float | None = None) -> None:
         """A read of `bundle` with `budget_ms` came back truncated or full, after `took_ms` (None: not timed)."""
+        by_still, self._by_still = self._by_still, None
         if bundle is None:
             return
         if not truncated:
             if took_ms is None or took_ms >= self.short_ms:
                 self._cut.pop(bundle, None)
+                self._still_cut.pop(bundle, None)
         elif budget_ms >= self.normal_ms:
             self._cut[bundle] = self.clock()
+            if by_still == bundle:
+                self._still_cut[bundle] = self.clock()  # its still screen didn't answer either
 
     def forget(self) -> None:
         self._cut.clear()
+        self._still_cut.clear()
+        self._by_still = None
         self._tried.clear()
 
 

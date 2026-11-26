@@ -292,3 +292,44 @@ def test_quick_give_ups_that_use_the_whole_budget_end_as_a_cut_read(monkeypatch)
     s.read_app = ("TikTok", TIKTOK)
     assert asyncio.run(s.refresh()).tier == "root"
     assert len(runner.paths("/wda/tw/tree")) == 3 and s.budgets.short(TIKTOK)  # kept under the budget first asked
+
+
+# ---- a still screen that doesn't answer ----
+
+def test_a_still_screen_that_doesnt_answer_gets_the_normal_budget_once_not_every_time():
+    """Seen on the phone: TikTok on a photo post stands still and doesn't answer. "A still screen gets the normal
+    budget" then gave every read of it 3 s, and none was left unasked: looks took 3 s each."""
+    from tapwright.session import ReadBudget
+
+    now = [100.0]
+    b = ReadBudget(normal_ms=3000, short_ms=1500, memory=20.0, clock=lambda: now[0], unasked_for=8.0)
+
+    def still():
+        return True
+    b.answered("a", True, 3000)  # its feed didn't answer
+    assert b.budget("a", still) == 3000  # a still screen of it may be one that reads: asked with the normal budget
+    b.tried("a")
+    b.answered("a", True, 3000, took_ms=2700)  # it didn't answer either
+    assert b.budget("a", still) == 1500 and b.plan("a", still) == (1500, True)  # short, and unasked for a while
+    now[0] += 9
+    assert b.plan("a", still) == (1500, False)  # a real read every 8 s, on the short budget
+    now[0] += 12
+    assert b.budget("a", still) == 3000  # the memory ran out: asked whole once more
+    b.answered("a", True, 3000, took_ms=2700)
+    assert b.budget("a", still) == 1500  # (one read with the normal budget, not one for each of the two reasons)
+    assert b.budget("a", lambda: False) == 1500 and b.budget("b", still) == 3000
+
+
+def test_a_whole_slow_read_gives_stillness_its_exception_back():
+    from tapwright.session import ReadBudget
+
+    now = [100.0]
+    b = ReadBudget(normal_ms=3000, short_ms=1500, memory=20.0, clock=lambda: now[0])
+    b.answered("a", True, 3000)
+    assert b.budget("a", lambda: True) == 3000
+    b.answered("a", True, 3000, took_ms=2700)
+    assert b.budget("a", lambda: True) == 1500
+    b.answered("a", False, 1500, took_ms=300)  # a quick whole read: nothing learned of the screens that didn't answer
+    assert b.budget("a", lambda: True) == 1500
+    b.answered("a", False, 3000, took_ms=2000)  # whole after more than the short budget: all of it is forgotten
+    assert b.budget("a", lambda: True) == 3000 and b.budget("a") == 3000
