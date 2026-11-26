@@ -83,7 +83,10 @@
   product page that never read, the app's own timeouts, blocked the whole app for 60, 120, 240 s: its readable pages,
   the home screen after a relaunch too, answered "0 elements", and the moment the block ran out the home screen read
   whole in 2.5 to 5.3 s); from the third in a row on, the block is the app's, as above. A long read that comes back
-  partly read (elements, not all of them) is no miss: it starts no block and counts nothing (a home screen's planned
+  partly read (an element with a label, a name or a value, or more than five; not all of them) is no miss: it starts no
+  block and counts nothing; on a still screen that only ever answers in part, each look then takes up to 8 s and
+  returns that part. A page that never reads costs one 8 s read on each visit when the app's readable screens read
+  whole in between (a whole read ends the block and its count) (a home screen's planned
   long read gave 46 of its 140 elements, blocked the app for 60 s, and the agent's tap by an id that read had listed
   answered "this screen's elements weren't read"). And a read is planned by the app the runner names in front right
   before it, not by the app of the newest read: an `open_app` from a slow app planned its answer's read with the long
@@ -137,20 +140,34 @@
   banner and the timer's app came to the front. The banner check rests on the runner naming SpringBoard in front while
   a banner shows; asked every 0.5 s before and during this banner, the front route and activeAppInfo named the app the
   whole time. The runner's hit test does see it: SpringBoard's element framed `[11, 11, 408, 490]` at (200, 85), the
-  app at (200, 150) and below, 13 to 32 ms a question, the heavy app too; the status bar is SpringBoard's at all times
-  (frames that end above 64 pt). Now, when the runner names the app the agent saw and a touch starts in the top 200 pt,
-  the hit test is asked at that point: SpringBoard's element reaching below the status bar is a banner, waited out up
-  to 8 s (asked again every 0.5 s), then `covered`; when the hit test can't say, a point, an `o` ref or a picture text
-  is refused `covered` and a touch aimed at an element goes. A swipe from the banner up off the top edge (the `swipe`
-  tool only) goes at once: that sent the timer's banner away without opening anything, and `covered`'s words now say
-  so (a timer, an alarm or a call stays until answered). The picture-text aim's banner check asks the hit test too, at
-  (the screen's middle, 80). Not asked (as before): the phone not upright, a runner below route version 6 or without
-  the route, `TAPWRIGHT_HIT_CHECK=0`. "A banner" has one definition, over an app and over the home screen: SpringBoard's
-  element at the point, not an icon and not its whole screen (the home screen's top edge answers that), reaching below
-  the status bar; "no element answered at the point" (Settings' top corner, 7 ms) is an answer, not a failure. On the
-  home screen the same question now lets a point in the top 200 pt go when it finds no banner (a pull from the top
-  edge for Control Center, a widget), where every such point was refused; when it can't say, it is refused as before. Cost: one hit question (about 20 ms) for each touch, points and elements alike,
-  that starts in the top 200 pt of an app the runner names; none lower down.
+  app at (200, 150) and below, 13 to 32 ms a question; the status bar is SpringBoard's at all times (frames that end
+  above 64 pt). Now, when the runner names the app the agent saw and a touch starts in the top 200 pt, the hit test is
+  asked at that point:
+  - a banner (SpringBoard's element there, not an icon and not its whole screen, reaching below the status bar; or a
+    call's banner, `com.apple.InCallService`, whatever its frame) is waited out up to 8 s (asked again every 0.5 s),
+    then `covered`;
+  - the app itself, a web page's content (`com.apple.WebKit.*`: all of a page's top in a browser) and the keyboard are
+    clear; any other process there (a game's overlay) can't be told: a point, an `o` ref or a picture text is refused,
+    a touch aimed at an element goes;
+  - a quick swipe from the banner up off the top edge (the `swipe` tool only, at least 40 pt long, at most 0.5 s: a
+    shorter one is a tap on the banner, a slower one a long press) goes at once: that sent the timer's banner away
+    without opening anything, and `covered`'s words now say so (a timer, an alarm or a call stays until answered);
+  - in landscape the hit test is asked at the point mapped to portrait; while which side is up isn't known, a point in
+    the zone is refused;
+  - on the home screen the same question lets a point in the top 200 pt go when nothing of SpringBoard's is there (a
+    pull from the top edge for Control Center, a widget), where every such point was refused; a point on SpringBoard's
+    element there is refused as before; a touch aimed at an element of the agent's look goes when the hit finds that
+    element (a Control Center module, a Notification Center row) and waits out anything else over it;
+  - the picture-text aim's banner check asks the hit test too, at (the screen's middle, 80).
+  The limit, measured: on an app that is slow to answer (a video feed whose reads time out) the hit test said "no
+  element answered" at every point for about 3.5 s, and a pile of questions held the runner until it was restarted.
+  So "no element answered" is an answer only at the screen's top edge; below it the question is asked up to three
+  times (about a second), and none answering refuses a point with its own words ("can't be told right now, because
+  the app in front is slow to answer"); never more than one hit question is out, and after one that got no answer in
+  1.5 s none is asked for 5 s. A point near the top of such an app can be refused though nothing is over it. Not asked
+  (as before): a runner below route version 6 or without the route, `TAPWRIGHT_HIT_CHECK=0`. Cost: one hit question
+  (about 20 ms) for each touch, points and elements alike, that starts in the top 200 pt of an app or the home screen
+  the agent saw; none lower down.
 - A touch aimed by a point, an `o` ref or a picture text in the top 200 pt is refused `covered` while the only word
   on the app in front is iOS's process list (the runner couldn't name it, and `open_app` had named that app). That
   list never has SpringBoard, so a notification over the app looks the same as the app alone: the touch that started
