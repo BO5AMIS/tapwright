@@ -378,6 +378,22 @@ def test_a_button_left_down_is_let_go_on_the_next_open():
     assert wire.sent[-3:] == [("button", 0x0C, 0xE9, 2), ("button", 0x0C, 0x40, 1), ("button", 0x0C, 0x40, 2)]
 
 
+def test_a_button_left_down_that_the_new_connection_cant_let_go_of_holds_touches():
+    # (CodeRabbit, PR #26) the new tunnel has no buttons' service: the button stayed down, the recovery said it let go,
+    # and a touch went out
+    hands, wire, phone = make()
+    wire.fail[1] = RuntimeError("lost")
+    with pytest.raises(HandsError):
+        asyncio.run(hands.button("volume_up"))
+    phone.rsd = FakeRsd(services=(UNIVERSAL_SERVICE,))
+    sent = len(wire.sent)
+    with pytest.raises(HandsError) as e:
+        asyncio.run(hands.tap(100, 100, 20))
+    assert not isinstance(e.value, HandsUnavailable) and "may still be down" in str(e.value)
+    assert len(wire.sent) == sent and hands.dirty["buttons"] == [(0x0C, 0xE9)]
+    assert not any("let go of what" in line for line in phone.lines)
+
+
 def test_keys_type_with_shift_for_capitals_and_symbols():
     hands, wire, _ = make()
     asyncio.run(hands.keys("aB!"))

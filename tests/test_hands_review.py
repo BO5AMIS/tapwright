@@ -143,6 +143,28 @@ def test_m2_the_release_goes_out_first_when_hid_is_back():
     asyncio.run(go())
 
 
+def test_m2_a_gesture_cancelled_while_its_open_lets_go_leaves_the_release_owed():
+    # (CodeRabbit, PR #26) the open published its connection, then was cancelled while it let go of the old finger:
+    # the next gesture took that connection as ready and put a new finger down with the old one still down
+    async def go():
+        hands, wire, _ = make()
+        wire.fail[1] = ConnectionResetError("reset")
+        with pytest.raises(Unanswered):
+            await hands.tap(10, 10, 5)
+        wire.hang.add(2)  # the release, first thing on the new connection, doesn't get through
+        b = asyncio.create_task(hands.tap(200, 300, 5))
+        await asyncio.sleep(0.05)
+        b.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await b
+        assert hands.dirty
+        before = len(touches(wire))
+        await hands.tap(200, 300, 5)
+        assert all(not c[3] for c in touches(wire)[before])  # a lift first, then the new tap's contact
+        assert hands.dirty == {}
+    asyncio.run(go())
+
+
 # ---- L4: a stream that starts later ----
 
 def test_l4_setting_stream_ok_lets_ios_27_try_again_on_the_same_tunnel():

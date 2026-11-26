@@ -37,6 +37,24 @@ def test_touches_that_change_nothing_on_a_connection_never_proven_reopen_it_once
     asyncio.run(go())
 
 
+def test_a_doubt_that_waited_for_the_lock_is_checked_again_under_it():
+    # (CodeRabbit, PR #26) judged() counted before it waited for the lock; meanwhile a new connection was opened (its
+    # count starts again). The doubt must not close that one
+    async def go():
+        hands, wire, phone = make()
+        for _ in range(DOUBT_AFTER - 1):
+            await tap(hands)
+            assert await hands.judged(False) is None
+        await tap(hands)
+        async with hands._lock:
+            judging = asyncio.ensure_future(hands.judged(False))  # counts to DOUBT_AFTER, then waits for the lock
+            await asyncio.sleep(0.01)
+            hands._unchanged, hands._proven = 0, False  # a new connection was opened meanwhile
+        assert await judging is None
+        assert wire.closed == 0 and hands._touch is not None
+    asyncio.run(go())
+
+
 def test_one_touch_that_changes_the_screen_proves_the_connection_for_good():
     async def go():
         hands, wire, _ = make()

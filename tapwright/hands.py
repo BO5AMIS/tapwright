@@ -326,7 +326,8 @@ class Hands:
             return None
         async with self._lock:
             rsd = self._rsd
-            if rsd is None:
+            # (CodeRabbit, PR #26) asked again under the lock: a connection opened while this call waited counts anew
+            if rsd is None or self._proven or self._unchanged < DOUBT_AFTER:
                 return None
             await self._drop()
             if self._doubted is not rsd:
@@ -388,7 +389,13 @@ class Hands:
             self._doubted = None  # another tunnel: a new connection altogether
         self._say(rsd, f"hands: CoreDevice HID (touchscreen {TOUCHSCREEN})")
         if self.dirty:
-            await self._recover()
+            try:
+                await self._recover()
+            except asyncio.CancelledError:
+                # (CodeRabbit, PR #26) a connection whose release wasn't sent is no ready one: the next gesture opens
+                # again and lets go first (what wasn't sent stays in dirty)
+                await asyncio.shield(self._drop())
+                raise
 
     async def _open(self, rsd: Any) -> tuple[Any, Any, int | None]:
         """Connect the touch service (and the buttons' one when the phone has it); check the touchscreen is listed."""
@@ -446,6 +453,8 @@ class Hands:
                 self.dirty["buttons"].remove((page, usage))
             if not self.dirty.get("buttons"):
                 self.dirty.pop("buttons", None)
+            else:  # (CodeRabbit, PR #26) this connection has no buttons' service to let go of one: no touch goes out
+                raise _SendFailed(RuntimeError("the phone's buttons service isn't there to let go of a button"))
             self._say(self._rsd, "hands: let go of what an earlier failed release left down")
         except _SendFailed as e:
             rsd = self._rsd
