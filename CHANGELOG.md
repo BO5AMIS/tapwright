@@ -82,6 +82,51 @@
   nothing else: the live view's picture stands still for up to its time (the stream may reopen), and a person's touch
   waits for it. `wait_for` uses 8 s only when its own time left covers the read and 5 s more, so not with its default
   10 s timeout.
+- `back` on a screen with no navigation bar taps the screen's own back control. A shopping app's search results have
+  only `button "icBrutalBack" id=searchResultBackButton` in the top-left corner; `back` took 15.7 s there (a header
+  strip read as a layer sent it the sheet's way: four reads, a tap into the middle of the results under the strip, a
+  pull) and answered `no_action`. Now, when `back`'s own read is whole and exactly one control in the top-left corner
+  (120 by 140 pt; 180 by 100 in landscape) takes a tap, has nothing drawn over it and means back and nothing else,
+  it is tapped and named: `Tapped the screen's back button: ...`. "Back and nothing else": a label that is exactly
+  "Back", "Go back", "Back button" or "Navigate back" (or Arabic "رجوع", "عودة"), or an id whose parts, without a
+  generic ending such as `button` or `icon`, end in `back`, not after a word like call, send, play, cash or camera.
+  "Call back", "Back camera", "Back up", `callBackButton` and `playbackButton` are never tapped (the final review
+  found the first version took them: a "Call back" in the corner would have started a call). A control with a word
+  that needs a person's OK (Buy, Send, Delete...) is refused `no_action`, naming it. A cut or empty read looks for no
+  corner control (it used to fall back to the agent's older list, possibly of another screen): `back` swipes and says
+  the screen's elements weren't read. A layer that is no sheet (a strip along the top) gets no touch: `no_action` in
+  about the time of one read; a real sheet is tapped beside only on a point clear of anything that takes a touch.
+  And when nothing qualifies, `back` gives up faster: one read when the picture didn't move across it, and no read
+  after a way out that changed nothing on the stream. Cost: none on screens with a navigation bar.
+- An `id` or `label` that an element and its own wrapper share is no longer `ambiguous`. `tap {"target": {"id":
+  "closeButton"}}` in a shopping app answered `ambiguous` with `e3 other id=closeButton @16,81 40x40` and `e4 button
+  id=closeButton @16,81 40x40`. Now matches that are one thing listed twice (frames alike within 2 pt, or one covering
+  at least 90 % of the other) resolve to the one that takes the touch. Matches at different places stay `ambiguous`,
+  and `index` still counts every match (so a recording of such a tap keeps `index: 1`). Cost: none.
+- The note "this screen took about N s to read, longer than the usual time given" is said once per app: on the answer
+  whose own read needed the long try after a cut normal read, with the time that read really took (to a tenth of a
+  second), and again only after a long read of that app was cut and a later one read whole. It came on answer after
+  answer, also for fast reads.
+- The log watchers ask iOS's process list once for all of them. One watcher per app an agent ever opened each asked
+  for the whole list (0.35 to 0.9 s a question over the tunnel), also with the phone idle: 73 questions in 30 s with
+  about a dozen apps opened. Now one question serves every watcher, `logs` and `crash`: at most one a second while a
+  watched app is in front and a client called in the last minute (or `logs` or `crash` were asked for), one every 30 s
+  otherwise; a watcher of an app gone for a minute ends. What `logs` and `crash` promise is unchanged: each answer
+  vouches only for the lines its question saw, and the same-life rule for pids holds. Cost: a `logs` call on a quiet
+  phone asks at once; the window in which a reused pid could be mistaken grows from 3 s to 30 s while quiet.
+- When the daemon's event loop is held for more than a second, the log now says by what: a watchdog thread writes the
+  loop thread's Python stack once per stall (up to 15 lines of file, line and function names; no value, no source
+  line, and these lines skip the accounts' scrub, which belongs to the loop's thread). The log had "the event loop was
+  held for 15.63 s" during a look of a simple screen and nothing about the cause. `user_apps` (2.1 s seen just after
+  it) now asks iOS for the six attributes it reads instead of every attribute of every app. Cost: one thread that
+  looks four times a second.
+- A touch aimed by a point, an `o` ref or a picture text in the top 200 pt is refused `covered` while the only word
+  on the app in front is iOS's process list (the runner couldn't name it, and `open_app` had named that app). That
+  list never has SpringBoard, so a notification over the app looks the same as the app alone: the touch that started
+  the incident above could go out again on exactly the screens where the runner can't say (final review). A touch
+  aimed at an element of the agent's last answer, or lower down, still goes.
+- An answer whose read saw a notification come or go over the same app now says `Note: a notification passed over the
+  app while this was read; look again.`, not that another app came to the front.
 - A tap that worked is no longer answered "No visible change." because the app was slow to show it. In a read-only
   sweep of a React Native app, two taps on buttons were answered "No visible change." after 0.38 s, and the look right
   after showed the next screen: the app had started its navigation a few hundred ms later. Since 2.0 a tap takes about
