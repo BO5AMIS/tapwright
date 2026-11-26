@@ -491,14 +491,49 @@ def alike_on_glass(a: Frame | None, b: Frame | None, screen: tuple[float, float]
         return False
 
 
+@dataclasses.dataclass(frozen=True)
+class StillMark:
+    """(2.0.3) What a read that could lead to a long one kept before it went out (Daemon._still_mark): the newest
+    frame, fresh then, and whether stillness up to it was proven then (else it is proven after a cut answer)."""
+    frame: Frame
+    proven: bool
+
+
+def _unlike_box(x: "Image.Image", y: "Image.Image") -> tuple[int, int, int, int] | None:
+    """The box (left, top, right, bottom) of the thumb pixels where two thumbs differ by more than ALIKE_TOLERANCE;
+    None where they don't."""
+    return ImageChops.difference(x, y).point(lambda v: 255 if v > ALIKE_TOLERANCE else 0).getbbox()
+
+
 def _where_unlike(a: Frame | None, b: Frame | None) -> str:
     """(the timing trace only) Where two frames differ, as a box in the thumb's pixels (1/ALIKE_SCALE of the capture)."""
     try:
         x, y = a.thumb, b.thumb  # type: ignore[union-attr]
-        box = ImageChops.difference(x, y).point(lambda v: 255 if v > ALIKE_TOLERANCE else 0).getbbox()
-        return f" (thumb {x.size[0]}x{x.size[1]}, differs in {box})"
+        return f" (thumb {x.size[0]}x{x.size[1]}, differs in {_unlike_box(x, y)})"
     except Exception:  # noqa: BLE001 - only a trace note
         return ""
+
+
+def unlike_share(a: Frame, b: Frame, screen: tuple[float, float] | None,
+                 turn: int = 0) -> tuple[float, tuple[int, int, int, int] | None] | None:
+    """(2.0.3) (the share of the compared picture that the box where two frames differ covers, that box in thumb pixels)
+    or None when they can't be compared. Upright with the screen's size known, the strips alike_on_glass leaves out and
+    the status bar's (STATUS_BAR, as the picture's text leaves it out: the clock's minute) are left out of it."""
+    x, y = a.thumb, b.thumb
+    if x is None or y is None or x.size != y.size:
+        return None
+    w, h = x.size
+    crop = (0, 0, w, h)
+    if not turn and screen and screen[0] and screen[1] and screen[0] <= screen[1]:
+        side, bottom = math.ceil(EDGE_PT * w / screen[0]), math.ceil(HOME_STRIP_PT * h / screen[1])
+        top = math.ceil(STATUS_BAR * h / screen[1])
+        if w > 4 * side and h > top + 4 * bottom:
+            crop = (side, top, w - side, h - bottom)
+    box = _unlike_box(x.crop(crop), y.crop(crop))
+    area = (crop[2] - crop[0]) * (crop[3] - crop[1])
+    if box is None or area <= 0:
+        return 0.0, None
+    return (box[2] - box[0]) * (box[3] - box[1]) / area, box
 
 
 def _screen_sig(items: list[ui.Element]) -> tuple:
@@ -512,6 +547,24 @@ SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the direction
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
 WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take (2.0.3: unless a long read fits, below)
 STILL_AFTER_READ = 1.0  # (2.0.3) seconds a fresh frame is waited for after a read, to say the screen stood still across it
+STREAM_WAIT = 1.5  # (2.0.3, re-check R203b N2) seconds a read that could lead to a long one waits for a stream that is
+#                    open but has sent no fresh frame (it closes 30 s after the last call, and opens again with it)
+
+
+def _still_box_of(raw: str) -> float:
+    """TAPWRIGHT_STILL_BOX: a share from 0 to 1 (else the default, 0.35)."""
+    try:
+        value = float(raw) if raw.strip() else 0.35
+    except ValueError:
+        return 0.35
+    return value if math.isfinite(value) and 0.0 <= value <= 1.0 else 0.35
+
+
+# (2.0.3, the lead's decision) the frames before and after a read also count as one still screen when they differ only
+# inside a box of at most this share of the compared picture: an auto-advancing banner changes a band of a heavy home
+# screen, a playing feed changes all of it. 0: the two frames must match (alike_on_glass). Only for the comparison
+# across the read; stillness before it is the stream's own strict check. For measuring.
+STILL_BOX = _still_box_of(os.environ.get("TAPWRIGHT_STILL_BOX", ""))
 WAIT_FOR_LONG_MARGIN = 0.5  # (2.0.3) seconds of `wait_for`'s deadline a long read leaves unused (its clock is not ours)
 WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up instead of reading again
 SKIP_TEXT_WAIT = 3.0  # (2.0) seconds a step's `if` may spend reading the picture's text on a cut-short screen
@@ -1383,6 +1436,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self.hub = FrameHub()
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
+        self._stream_wait_failed: int | None = None  # (2.0.3) the newest frame's seq when a wait for the stream got nothing
         self.log = lambda message: log(self.scrub_everywhere(message))  # (what any sink gets holds no account's value)
         self._media_lock = asyncio.Lock()  # makes a media add's lookup, start and claim of the photo wait one step
         # the add that holds the phone, and until when: iOS's photo prompt, or a video's copy and import (1.7.9). The
@@ -9504,31 +9558,111 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: the short budget stays
             return False
 
-    def _still_mark(self) -> "Frame | None":
-        """(2.0.3) Session.still_mark: the newest frame when the stream proves the screen still now (as
-        _still_for_budget), else None. Kept by the read, to be compared after it (_still_across)."""
+    def _frame_fresh(self) -> bool:
+        """Is the newest frame fresh (within 1.5 frame gaps, and shot_fresh), as _proven_still asks first?"""
+        gap, age = self.hub.gap(), self.hub.age()
+        return bool(gap) and age is not None and age <= min(1.5 * gap, self.shot_fresh)  # type: ignore[operator]
+
+    async def _stream_ready(self) -> str:
+        """(2.0.3, re-check R203b N2) Before a read that could lead to a long one: when the stream is open (an agent's
+        call or a viewer holds it, or the video feeds the hub) but its newest frame isn't fresh (it closes 30 s after
+        the last call and is opening again), wait up to STREAM_WAIT for frames to judge stillness by. "" when the newest
+        frame is fresh or became so; else what was found, for the trace. A wait that got nothing isn't made again until
+        a frame comes (a stream that can't open costs it once)."""
+        if self._frame_fresh():
+            return ""
+        latest = self.hub.latest
+        feeding = getattr(getattr(self, "_feeder", None), "feeding", False)
+        if getattr(self.pump, "viewers", 0) <= 0 and not feeding:
+            return "no stream is open"
+        if latest is not None and latest.seq == self._stream_wait_failed:
+            return "the stream has sent nothing since the last wait for it"
+        loop = asyncio.get_running_loop()
+        began, seq, got = loop.time(), (latest.seq if latest is not None else 0), 0
+        while not (got >= 2 and self._frame_fresh()):
+            left = STREAM_WAIT - (loop.time() - began)
+            frame = await self.hub.next_after(seq, left) if left > 0 else None
+            if frame is None:
+                self._stream_wait_failed = seq
+                return (f"waited {round((loop.time() - began) * 1000)} ms for the stream: {got} new frame(s), "
+                        f"none fresh enough to judge by")
+            seq, got = frame.seq, got + 1
+        return ""
+
+    async def _still_mark(self, prove: bool = True) -> "StillMark | None":
+        """(2.0.3) Session.still_mark, before a read that could lead to a long one: the newest frame, fresh, kept to be
+        compared after the read (_still_across); None (and a trace line why) when there is none. `prove`: stillness up
+        to it is proven now (a slow app's planned long read needs that before the read); else only after a cut answer,
+        from the frames kept from before the read (none come during it): on most reads nothing is decoded (re-check
+        R203b L-e: up to 2.7 ms a read with phone-sized frames)."""
         try:
-            return self.hub.latest if self._proven_still(noted=False) else None
-        except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing
+            waited = await self._stream_ready()
+            latest = self.hub.latest
+            if latest is None or not self._frame_fresh():
+                self._trace_not_still_before(f"no fresh frame{'; ' + waited if waited else ''}")
+                return None
+            if prove and not self._still_upto(latest.seq):
+                self._trace_not_still_before("frames differ", latest.seq)
+                return None
+            return StillMark(latest, prove)
+        except Exception as e:  # noqa: BLE001 - a picture that can't be compared proves nothing
+            self._trace_not_still_before(f"{type(e).__name__}")
             return None
 
+    def _trace_not_still_before(self, said: str, upto: int | None = None) -> None:
+        if session_module.TRACE:
+            self.log(f"trace still before the read: no ({said}){self._why_not_still(upto)}")
+
     async def _still_across(self, mark: object) -> bool:
-        """(2.0.3, review R203 H1) Session.still_across: did the screen stand still across a read that began on `mark`
-        (_still_mark)? The runner sends no frames while it reads, so the newest frame then is as old as the read: one
-        fresh frame is waited for (STILL_AFTER_READ at most) and must show the picture `mark` showed. None in time (the
-        stream reopening after a stall, or gone): not still."""
-        if not isinstance(mark, Frame):
+        """(2.0.3, review R203 H1) Session.still_across: did the screen stand still before and across a read that began on
+        `mark` (_still_mark)? Before: the frames up to the mark (unless proven then). Across: the runner sends no frames
+        while it reads, so one fresh frame is waited for (STILL_AFTER_READ at most) and must show what the mark showed,
+        or differ only inside a box of at most STILL_BOX of the picture (a banner). None in time: not still.
+        (Re-check R203b L-a, left as decided: the first fresh frame is trusted. One the runner captured as the read
+        began and sent only after it would be alike with the mark, and a moving screen would get one long read and its
+        block.)"""
+        if not isinstance(mark, StillMark):
             return False
+        if not mark.proven:
+            try:
+                before = self._still_upto(mark.frame.seq)
+            except Exception:  # noqa: BLE001 - as above
+                before = False
+            if not before:
+                self._trace_not_still_before("frames differ", mark.frame.seq)
+                return False
+        loop = asyncio.get_running_loop()
+        called = loop.time()
+        detail = ""
         try:
             latest = self.hub.latest
-            fresh = await self.hub.next_after(latest.seq if latest is not None else mark.seq, STILL_AFTER_READ)
-            still = fresh is not None and self._alike(fresh, mark)
-        except Exception:  # noqa: BLE001 - as above
-            still = False
+            fresh = await self.hub.next_after(latest.seq if latest is not None else mark.frame.seq, STILL_AFTER_READ)
+            if fresh is None:
+                still = False
+                age = self.hub.age()
+                detail = (f"no fresh frame within {round(STILL_AFTER_READ * 1000)} ms; the newest is "
+                          f"{age and round(age * 1000)} ms old")
+            elif self._alike(fresh, mark.frame):
+                still, detail = True, f"fresh frame after {round((loop.time() - called) * 1000)} ms, alike"
+            else:
+                share = unlike_share(fresh, mark.frame, getattr(self.session, "screen", None),
+                                     getattr(self.session, "turn", 0) or 0)
+                still = share is not None and share[0] <= STILL_BOX
+                where = "can't be compared" if share is None else \
+                    f"differs in {share[1]} = {share[0] * 100:.0f} % of the picture"
+                detail = (f"fresh frame after {round((loop.time() - called) * 1000)} ms, {where}, "
+                          f"allowed {STILL_BOX * 100:.0f} %")
+        except Exception as e:  # noqa: BLE001 - as above
+            still, detail = False, type(e).__name__
         if session_module.TRACE:
-            self.log(f"trace still across the read: {'yes' if still else 'no'}"
-                     f"{'' if still else self._why_not_still()}")
+            self.log(f"trace still across the read: {'yes' if still else 'no'} ({detail})")
         return still
+
+    def _still_upto(self, seq: int) -> bool:
+        """Is the screen proven still by the frames up to `seq` (as _proven_still, its newest fresh when it was kept)?"""
+        gap = self.hub.gap()
+        frames = [(t, f) for t, f in self.hub.recent() if f.seq <= seq]
+        return bool(gap) and bool(frames) and self._still_window(frames, gap)  # type: ignore[arg-type]
 
     def _proven_still(self, noted: bool = True) -> bool:
         """Do the stream's recent frames already show what _settle waits for, so a read needn't wait? A read for
@@ -9548,20 +9682,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             trace.note("frame_age_ms", None if age is None else round(age * 1000, 1))
         if not gap or age is None or age > min(1.5 * gap, self.shot_fresh):
             return False
+        return self._still_window(self.hub.recent(), gap)
+
+    def _still_window(self, frames: "list[tuple[float, Frame]]", gap: float) -> bool:
+        """Are the frames of the last `still` seconds up to the last of `frames` alike the one that began that window
+        (at least 2 of them, and the history reaching back over it)?"""
         still = max(self.settle_still, 2.5 * gap)
-        frames = self.hub.recent()
-        start = frames[-1][0] - still  # the window ends at the newest frame, which is fresh
+        start = frames[-1][0] - still  # the window ends at the last frame given
         anchor = next((f for t, f in reversed(frames) if t <= start), None)
         if anchor is None:
             return False  # the history doesn't reach back over the window
         within = [f for t, f in frames if t > start]
         return len(within) >= 2 and all(self._alike(f, anchor) for f in reversed(within))
 
-    def _why_not_still(self) -> str:
-        """(the timing trace only) Why _proven_still said no: the stream's gap and age, and where a frame differs."""
+    def _why_not_still(self, upto: int | None = None) -> str:
+        """(the timing trace only) Why _proven_still said no (with `upto`: for the frames up to that seq): the stream's
+        gap and age, and where a frame differs."""
         try:
             gap, age = self.hub.gap(), self.hub.age()
-            frames = self.hub.recent()
+            frames = [(t, f) for t, f in self.hub.recent() if upto is None or f.seq <= upto]
+            if not frames:
+                return " (no frame yet)"
             still = max(self.settle_still, 2.5 * gap) if gap else 0.0
             start = frames[-1][0] - still if frames else 0.0
             anchor = next((f for t, f in reversed(frames) if t <= start), None)

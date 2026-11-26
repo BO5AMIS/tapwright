@@ -39,6 +39,7 @@ def state(monkeypatch):
     monkeypatch.setattr(session_module, "FAST_READ", "1")
     # (no frame after a read: not a whole second here; raising=False: the file also runs against ee2b930)
     monkeypatch.setattr(daemon_module, "STILL_AFTER_READ", 0.05, raising=False)
+    monkeypatch.setattr(daemon_module, "STREAM_WAIT", 0.05, raising=False)
 
 
 def run(go):
@@ -48,8 +49,11 @@ def run(go):
 class Stream:
     """A daemon's frame hub and its stillness checks (_still_for_budget, _still_mark, _still_across) on a clock the test
     moves. `idle` sends `picture` every GAP seconds; a read (`reading`) moves the clock with no frame, and after it the
-    stream goes on with `after` (None: no frame in time, the stream reopening after a stall). Those frames come when
-    the session waits for them (`_across`): the same every run, where real-time timers raced the test's clock."""
+    stream goes on with `after` (None: no frame in time, the stream reopening after a stall). An agent's call holds the
+    stream (`pump.viewers`); when its newest frame is stale (the stream closed and is opening again) it comes back with
+    `picture`, unless `reopens` is False. Frames that come back come only while someone waits for one (the hub's
+    `next_after`): the same every run, where real-time timers, or frames scheduled for a wait that never came, landed
+    in a later read's check."""
     GAP = 0.04
 
     def __init__(self) -> None:
@@ -59,37 +63,45 @@ class Stream:
         self.picture: bytes = b"A"
         self.after: bytes | None = b"A"
         self.pending: bytes | None = None  # the picture the stream comes back with after the newest read
+        self.reopens = True
+        self.read_last = False  # (a read came after the newest idle frames: what follows it is `pending`, if anything)
+        self.d.pump.viewers = 1  # (as run_tool's `pump.watching()`)
+        real = self.d.hub.next_after
+
+        async def next_after(seq: int, timeout: float | None = None):
+            picture, self.pending = self.pending, None
+            fresh = getattr(self.d, "_frame_fresh", lambda: True)
+            if picture is None and not self.read_last and self.reopens and not fresh():
+                picture = self.picture  # (the stream opening again)
+            if picture is not None:
+                def comes() -> None:
+                    for _ in range(4):
+                        self.now[0] += self.GAP
+                        self.d.hub.publish(picture)
+                asyncio.get_running_loop().call_soon(comes)  # (once the waiter has taken the newest frame)
+            return await real(seq, timeout)
+        self.d.hub.next_after = next_after
 
     def clock(self) -> float:
         return self.now[0]
 
     def idle(self, seconds: float = 0.5, pictures: tuple[bytes, ...] | None = None) -> None:
         """`seconds` of frames: `picture` each time, or `pictures` in turn (a screen that moves)."""
+        self.read_last = False
         for n in range(max(4, round(seconds / self.GAP))):
             self.now[0] += self.GAP
             self.d.hub.publish(pictures[n % len(pictures)] if pictures else self.picture)
 
     def reading(self, seconds: float) -> None:
         self.now[0] += seconds
-        self.pending = self.after
-
-    async def _across(self, mark: object) -> bool:
-        """The daemon's _still_across, with the frames that come once the runner has answered."""
-        picture, self.pending = self.pending, None
-        if picture is not None:
-            def comes_back() -> None:
-                for _ in range(3):
-                    self.now[0] += self.GAP
-                    self.d.hub.publish(picture)
-            asyncio.get_running_loop().call_soon(comes_back)  # (after the check has taken the newest frame)
-        return await self.d._still_across(mark)
+        self.pending, self.read_last = self.after, True
 
     def attach(self, s: Session) -> None:
         """The session's stillness, as the daemon gives it (getattr: so this file runs against 2.0.3's first commit,
         ee2b930, which had only `screen_still` and asked it after the read: there the first test fails)."""
         s.screen_still = self.d._still_for_budget
         s.still_mark = getattr(self.d, "_still_mark", None)
-        s.still_across = self._across if hasattr(self.d, "_still_across") else None
+        s.still_across = getattr(self.d, "_still_across", None)
 
 
 class ShopRunner(V9Runner):
@@ -208,7 +220,9 @@ def test_a_playing_feed_asks_what_2_0_2_asked(state):
     s = Session(runner)
     s.budgets = ReadBudget(clock=lambda: clock[0])
     s.read_app = ("TikTok", TIKTOK)
-    s.still_mark = lambda: None  # (the stream never proves it still)
+    async def never(prove: bool) -> None:  # (the stream never proves it still)
+        return None
+    s.still_mark = never
     for advance, still in MOVING:
         clock[0] += advance
         s.screen_still = (lambda still=still: still) if still is not None else None
@@ -546,3 +560,209 @@ def test_the_daemon_adds_the_note_to_the_answer_of_the_call_whose_read_made_it()
     mine, theirs, again, later = run(go)
     assert mine.count("Note: this screen took about 4 s to read") == 1
     assert "took about" not in theirs and "took about" not in again and "another call" not in later
+
+
+# ---- re-check R203b N1: an unchanged answer to a long read is a whole one ----
+
+class UnchangedRunner(ShopRunner):
+    """As the real runner: a read that sends the token of a tree that hasn't changed is answered `unchanged`."""
+
+    async def http(self, method, path, payload=None, timeout=30.0):
+        bare = path.replace("/session/S", "")
+        if bare.startswith("/wda/tw/tree"):
+            query = parse_qs(urlparse(bare).query)
+            if query.get("since") == ["w"]:
+                self.requests.append((method, path, payload))
+                self.timeouts.append((int(query["budget"][0]), timeout))
+                self.stream.reading(0.1)
+                return {"value": {"token": "w", "unchanged": True}}
+        return await super().http(method, path, payload, timeout)
+
+
+def test_an_unchanged_answer_to_a_long_read_lifts_the_block_and_keeps_the_mark(state):
+    # (the re-check's probe 1: [3000, 8000, 8000, 3000] on 0955e9e, the app blocked by its own unchanged read)
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream, UnchangedRunner(stream, version=11))
+        await look(s, stream)  # 3000 cut, 8000 whole: slow but readable
+        stream.now[0] += 1.0
+        tree = await look(s, stream)  # planned 8000, `since=w`: unchanged
+        assert "since=w" in runner.paths("/wda/tw/tree")[-1] and [e.label for e in tree.items] == ["Deal of the day"]
+        assert not s.budgets.blocked(SHOP) and s.budgets.slow(SHOP) and s.last_tier == "full"
+        stream.now[0] += 1.0
+        s.last_compact = None  # (another screen of the app: no token)
+        await look(s, stream)
+        assert runner.budgets() == [3000, 8000, 8000, 8000]
+    run(go)
+
+
+def test_a_quick_cut_retry_inside_a_long_read_is_the_long_read(state, monkeypatch):
+    monkeypatch.setattr(session_module, "RETRY_GAP", 0.0)
+
+    async def go():
+        stream = Stream()
+        quick = {**CUT, "why": "full: kAXErrorServerNotFound (after 8 ms)"}
+        s, runner = shop(stream, ShopRunner(stream, answers={3000: CUT, 8000: quick}, other=WHOLE))
+        await look(s, stream)
+        got = runner.budgets()
+        assert got[:2] == [3000, 8000] and 5000 < got[2] < 8000  # the retry within what is left of the 8 s
+        assert runner.timeouts[2][1] == pytest.approx(got[2] / 1000 + 5.0)  # (waited as a long read)
+        assert s.budgets.slow(SHOP) and not s.budgets.blocked(SHOP)  # (its whole answer lifted the block)
+    run(go)
+
+
+# ---- re-check R203b N2: a stream that is opening again ----
+
+def test_a_look_on_a_stream_that_is_opening_again_waits_for_it_and_makes_the_long_try(state):
+    # (the re-check's probe 2: [3000] on 0955e9e, the newest frame 40 s old)
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream)
+        stream.idle(0.5)
+        stream.now[0] += 40.0  # the agent thought for 40 s; the stream closed after 30
+        tree = await s.refresh(timeout=60)
+        assert runner.budgets() == [3000, 8000] and tree.tier == "full"
+    run(go)
+
+
+def test_a_stream_that_doesnt_open_costs_one_wait_and_the_read_goes_out_as_before(state):
+    async def go():
+        stream = Stream()
+        stream.reopens = False
+        s, runner = shop(stream)
+        stream.idle(0.5)
+        stream.now[0] += 40.0
+        waits = []
+        real = stream.d.hub.next_after
+
+        async def counted(seq, timeout=None):
+            waits.append(timeout)
+            return await real(seq, timeout)
+        stream.d.hub.next_after = counted
+        await s.refresh(timeout=60)
+        await s.refresh(timeout=60)
+        assert runner.budgets()[0] == 3000 and 8000 not in runner.budgets()
+        assert len(waits) == 1  # (not again until the stream sends a frame)
+        stream.d.pump.viewers = 0  # no stream open at all: nothing is waited for
+        stream.d._stream_wait_failed = None
+        assert await stream.d._stream_ready() == "no stream is open" and len(waits) == 1
+    run(go)
+
+
+# ---- the lead's addition: a banner may change across the read (STILL_BOX) ----
+
+def _screen(band: bool = False, clock: bool = False, black: bool = False) -> bytes:
+    """A 400x800 px screen (DescribingSession's 400x800 pt at 1x): white with three dark tiles, or all black; `band`:
+    a banner band (rows 300-420) of another picture; `clock`: the status bar's minute changed (rows 10-30)."""
+    import io
+
+    from PIL import Image, ImageDraw
+    im = Image.new("RGB", (400, 800), "black" if black else "white")
+    draw = ImageDraw.Draw(im)
+    if not black:
+        for top in (120, 480, 640):
+            draw.rectangle([40, top, 360, top + 100], fill=(30, 60, 90))
+    if band:
+        draw.rectangle([0, 300, 399, 420], fill=(200, 40, 40))
+    if clock:
+        draw.rectangle([170, 10, 230, 30], fill="black")
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=85)
+    return buf.getvalue()
+
+
+WHITE, BLACK = _screen(), _screen(black=True)
+WHITE_BANNER, WHITE_CLOCK = _screen(band=True), _screen(clock=True)
+
+
+@pytest.mark.parametrize("after, box, tried", [
+    (WHITE_BANNER, 0.35, True),  # a banner band changed during the read: still enough
+    (BLACK, 0.35, False),  # the whole picture changed (a feed): 100 %
+    (WHITE_BANNER, 0.0, False),  # TAPWRIGHT_STILL_BOX=0: the frames must match
+    (WHITE_CLOCK, 0.0, True),  # the status bar's clock is left out, whatever the box
+])
+def test_the_frames_across_the_read_may_differ_inside_a_small_box(state, monkeypatch, after, box, tried):
+    monkeypatch.setattr(daemon_module, "STILL_BOX", box)
+
+    async def go():
+        stream = Stream()
+        stream.picture, stream.after = WHITE, after
+        s, runner = shop(stream)
+        await look(s, stream)
+        assert (8000 in runner.budgets()) is tried
+    run(go)
+
+
+def test_a_banner_band_is_a_small_share_and_a_feed_all_of_it():
+    from tapwright.stream import Frame
+    a, banner, black = (Frame(n, 0, pic) for n, pic in enumerate((WHITE, WHITE_BANNER, BLACK)))
+    share, box = daemon_module.unlike_share(a, banner, (400.0, 800.0))
+    assert 0.10 < share < 0.25 and box is not None
+    assert daemon_module.unlike_share(a, black, (400.0, 800.0))[0] > 0.9
+    assert daemon_module.unlike_share(a, Frame(3, 0, WHITE_CLOCK), (400.0, 800.0)) == (0.0, None)
+    assert daemon_module.unlike_share(a, Frame(4, 0, b"not a picture"), (400.0, 800.0)) is None
+    for raw, want in (("", 0.35), ("0", 0.0), ("0.5", 0.5), ("1", 1.0), ("2", 0.35), ("-1", 0.35), ("x", 0.35),
+                      ("nan", 0.35)):
+        assert daemon_module._still_box_of(raw) == want, raw
+
+
+@pytest.mark.parametrize("moving", [True, False])
+def test_a_picture_that_changes_all_over_asks_what_it_asks_with_the_long_budget_off(state, moving):
+    # (a feed changes the whole picture: white to black is 100 %, far past STILL_BOX; before the read, or during it)
+    def requests(long_ms: int) -> list:
+        async def go():
+            stream = Stream()
+            stream.picture, stream.after = WHITE, BLACK
+            s, runner = shop(stream, ShopRunner(stream, answers={}), long_ms=long_ms)
+            for _ in range(4):
+                stream.pending = None
+                stream.idle(0.5, (WHITE, BLACK) if moving else None)
+                await s.refresh(timeout=60)
+                stream.now[0] += 5.0
+            return [(m, p) for m, p, _ in runner.requests]
+        return run(go)
+    assert requests(8000) == requests(0)
+    assert not any("budget=8000" in p for _, p in requests(8000))
+
+
+# ---- re-check R203b M-b: why no long try, in the trace ----
+
+@pytest.mark.parametrize("case, want", [
+    ("off", "trace no long try: the long budget is off"),
+    ("blocked", "is blocked for 29"),  # (297 s more: the read took its time of the 300)
+    ("time", "s left of the read's time, a long read needs 13 s"),
+    ("moving", "trace still before the read: no (frames differ)"),
+    ("stale", "trace still before the read: no (no fresh frame; waited"),
+    ("no frame after", "trace still across the read: no (no fresh frame within"),
+    ("differs", "% of the picture, allowed 35 %"),
+])
+def test_every_reason_for_no_long_try_is_in_the_trace(state, monkeypatch, case, want):
+    monkeypatch.setattr(session_module, "TRACE", True)
+    monkeypatch.setattr(daemon_module, "STILL_BOX", 0.35)
+
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream, long_ms=0 if case == "off" else 8000)
+        lines: list[str] = []
+        stream.d.log = lines.append
+        runner.log = lines.append
+        if case == "blocked":
+            s.budgets.long_sent(SHOP)
+        if case == "stale":
+            stream.reopens = False
+            stream.idle(0.5)
+            stream.now[0] += 40.0
+            await s.refresh(timeout=60)
+        elif case == "moving":
+            stream.idle(0.5)
+            stream.d.hub.publish(b"B")  # changed just before the read
+            await s.refresh(timeout=60)
+        else:
+            if case == "no frame after":
+                stream.after = None
+            if case == "differs":
+                stream.picture, stream.after = WHITE, BLACK
+            await look(s, stream, timeout=12.0 if case == "time" else 60.0)
+        assert 8000 not in runner.budgets()
+        assert any(want in line for line in lines), lines
+    run(go)
