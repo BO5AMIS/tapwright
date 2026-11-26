@@ -441,6 +441,46 @@ def _app_words(app: tuple[str, str]) -> str:
     return bundle if not name or name == bundle else f"{name} ({bundle})"
 
 
+# (2.0, worker I) Strips at the screen's edges whose change alone is no content, in points (portrait): iOS flashes a
+# scroll view's indicator at the right edge as a page shows and fades it 1-1.5 s later, a push leaves the old page's
+# shadow on the left edge for a frame or two after it stands still, and the home indicator at the bottom re-tints for
+# the new page (stream, Settings, phone 2026-11-26: each made a settle run on, or `back` read again because "the picture
+# changed since the read"). A change anywhere else still counts.
+EDGE_PT, HOME_STRIP_PT = 8.0, 24.0
+
+
+def alike_on_glass(a: Frame | None, b: Frame | None, screen: tuple[float, float] | None, turn: int = 0) -> bool:
+    """`alike`, or alike once the edge strips (EDGE_PT at the left and right, HOME_STRIP_PT at the bottom) are left out.
+    Only upright (`turn` 0: the stream's frames are as captured, so in landscape the strips lie elsewhere) and with the
+    screen's size known; anything that can't be compared that way is as `alike` says."""
+    if alike(a, b):
+        return True
+    if turn or a is None or b is None or not screen or not screen[0] or not screen[1]:
+        return False
+    try:
+        x, y = a.thumb, b.thumb
+        if x is None or y is None or x.size != y.size:
+            return False
+        w, h = x.size
+        side, bottom = math.ceil(EDGE_PT * w / screen[0]), math.ceil(HOME_STRIP_PT * h / screen[1])
+        if w <= 4 * side or h <= 4 * bottom:
+            return False
+        box = (side, 0, w - side, h - bottom)
+        return ImageChops.difference(x.crop(box), y.crop(box)).getextrema()[1] <= ALIKE_TOLERANCE
+    except Exception:  # noqa: BLE001 - a picture that can't be compared is unlike, as alike has it
+        return False
+
+
+def _where_unlike(a: Frame | None, b: Frame | None) -> str:
+    """(the timing trace only) Where two frames differ, as a box in the thumb's pixels (1/ALIKE_SCALE of the capture)."""
+    try:
+        x, y = a.thumb, b.thumb  # type: ignore[union-attr]
+        box = ImageChops.difference(x, y).point(lambda v: 255 if v > ALIKE_TOLERANCE else 0).getbbox()
+        return f" (thumb {x.size[0]}x{x.size[1]}, differs in {box})"
+    except Exception:  # noqa: BLE001 - only a trace note
+        return ""
+
+
 def _screen_sig(items: list[ui.Element]) -> tuple:
     """What a light read says the screen holds: for comparing two reads when there is no stream."""
     return tuple((e.role, e.label, e.value, e.rect) for e in items)
@@ -467,6 +507,9 @@ LOOP_TICK, LOOP_HELD, LOOP_SAY_EVERY = 0.05, 0.3, 10.0  # seconds: see Daemon._w
 WATCH_TICK, BATTERY_EVERY = 15.0, 300.0  # seconds: the watchdog's look at the state, and at the battery (§24.5)
 WATCH_NOTES = 5  # the watchdog's messages an agent's next answer carries at most
 BACK_STILL_PAUSE, BACK_STILL_TRIES = 0.3, 6  # see Daemon._still_back
+BACK_STILL_WAIT = 0.3  # (2.0, worker I) seconds `back` waits for fresh frames to prove its list's screen still (_back_from_list)
+BACK_FIRST_FRAME = 0.12  # ... of which at most this for the first one (about 3 frame gaps at the stream's rate)
+STILL_UNPROVEN = "the screen isn't proven still"
 TOGGLE_LAND_WAIT, TOGGLE_POLL = 0.5, 0.05  # seconds: see Daemon._toggle_landed
 # A switch element this many times wider than tall is a whole row (label and control): toggle touches the control,
 # SWITCH_FROM_RIGHT points in from its right end (half an iOS switch, 63 pt wide), not the label in the middle
@@ -1306,6 +1349,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self.shot_wait, self.shot_fresh = shot_wait, shot_fresh
         self._read_root: tuple[tuple[str, str] | None, bool] | None = None  # the last silent read's root app, alert up
         self.unsettled = False  # the last action returned without a settle: the screen may still be moving, for every client
+        # (2.0, worker I) that action's settle, owed: (the stream's (seq, frame) as its gesture went out, its cap, when it
+        # returned (monotonic)); None when unknown (a timeout). See _settle_unsettled.
+        self.unsettled_from: tuple[tuple[int, Frame | None], float, float] | None = None
         # settle: how long a still screen is quiet, how long to wait for a first frame, and the
         # blind sleep used when the stream gives no frames at all
         self.settle_still, self.settle_first_frame, self.settle_fallback = settle_still, settle_first_frame, settle_fallback
@@ -4488,7 +4534,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         except Unanswered as e:
             # the line is alive and the session stays; the screen may or may not have changed under the agent's list
             view.moved = True
-            self.unsettled = True
+            self.unsettled, self.unsettled_from = True, None
             self._announce("agent", name, ok=False, code="timeout")
             raise Refused("timeout", f"{e}; the action may have happened: look before you retry.") from None
         except ConnectionLost as e:
@@ -4551,6 +4597,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view.moved = view.moved or not looks
         if not reads_only:
             self.unsettled = not looks
+            self.unsettled_from = (None if looks or "mark" not in box
+                                   else (box["mark"], settle or RESOLVE_SETTLE, time.monotonic()))
         said_done = self._redact(str(result))  # (before element_name and the caption cut it, §18.6)
         self._announce("agent", name, label=element_name(said_done), caption=step_caption(name, said_done, args),
                        point=self._point(self.session.last_point))
@@ -4613,7 +4661,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # like a still screen, so "No visible change" could be false. Then the tree read decides (0.16 s).
         if (not done.changed and name != "toggle" and not (full[0] or view.moved) and not view.shown_off
                 and not self._fed_by_video()
-                and (mark[1] is view.read_mark[1] or alike(mark[1], view.read_mark[1]))):
+                and (mark[1] is view.read_mark[1] or self._alike(mark[1], view.read_mark[1]))):
             # no frame changed after the call returned, and the picture at its start is the one the agent's
             # list was read against (nothing changed silently before it): no tree read, the list stays.
             # Not when something lies off screen: the action's effect may be there, and only a read shows it
@@ -7423,7 +7471,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 else:
                     await self._settle(seq, cap=RESOLVE_SETTLE, since=since)
                     settled = self._mark()[1]
-                if alike(settled, previous):
+                if self._alike(settled, previous):
                     break  # the swipe left the screen as the one before did: the end of the list
                 previous = settled  # (with no stream there is nothing to compare: every swipe is made)
                 if loop.time() - began >= SCROLL_CAP:
@@ -8683,11 +8731,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     async def _swipe(self, view, a: dict) -> str:
         """`swipe`: a drag that barely moves is a touch where it starts, so it goes through the policy as a tap there
         would (safety review H3). A full swipe across a list row runs the row's first action (often Delete or Archive)
-        with no button touched, so it needs a person's OK each time (review 1.7 B-M7). The tree is read for every swipe."""
+        with no button touched, so it needs a person's OK each time (review 1.7 B-M7). The tree is read for a swipe that is
+        a touch (its element is judged); (2.0, worker I) a full swipe is judged from the newest read without reading again
+        (0.2-0.8 s before every drag, on the phone 2026-11-26): `_full_swipe_ok` asks nobody now, and the explore floor's
+        gate (_last_checks, before every tool) needs no element for a swipe."""
         x0, y0, x1, y1 = (float(a[k]) for k in ("x0", "y0", "x1", "y1"))
-        items = (await self.session.refresh()).items
+        tiny = math.hypot(x1 - x0, y1 - y0) < SWIPE_IS_TAP
+        items = (await self.session.refresh()).items if tiny else list(getattr(self.session, "items", None) or [])
         said = ""
-        if math.hypot(x1 - x0, y1 - y0) < SWIPE_IS_TAP:
+        if tiny:
             # (a touch where it starts, at a point: raw, as a point tap is)
             _, _, said = await self._last_checks("swipe", a, self._element_at((x0, y0), items), hit=False)
         elif (row := full_row_swipe(items, x0, y0, x1, y1)) is not None:
@@ -8781,7 +8833,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         button. A bar without one is a root screen (or has only Cancel,
         Done and the like): nothing is tapped. The edge swipe is only for screens with no bar at all."""
         s = self.session
-        listed = self._back_from_list(view)
+        listed = await self._back_from_list(view)
         back = listed if listed is not None else await self._still_back()
         if listed is not None:
             trace.note("back_from_list", True)  # (the timing trace only: no read before the touch)
@@ -8815,28 +8867,61 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
 
-    def _back_from_list(self, view) -> ui.Back | None:
+    async def _back_from_list(self, view) -> ui.Back | None:
         """(2.0, worker H) What `back` would touch, from the agent's own list when nothing can have changed since it was
         read: then reading the tree again before the touch only costs time (0.5-1.0 s on a heavy page, measured on the
         phone 2026-11-26). The same test the tap path uses before it reads live (_current), and stricter: the list's
         tree is the session's newest read (no other read since, of this agent or another), whole, with nothing open on
         top (a sheet or popover is read until it stands still, _still_back); the agent's list is current, the stream's
         newest frame is fresh and like the one the list was read against (_screen_unchanged), and the screen stands
-        still now (_proven_still). Any doubt: None, and `back` reads as before."""
+        still now (_proven_still). Any doubt: None, and `back` reads as before.
+        (2.0, worker I) The runner sends no frames while it reads the tree, so right after the agent's list was read the
+        newest frame is as old as that read (1.2-1.8 s on Settings > General, phone 2026-11-26) and nothing is proven
+        still: up to BACK_STILL_WAIT is spent waiting for fresh frames that prove it (every test again on each one), far
+        less than the read it saves. Some times the runner's frames don't come back after a read until its next request
+        ends (seen for seconds on the phone, 2026-11-26): when no frame comes within BACK_FIRST_FRAME, `back` reads."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + BACK_STILL_WAIT
+        fresh = False  # a frame came during the wait: the stream flows
+        while True:
+            back, why = self._back_listed(view)
+            left = deadline - loop.time()
+            if back is not None or why != STILL_UNPROVEN or left <= 0:
+                break
+            latest = self.hub.latest
+            wait = left if fresh else min(left, BACK_FIRST_FRAME)
+            if await self.hub.next_after(latest.seq if latest is not None else 0, timeout=wait) is None:
+                back, why = self._back_listed(view)
+                break
+            fresh = True
+        if back is None and session_module.TRACE:
+            self.log(f"trace back reads first: {why}" + (self._why_not_still() if why == STILL_UNPROVEN else ""))
+        return back
+
+    def _back_listed(self, view) -> tuple[ui.Back | None, str]:
+        """_back_from_list's tests, once: (the button, "") or (None, why not)."""
         s = self.session
         tree = getattr(view, "tree", None)
-        if (tree is None or tree is not getattr(s, "last_tree", None) or getattr(tree, "tier", "full") != "full"
-                or tree.back is None or tree.back.dismiss is not None or tree.behind):
-            return None
-        if view.opened or self.unsettled or not self._current(view) or not self._screen_unchanged(view):
-            return None
+
+        def no(why: str) -> tuple[None, str]:
+            return None, why
+        if tree is None or tree is not getattr(s, "last_tree", None):
+            return no("not the newest read")
+        if (getattr(tree, "tier", "full") != "full" or tree.back is None or tree.back.dismiss is not None
+                or tree.behind):
+            return no("no plain back button in it")
+        if view.opened or self.unsettled or not self._current(view):
+            return no("the list isn't current")
+        if not self._screen_unchanged(view):
+            return no("the picture changed since the read" + (_where_unlike(self.hub.latest, view.read_mark[1])
+                                                               if session_module.TRACE else ""))
         try:
             if not self._proven_still(noted=False):
-                return None
+                return no(STILL_UNPROVEN)
         except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: read as before
-            return None
+            return no("the picture can't be compared")
         s.behind, s.front_items = tree.behind, tree.items  # (as back_point leaves them, for `back`'s own checks)
-        return tree.back
+        return tree.back, ""
 
     async def _back_before(self, view, a: dict, listed: bool = False) -> None:
         """`back` with `look: false`: the state before the touch, to compare with the one after it (see
@@ -8926,7 +9011,26 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """XCTest no longer waits for the app to go idle, so after an action that wasn't settled (`look: false`)
         nothing may act or read until the screen is still (cap RESOLVE_SETTLE)."""
         if self.unsettled:
-            await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
+            await self._settle_unsettled()
+
+    async def _settle_unsettled(self) -> Settled:
+        """(2.0, worker I) The settle a `look: false` action owed, before anything reads or acts after it. Measured from
+        the frame before its gesture (`since`), with the frames since then (`early`), as its own settle would have been:
+        a screen that hasn't changed since the touch is believed unchanged only after the quiet span (HANDS_QUIET after a
+        hands touch). Without `since`, the first still moment ended it: in Settings a tap on General shows nothing for
+        0.45-0.65 s before the push starts (stream, phone 2026-11-26), so `back` right after `tap … look: false` read the
+        page being left and answered "the navigation bar has no back button" (4 of 8 rounds). No wait at all when the
+        action returned more than HANDS_QUIET ago and the stream shows the screen still now (_proven_still)."""
+        owed, self.unsettled_from = self.unsettled_from, None
+        try:
+            if owed is None or owed[0][1] is None:  # (a timeout, or no stream as the gesture went out: as before)
+                return await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
+            (seq, before), cap, returned = owed
+            ago = time.monotonic() - returned
+            if ago >= HANDS_QUIET and self._proven_still(noted=False):
+                return Settled(0.0, False, False, True)
+            return await self._settle(self._mark()[0], cap=max(RESOLVE_SETTLE, cap - ago), since=before, early=seq)
+        finally:
             self.unsettled = False
 
     async def _silent_read(self, view) -> bool:
@@ -8935,10 +9039,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         True when a re-read could show something else: the stream moved, ended capped, or has no frames."""
         s = self.session
         began = time.perf_counter()
-        proven = self._proven_still()
+        # (a `look: false` action's owed settle comes first: still frames before a delayed push prove nothing)
+        owed = self.unsettled
+        proven = not owed and self._proven_still()
         trace.note("still_proven", proven)  # (the timing trace only: whether the wait was skipped, and what the proof cost)
         trace.note("proof_ms", round((time.perf_counter() - began) * 1000, 2))
-        done = Settled(0.0, False, False) if proven else await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
+        if owed:
+            done = await self._settle_unsettled()
+        else:
+            done = Settled(0.0, False, False) if proven else await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
         self.unsettled = False
         trace.mark("still")  # (the read's request goes next)
         mark = self._mark()  # taken before the read: a frame that changes meanwhile counts against the list
@@ -8954,7 +9063,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view.top_ref = max(view.top_ref, changes.highest(view.items))
         view.read_at, view.read_mark = self.control.clock(), mark  # the next target in the same window needn't read again
         s.items = view.items
-        return done.capped or mark[1] is None or not alike(self._mark()[1], mark[1])
+        return done.capped or mark[1] is None or not self._alike(self._mark()[1], mark[1])
 
     @staticmethod
     def _missing(items: list[ui.Element], target: ui.Target) -> bool:
@@ -9039,6 +9148,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         `changed` is False only when the answer is certain: 3 frames, all like `since`, and `quiet` seconds.
         A stall, no frames at all (it sleeps `settle_fallback` in total, first-frame wait included), too
         few frames, or the cap all report changed=True, so the tree gets read."""
+        same = self._alike  # (the edge strips left out: alike_on_glass)
         gap = self.hub.gap()
         still = max(self.settle_still if still is None else still, 2.5 * gap if gap else 0.0)
         stall = max(3 * gap if gap else 0.0, still)
@@ -9059,10 +9169,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if early is not None:
             last = None
             for arrived, frame in self.hub.since(early, upto=after_seq):
-                if not differs and not alike(frame, since):
+                if not differs and not same(frame, since):
                     trace.frame(since, arrived)
-                differs = differs or not alike(frame, since)
-                if alike(frame, first_of_run):
+                differs = differs or not same(frame, since)
+                if same(frame, first_of_run):
                     run += 1
                 else:
                     run, run_start, first_of_run = 1, arrived, frame
@@ -9084,10 +9194,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     await asyncio.sleep(max(0.0, self.settle_fallback - (now - began)))
                 return Settled(loop.time() - began, True, False)  # or a stall
             seq = frame.seq
-            if not differs and not alike(frame, since):
+            if not differs and not same(frame, since):
                 trace.frame(since)
-            differs = differs or not alike(frame, since)
-            if alike(frame, first_of_run):
+            differs = differs or not same(frame, since)
+            if same(frame, first_of_run):
                 run += 1
             else:
                 run, run_start, first_of_run = 1, now, frame
@@ -9130,7 +9240,25 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if anchor is None:
             return False  # the history doesn't reach back over the window
         within = [f for t, f in frames if t > start]
-        return len(within) >= 2 and all(alike(f, anchor) for f in reversed(within))
+        return len(within) >= 2 and all(self._alike(f, anchor) for f in reversed(within))
+
+    def _why_not_still(self) -> str:
+        """(the timing trace only) Why _proven_still said no: the stream's gap and age, and where a frame differs."""
+        try:
+            gap, age = self.hub.gap(), self.hub.age()
+            frames = self.hub.recent()
+            still = max(self.settle_still, 2.5 * gap) if gap else 0.0
+            start = frames[-1][0] - still if frames else 0.0
+            anchor = next((f for t, f in reversed(frames) if t <= start), None)
+            odd = next((f for t, f in frames if t > start and not self._alike(f, anchor)), None)
+            where = _where_unlike(odd, anchor) if odd is not None and anchor is not None else ""
+            now = self.hub.mono()
+            last = [round((t - now) * 1000) for t, _ in frames[-4:]]
+            return (f" (gap {gap and round(gap * 1000)} ms, age {age and round(age * 1000)} ms, "
+                    f"anchor {'yes' if anchor is not None else 'no'}{where}, last frames at {last} ms, "
+                    f"seq {getattr(self.hub.latest, 'seq', None)})")
+        except Exception as e:  # noqa: BLE001 - only a trace note
+            return f" ({type(e).__name__})"
 
     def _mark_read(self, view) -> None:
         """A tree read starts: note the stream's picture (its SHA-1 and, if it's recent, its bytes), so a
@@ -9359,13 +9487,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return False
         return self.control.clock() - view.read_at < LIVE_AGE or self._screen_unchanged(view)
 
+    def _alike(self, a: Frame | None, b: Frame | None) -> bool:
+        """alike_on_glass for this phone's screen and orientation."""
+        s = self.session
+        return alike_on_glass(a, b, getattr(s, "screen", None), getattr(s, "turn", 0) or 0)
+
     def _screen_unchanged(self, view) -> bool:
         """Does the stream show the picture the list was read against? Only a fresh newest frame that
         matches the one at read time says so; with no stream the answer is no, and the list is read again."""
         frame, (_, was) = self.hub.latest, view.read_mark
         if frame is None or was is None or self.hub.now_ms() - frame.at > FRESH_FRAME * 1000:
             return False
-        return alike(frame, was)
+        return self._alike(frame, was)
 
     async def _read(self, fn):
         """A read through the queue; after a dropped line, once more when reconnected."""
