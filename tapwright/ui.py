@@ -1823,10 +1823,40 @@ def replayed(items: list[Element], target: Target, tool: str | None) -> Element 
     return switch_first(items, target) if tool == "toggle" else resolve(items, target)
 
 
+SAME_THING_SLACK = 2.0  # points two listings of one thing may differ by at each edge (frames are rounded, a wrapper pads)
+SAME_THING_COVER = 0.9  # ...or the share of the larger frame the smaller one covers, one inside the other
+
+
+def _same_place(a: Element, b: Element) -> bool:
+    """Are the two the same thing listed twice: frames alike within SAME_THING_SLACK points, or one inside the other
+    covering nearly all of it (a wrapper and its control)? An element without a size is never one."""
+    if a.width <= 0 or a.height <= 0 or b.width <= 0 or b.height <= 0:
+        return False
+    if _same_rect(a.rect, b.rect) or all(abs(p - q) <= SAME_THING_SLACK for p, q in zip(a.rect, b.rect)):
+        return True
+    small, big = sorted((a, b), key=lambda e: e.width * e.height)
+    return _inside(small, big) and small.width * small.height >= SAME_THING_COVER * big.width * big.height
+
+
+def one_thing(hits: list[Element]) -> Element | None:
+    """(2.0.3) When every match is one thing listed more than once (a React Native view and its own wrapper, both given
+    the same testID: `e3 other id=closeButton @16,81 40x40` and `e4 button id=closeButton @16,81 40x40`, phone
+    2026-11-26), the one to act on: the one that takes a touch, typing or a toggle; of several, a button's or a field's
+    role over a bare `other`, then the innermost (the last listed, drawn on top). None when any two are at different
+    places: those stay `ambiguous`. A touch on either lands on the same spot; this only spares the agent a needless
+    question. `index` still counts every match (resolve answers it before asking this)."""
+    if len(hits) < 2 or not all(_same_place(a, b) for i, a in enumerate(hits) for b in hits[i + 1:]):
+        return None
+    acting = [e for e in hits if _actionable(e)] or hits
+    named = [e for e in acting if e.role != "other"] or acting
+    return named[-1]
+
+
 def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
     """The element a target names on the agent's list, or its point (a touch at x, y hits whatever
     is there, so a point never becomes an element). Several matches without an `index` are
-    `ambiguous`, with candidates; none, or an `index` past the matches, are `not_found`."""
+    `ambiguous`, with candidates, unless they are one thing listed twice (one_thing); none, or an `index` past the
+    matches, are `not_found`."""
     if target.point is not None:
         return target.point
     if target.ref is not None:
@@ -1845,6 +1875,8 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
                                        f"{what}{where}")
         return hits[target.index]
 
+    if len(hits) > 1 and (one := one_thing(hits)) is not None:
+        return one
     if len(hits) > 1:
         shown = hits[:MAX_CANDIDATES]
         raise Refused("ambiguous", f"{len(hits)} elements match {what}.\nCandidates:\n"
@@ -1915,6 +1947,36 @@ def _says_back(name: str) -> bool:
     leading other words (`Back to top`)?"""
     words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)]
     return words[-1:] == ["back"] or words[-2:] == ["back", "button"]
+
+
+# (2.0.3) where a screen's own back control sits when there is no navigation bar's: wholly within this many points
+# across and down from the top-left corner, upright; in landscape the status bar is gone and the left safe area (the
+# camera's side, about 60 pt) comes first, so the corner is wider and shorter
+OWN_BACK_UPRIGHT = (120.0, 140.0)
+OWN_BACK_LANDSCAPE = (180.0, 100.0)
+
+
+def names_back(text: str) -> bool:
+    """(2.0.3) Does an id or label say "back" as a word of its own: a word of a sentence, or a camel-case or snake-case
+    part (`searchResultBackButton`, `icBrutalBack`, `back_button`, "Back", "Go back")? Never inside another word
+    ("background", "feedback", "playback", "backup", "backspace"), and never "back to top" (a scroll to the top)."""
+    words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", text)]
+    return any(w == "back" and words[i + 1:i + 3] != ["to", "top"] for i, w in enumerate(words))
+
+
+def own_back(items: list[Element], screen: tuple[float, float]) -> Element | None:
+    """(2.0.3) The screen's own back control, for a screen with no navigation bar's back button (a shopping app's search
+    results: `button "icBrutalBack" id=searchResultBackButton @16,59 40x40`, phone 2026-11-26): the one element that
+    takes a tap (a button, or anything with the tap action), enabled, not in an alert nor in a view another process draws,
+    whose frame lies wholly in the top-left corner (OWN_BACK_UPRIGHT, OWN_BACK_LANDSCAPE) and whose id or label says back
+    (names_back). One thing listed twice (one_thing) counts once. None when none or several qualify: nothing is guessed."""
+    across, down = OWN_BACK_LANDSCAPE if screen[0] > screen[1] else OWN_BACK_UPRIGHT
+    found = [e for e in items
+             if (e.role == "button" or "tap" in e.actions) and e.enabled and not e.in_alert and not e.placed
+             and e.width > 0 and e.height > 0 and e.x >= -1 and e.y >= -1
+             and e.x + e.width <= across and e.y + e.height <= down
+             and (names_back(e.identifier) or names_back(e.label))]
+    return found[0] if len(found) == 1 else one_thing(found)
 
 
 def _is_back(node: ET.Element) -> bool:

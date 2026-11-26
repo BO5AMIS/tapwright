@@ -174,6 +174,7 @@ class FakeDevice:
         self.holders: dict[int, tuple[str, float | None]] = {}  # pid -> (bundle id, start) of whatever holds it now, if
         #                                                         that is not what `pids` says (a pid taken by another app)
         self.proc_error: Exception | None = None  # the process list can't be read
+        self.proc_list_asks = 0  # questions of the whole list for several apps (processes_of)
 
     async def app_pids(self, bundle_id: str) -> list[int]:
         self.app_pids_calls += 1
@@ -185,6 +186,15 @@ class FakeDevice:
         if self.proc_error is not None:
             raise self.proc_error
         return [Proc(pid, self.starts.get(pid), bundle_id) for pid in self.pids.get(bundle_id, [1])]
+
+    async def processes_of(self, bundle_ids):
+        """One question of the whole process list for several apps (Device.processes_of): counted once."""
+        self.proc_list_asks += 1
+        self.app_pids_calls += 1
+        if self.proc_error is not None:
+            raise self.proc_error
+        from tapwright.device import Proc
+        return {b: [Proc(pid, self.starts.get(pid), b) for pid in self.pids.get(b, [1])] for b in bundle_ids}
 
     async def phone_time_ms(self) -> int | None:
         return self.phone_ms

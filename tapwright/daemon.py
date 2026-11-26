@@ -31,7 +31,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                diagnostics, dialog, driving, explorefloor, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, scriptrepair, scriptrepairrun, store, trace, trip, ui, uxcheck)
-from . import autoroute, tokentext
+from . import autoroute, loopdog, tokentext
 from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
 from . import auditlog, center_tool, grants as grantlib, otp as otplib, schedules as schedulelib
@@ -1355,6 +1355,30 @@ CRASH_LOOKUP = 15.0  # seconds each step of the optional crash check (the apps' 
 LOG_VERIFY_FAILS = 2 # checks of whose process a log stream is reading that may fail in a row before the stream is left
 LOG_START_SLACK_MS = 1000  # an entry this much before a process's start time still counts as its own (clocks, rounding)
 LOG_CHECK, LOG_BACKOFF_MAX = 3.0, 60.0 # seconds between looks at whether the app's process is still the one read; the longest wait between tries to start a stream
+# (2.0.3, brief Q fix 4) the log watchers share one question of the phone's process list (0.35-0.9 s each over the tunnel;
+# one watcher per app ever opened each asked its own: 73 questions in 30 s with a dozen apps, the phone idle): at most one
+# every PROC_EVERY seconds while busy (a `logs` or `crash` call, or any call while a watched app is in front, within
+# PROC_BUSY_FOR), else one every PROC_QUIET; a `logs` call's own question goes at once
+PROC_EVERY, PROC_QUIET, PROC_BUSY_FOR = 1.0, 30.0, 60.0
+PROC_ASK_WAIT = 5.0  # seconds one shared question may take
+
+
+@dataclasses.dataclass
+class SharedProcs:
+    """(2.0.3) One answer of the phone's process list, for every log watcher and `logs` call that can use it: the running
+    processes of each app it was asked for (`of`), or the error that came instead. `marks`: each ring's `added` count as
+    the question went out, which is what the answer vouches for (lines read before the question)."""
+    n: int  # the question's number: a later question has a higher one (the clock is too coarse to order them on Windows)
+    sent: float  # time.monotonic() when the question went out
+    of: dict[str, list[Proc]]
+    marks: dict[str, int]
+    error: Exception | None = None
+
+    def of_or_raise(self, bundle: str) -> list[Proc]:
+        """The app's processes, or the error the question got (as a question of that app alone raised it)."""
+        if self.error is not None:
+            raise self.error
+        return list(self.of.get(bundle, []))
 # looks for a report once the app is gone, seconds between them, later calls that look again
 CRASH_POLLS, CRASH_POLL, CRASH_LATE_TRIES = 3, 1.0, 3
 CRASH_CUT_CODES = ("not_connected", "not_answering", "reconnecting", "timeout")  # errors a crash can end a call with
@@ -1430,6 +1454,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._log_life: dict[str, tuple[Proc, int]] = {}  # that process, and the ring's `added` count when it was last vouched for
         self.log_retry, self.log_idle, self.log_warmup = LOG_RETRY, LOG_IDLE, LOG_WARMUP
         self.log_check, self.log_drain = LOG_CHECK, LOG_DRAIN
+        # (2.0.3) the watchers' shared process-list question (_shared_procs): the newest answer, the newest question out,
+        # when it went out, every question still out (cancelled at shutdown), and when a client last called / asked for
+        # logs or a crash
+        self.proc_every, self.proc_quiet, self.proc_busy_for = PROC_EVERY, PROC_QUIET, PROC_BUSY_FOR
+        self._procs_last: SharedProcs | None = None
+        self._procs_flight: "asyncio.Task[SharedProcs] | None" = None
+        self._procs_sent, self._procs_n = -math.inf, 0
+        self._procs_tasks: set[asyncio.Task] = set()
+        self._called_at = self._diag_at = -math.inf
         self.crash_lookup = CRASH_LOOKUP
         self._log_dead: dict[str, str] = {}  # bundle id -> why its log stream can't be started (tries gave up)
         self.crash_polls, self.crash_poll = CRASH_POLLS, CRASH_POLL
@@ -1472,6 +1505,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                suspended=self._fed_by_video)
         self._stream_wait_failed: int | None = None  # (2.0.3) the newest frame's seq when a wait for the stream got nothing
         self.log = lambda message: log(self.scrub_everywhere(message))  # (what any sink gets holds no account's value)
+        # (2.0.3) the sink itself, for the loop watchdog's thread (loopdog.py): what it writes is file, line and function
+        # names, never a value, and the accounts' scrub belongs to the loop's thread
+        self._raw_log = log
         self._media_lock = asyncio.Lock()  # makes a media add's lookup, start and claim of the photo wait one step
         # the add that holds the phone, and until when: iOS's photo prompt, or a video's copy and import (1.7.9). The
         # runner answers nothing else meanwhile (Codex, PR #8); `_photo_wait_kind` says which (HOLD_WORDS)
@@ -2076,11 +2112,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             await self._supervise(stop)
         finally:
-            for helper in (pacer, watch, dog, *self._log_tasks.values()):
+            for helper in (pacer, watch, dog, *self._log_tasks.values(), *self._procs_tasks):
                 if helper is not None:
                     helper.cancel()
                     await asyncio.gather(helper, return_exceptions=True)
             self._log_tasks.clear()
+            self._procs_tasks.clear()
 
     # ---- the watchdog (§24.5) ----
     async def _watch_phone(self, stop: asyncio.Event) -> None:
@@ -2212,13 +2249,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         from outside like a phone that doesn't answer."""
         loop = asyncio.get_running_loop()
         worst, told = 0.0, loop.time()
-        while not stop.is_set():
-            before = loop.time()
-            await asyncio.sleep(LOOP_TICK)
-            worst = max(worst, loop.time() - before - LOOP_TICK)
-            if worst >= LOOP_HELD and loop.time() - told >= LOOP_SAY_EVERY:
-                self.log(f"the event loop was held for {worst:.2f} s; the tunnel's packets waited meanwhile")
-                worst, told = 0.0, loop.time()
+        # (2.0.3, brief Q fix 5) and, while it is held past loopdog.STALL, by what: a thread writes the loop thread's stack
+        dog = loopdog.LoopDog(self._raw_log).start()
+        try:
+            while not stop.is_set():
+                before = loop.time()
+                await asyncio.sleep(LOOP_TICK)
+                dog.beat()
+                worst = max(worst, loop.time() - before - LOOP_TICK)
+                if worst >= LOOP_HELD and loop.time() - told >= LOOP_SAY_EVERY:
+                    self.log(f"the event loop was held for {worst:.2f} s; the tunnel's packets waited meanwhile")
+                    worst, told = 0.0, loop.time()
+        finally:
+            dog.stop(wait=False)  # (a daemon thread: it ends at its next look, without holding the loop for it)
 
     # ---- the stream's pace ----
     def _preset_fps(self) -> int:
@@ -2360,6 +2403,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         A single scoped app can remain navigation metadata for scheduled routes.
         ux_rules, maps and accounts configure QA reports and stored workflow data.
         dialog supports platform moments that require a person's intervention."""
+        self._called_at = time.monotonic()  # (the log watchers ask the process list more often while agents call: _proc_gap)
         # Legacy app lists can identify a scheduled route's launch app; they never limit access.
         app_hint = app_hint or (scope.apps[0] if scope is not None and len(scope.apps) == 1 else None)
         floor_rules = policy  # (only explore's and a repair's skip floor reads it: _FLOOR_RULES)
@@ -2794,7 +2838,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         task = self._log_tasks.get(bundle)
         if (task is None or task.done()) and bundle not in self._log_dead:
             self._rings.setdefault(bundle, diagnostics.LogRing())
-            self._log_tasks[bundle] = asyncio.create_task(self._watch_logs(bundle), name=f"logs-{bundle}")
+            self._log_tasks[bundle] = asyncio.create_task(self._watch_logs(bundle, self._procs_n), name=f"logs-{bundle}")
 
     def restart_logs(self, bundle: str) -> None:
         """The app was started (open_app): read its new process at once and stop reading the old one. A stream asked
@@ -2806,6 +2850,67 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._log_pids.pop(bundle, None)
         self._log_dead.pop(bundle, None)  # a new start is a new try
         self.ensure_logs(bundle)
+
+    def _proc_gap(self) -> float:
+        """(2.0.3) Seconds between the watchers' shared process-list questions now: `proc_every` while busy (a `logs` or
+        `crash` call within `proc_busy_for`, or any call within it while the app in front is watched), else
+        `proc_quiet`. Never slower than a watcher's own pace while busy (log_check, log_retry), nor so slow when quiet that
+        a watcher whose app has gone asks fewer than twice before it gives up (log_idle)."""
+        now = time.monotonic()
+        busy = min(self.proc_every, self.log_check, self.log_retry)
+        if now - self._diag_at < self.proc_busy_for:
+            return busy
+        if now - self._called_at < self.proc_busy_for and self._bundle() in self._log_tasks:
+            return busy
+        return max(busy, min(self.proc_quiet, self.log_idle / 2))
+
+    async def _shared_procs(self, bundle: str, after: int, fresh: bool = False) -> SharedProcs:
+        """(2.0.3) An answer of the phone's process list that covers `bundle` and was asked after question number `after`
+        (`_procs_n` at the moment the caller needs it from): the newest one if it is, else one now out that is, else a new
+        question once `_proc_gap` has passed since the last one went out (one question serves every watcher; a watcher
+        never asks while one is out). `fresh` (a `logs` call, a stream that just ended, a watcher's first look): no gap is
+        waited, and an older question out isn't waited for either. Its error, if it got one, is in the answer
+        (SharedProcs.of_or_raise)."""
+        while True:
+            last = self._procs_last
+            if last is not None and last.n > after and bundle in last.marks:
+                return last
+            flight = self._procs_flight
+            if flight is not None and not flight.done() and (self._procs_n > after or not fresh):
+                answer = await asyncio.shield(flight)
+                if answer.n > after and bundle not in answer.marks:
+                    after = answer.n  # (asked before this app's ring was made: ask again)
+                continue
+            wait = 0.0 if fresh else self._procs_sent + self._proc_gap() - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(min(wait, self.proc_every))  # (the gap is asked again: a call may make it busy)
+                continue
+            self._procs_n += 1
+            self._procs_sent = time.monotonic()
+            self._procs_flight = task = asyncio.create_task(self._ask_procs(self._procs_n, self._procs_sent), name="procs")
+            self._procs_tasks.add(task)
+            task.add_done_callback(self._procs_tasks.discard)
+
+    async def _ask_procs(self, n: int, sent: float) -> SharedProcs:
+        """One question of the process list for every app whose log is kept, with each ring's count as it goes out
+        (SharedProcs.marks). The device's `processes_of` asks iOS once for all of them; a device without it is asked
+        app by app (test fakes)."""
+        marks = {b: ring.added for b, ring in self._rings.items()}
+        device = self.session.device
+        try:
+            every = getattr(device, "processes_of", None)
+            if every is not None:
+                of = await _wait_for(every(sorted(marks)), PROC_ASK_WAIT)
+            else:
+                of = {b: await _wait_for(device.app_processes(b), PROC_ASK_WAIT) for b in marks}
+            answer = SharedProcs(n, sent, {b: list(of.get(b, [])) for b in marks}, marks)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - whatever the phone said, every asker gets it as its own question's error
+            answer = SharedProcs(n, sent, {}, marks, e)
+        if self._procs_last is None or self._procs_last.n < n:
+            self._procs_last = answer  # (a `logs` call's question may overtake an older one: the newest stays)
+        return answer
 
     async def _read_log(self, bundle: str, proc: Proc, ring: "diagnostics.LogRing", after, got: list[int]) -> None:
         """One log stream of one process into the ring; `got[0]` counts the entries it gave. `after`: where an earlier
@@ -2828,7 +2933,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         are, since nothing vouches for them. Only the ring knows what is vouched for (a `logs` call vouches without the
         watcher looking, so the watcher's own mark can be behind): a vouched line is never taken back."""
         try:
-            now = await _wait_for(self.session.device.app_processes(bundle), 5)
+            now = (await self._shared_procs(bundle, self._procs_n, fresh=True)).of_or_raise(bundle)
             if any(p.same_life(proc) for p in now):
                 return
             holder = await _wait_for(self.session.device.process_holder(proc.pid), 5)
@@ -2844,30 +2949,36 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             ring.discard_unvouched()  # another process was seen holding the pid: its absence proves nothing
         # (else: gone, with nobody holding the pid, is an ordinary end: its last lines are its own)
 
-    async def _watch_logs(self, bundle: str) -> None:
+    async def _watch_logs(self, bundle: str, after: int = 0) -> None:
         """Keep the app's own process's log entries in its ring. An entry of any other pid is never kept (the stream is
         asked for the app's pid alone, and checked again here). While a stream is open, the app's process is looked
         for every `log_check` seconds: when it is another pid, or none, the stream is left (the app started again).
         When the process is gone, look for a new one until `log_idle` seconds have gone by; `ensure_logs` starts the
         task again when it is needed. A stream that can't be started `LOG_STREAM_FAILS` times in a row (no log service
         on this phone) is given up, with waits growing between the tries, and `logs` says so."""
-        ring, idle, told, fails = self._rings[bundle], 0.0, False, 0
+        ring, told, fails = self._rings[bundle], False, 0
+        # (2.0.3) the shared process list's answers (_shared_procs): each look takes one asked after the one before it, the
+        # first one asked after the watcher was made (`after`: an older one may show the app's process before a restart),
+        # at once; the app gone for `log_idle` seconds of them ends the watcher
+        seen, missing, first = after, None, True
         while True:
+            answer = await self._shared_procs(bundle, seen, fresh=first)
+            seen, first = answer.n, False
             try:
-                procs = await self.session.device.app_processes(bundle)
+                procs = answer.of_or_raise(bundle)
             except Exception as e:
                 if not told:
                     self.log(f"logs: couldn't find {bundle}'s process: {e}")
                     told = True
                 procs = []
             if not procs:
-                idle += self.log_retry
-                if idle > self.log_idle:
+                missing = answer.sent if missing is None else missing
+                if answer.sent - missing > self.log_idle:
                     self._log_pids.pop(bundle, None)
                     return
                 await asyncio.sleep(self.log_retry)
                 continue
-            idle, proc = 0.0, procs[0]
+            missing, proc = None, procs[0]
             self._log_pids[bundle] = proc.pid
             prior = self._log_life.get(bundle)
             if prior is not None and not prior[0].same_life(proc):
@@ -2888,9 +2999,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     await asyncio.wait({reader}, timeout=self.log_check)
                     if reader.done():
                         break
-                    asked = ring.added  # (what came before the question is what its answer vouches for)
+                    # the next shared answer, unless the stream ends first (a quiet phone's answer can be a while)
+                    ask = asyncio.ensure_future(self._shared_procs(bundle, seen))
+                    await asyncio.wait({reader, ask}, return_when=asyncio.FIRST_COMPLETED)
+                    if not ask.done():
+                        ask.cancel()
+                        await asyncio.gather(ask, return_exceptions=True)
+                        break
+                    answer = ask.result()
+                    seen = answer.n
+                    # (what came before the question is what its answer vouches for: the ring's count as it went out)
+                    asked = max(mark, answer.marks.get(bundle, mark))
                     try:
-                        now = await _wait_for(self.session.device.app_processes(bundle), 5)
+                        now = answer.of_or_raise(bundle)
                     except Exception:
                         unchecked += 1
                         if unchecked >= LOG_VERIFY_FAILS:
@@ -2939,7 +3060,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self.ensure_logs(bundle)
         if bundle in self._log_tasks and self._connected.is_set():
             try:
-                procs = await _wait_for(self.session.device.app_processes(bundle), 5)
+                procs = (await self._shared_procs(bundle, self._procs_n, fresh=True)).of_or_raise(bundle)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 procs = []
             life = self._log_life.get(bundle)
@@ -2959,9 +3082,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return
         asked = ring.added
         try:
-            procs = await _wait_for(self.session.device.app_processes(bundle), 5)
+            answer = await self._shared_procs(bundle, self._procs_n, fresh=True)
+            procs = answer.of_or_raise(bundle)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             return
+        asked = answer.marks.get(bundle, asked)  # (asked after this call began: its count as it went out)
         if not any(p.same_life(life[0]) for p in procs):
             if procs:  # the app is another process now: restart_logs reads that one
                 return
@@ -2998,6 +3125,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     async def _diag_tool(self, name: str, args: dict, given: dict[str, str] | None) -> dict:
         """`logs` or `crash`. `given`: the apps of a personal-mode agent (None: a dedicated device)."""
         args = _checked_diag(name, args)
+        self._diag_at = time.monotonic()  # (the watchers keep the process list's word fresh for a while: _proc_gap)
         bundle, shown = self._diag_app(given)
         self._diag_count = None
         if name == "logs":
@@ -9311,6 +9439,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._dry(a, "Would close the sheet.")
             await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
             return "Closed the sheet."
+        own = None if back.point is not None or back.hosted else \
+            ui.own_back(getattr(s, "front_items", None) or view.items, s.screen)
+        if own is not None:
+            # (2.0.3) no bar's back button, and the screen shows its own in the top-left corner (ui.own_back): a person
+            # taps that, never the edge swipe or the sheet's ways out (a shopping app's search results: a header strip
+            # read as a layer in front sent `back` there, 15.7 s and four reads, and nothing went back). Shown, so it
+            # is in front: the touch passes the same checks and the same banner wait as the bar's button.
+            said = self._own_back_line(view, own)
+            self._dry(a, f"Would tap the screen's back button: {said}.")
+            await self._back_before(view, a, listed is not None)
+            await s.tap(ui.Target(x=own.center[0], y=own.center[1]))
+            return f"Tapped the screen's back button: {said}."
         behind = getattr(s, "behind", [])
         # A sheet in front with no region of its own to tap. A back button it hides belongs to the screen behind
         # (it can't be reached, and where the backdrop lets a touch through it would leave that screen with the
@@ -9336,6 +9476,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         await self._back_before(view, a, listed is not None)
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
+
+    @staticmethod
+    def _own_back_line(view, own: ui.Element) -> str:
+        """The screen's own back control as the answer names it: by the agent's ref when its list has that very element
+        (the read `back` made numbers its own elements), else without a ref."""
+        mine = next((e for e in view.items if e.identifier == own.identifier and e.label == own.label
+                     and ui._same_rect(e.rect, own.rect)), None)
+        return (mine or own).line(ref=mine is not None, actions=False, place=False)
 
     async def _back_from_list(self, view) -> ui.Back | None:
         """(2.0, worker H) What `back` would touch, from the agent's own list when nothing can have changed since it was
@@ -9439,10 +9587,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             front = behind[0][1] if behind else None
             box = ui.sheet_box(front, getattr(s, "front_items", None) or [], s.screen) if behind else None
             return back.dismiss, back.point, box
+        before = self.hub.latest
         back = await s.back_point()
         seen = where(back)
         if back.dismiss is None and not getattr(s, "behind", []):
             return back  # nothing is open on top: a bar's back button doesn't slide
+        if await self._still_across_read(before):
+            return back  # (2.0.3) the picture didn't move across the read: one read does (each costs seconds on a heavy page)
         for _ in range(BACK_STILL_TRIES):
             await asyncio.sleep(BACK_STILL_PAUSE)
             back = await s.back_point()
@@ -9451,6 +9602,32 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return back
             seen = now
         raise Refused("not_actionable", "no_action: what is open on top is still moving; call back again in a moment")
+
+    async def _still_across_read(self, before: "Frame | None") -> bool:
+        """(2.0.3) Did nothing move across `back`'s read: the first frame that comes after it (waited for up to
+        BACK_STILL_PAUSE, the pause a second read would have waited anyway) is like the newest one before it? The runner
+        sends no frames while it reads, so a sheet that slid during the read shows only as a different picture after it.
+        False with no stream, on the AirPlay video (a stalled mirror repeats its picture), or with no frame in time:
+        read again, as before."""
+        if before is None or self._fed_by_video():
+            return False
+        try:
+            now = self.hub.latest
+            after = await self.hub.next_after(max(before.seq, now.seq if now is not None else 0),
+                                              timeout=BACK_STILL_PAUSE)
+            return after is not None and self._alike(before, after)
+        except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: read again as before
+            return False
+
+    async def _sheet_unmoved(self, before: "Frame | None") -> bool:
+        """(2.0.3) After a touch meant to close the sheet: did the stream show no change at all once it settled (the
+        frames' word, as `back` with `look: false` takes it)? Then the sheet is still there and no read is spent to say
+        so. False with no stream or on the AirPlay video: read, as before."""
+        if before is None or self._fed_by_video():
+            return False
+        done = await self._settle(self._mark()[0], cap=RESOLVE_SETTLE, since=before)
+        self.unsettled = False
+        return not done.changed
 
     async def _close_sheet(self, view) -> str:
         """Close the sheet in front the two ways a person tries from outside it: a touch beside it, on what it
@@ -9470,15 +9647,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             beside = ui.beside_sheet(box, s.screen, SCROLL_TOP_INSET if top is None else top,
                                      s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
             if beside is not None:
+                mark = self.hub.latest
                 await s.tap(ui.Target(x=beside[0], y=beside[1]))
-                await self._silent_read(view)
-                if front() != was:
-                    return "Closed the sheet."
+                if not await self._sheet_unmoved(mark):
+                    await self._silent_read(view)
+                    if front() != was:
+                        return "Closed the sheet."
             if (pull := ui.sheet_pull(box, s.screen)) is not None:
+                mark = self.hub.latest
                 await s.swipe(*pull, 300)
-                await self._silent_read(view)
-                if front() != was:
-                    return "Closed the sheet."
+                if not await self._sheet_unmoved(mark):
+                    await self._silent_read(view)
+                    if front() != was:
+                        return "Closed the sheet."
         raise Refused("not_actionable", "no_action: nothing changed after back" + self._still_open())
 
     async def _settle_pending(self) -> None:

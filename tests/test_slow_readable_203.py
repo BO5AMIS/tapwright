@@ -626,6 +626,7 @@ def test_two_calls_that_overlap_each_keep_their_note(state):
         b: list[str] = []
         await _looked_for(s, stream, a)
         s.budgets = budget(clock=stream.clock)  # (another app's first look, for B)
+        s.slow_told.clear()  # (and the note not yet said of it: brief Q fix 3)
         await _looked_for(s, stream, b)
         assert s.take_slow_note(a) is not None and s.take_slow_note(b) is not None
     run(go)
@@ -661,7 +662,7 @@ def test_the_daemon_adds_the_note_to_the_answer_of_the_call_whose_read_made_it()
         await finish(stop, task)
         return mine["text"], theirs["text"], again["text"]
     mine, theirs, again = run(go)
-    assert mine.count("Note: this screen took about 4 s to read") == 1
+    assert mine.count("Note: this screen took about 4.1 s to read") == 1
     assert "took about" not in theirs and "took about" not in again
 
 
