@@ -1199,7 +1199,12 @@ class Device:
         """Apps you installed (App Store, TestFlight, development builds)."""
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
         async with InstallationProxyService(lockdown=self.rsd) as proxy:
-            apps = await proxy.get_apps(application_type="User")
+            # (2.0.3, brief Q fix 5) only what is used here: every attribute of every app (entitlements, paths, tags...)
+            # is megabytes of plist, parsed in one piece on the event loop while the tunnel waits (a 2.1 s call, after a
+            # look the loop was held 15.6 s on, phone 2026-11-26). An older pymobiledevice3 without `lookup` asks for all
+            lookup = getattr(proxy, "lookup", None)
+            apps = (await lookup({"ApplicationType": "User", "ReturnAttributes": list(APP_ATTRIBUTES)}) if lookup
+                    else await proxy.get_apps(application_type="User")) or {}
         return sorted(({"bundle_id": bid, "name": info.get("CFBundleDisplayName") or info.get("CFBundleName", ""),
                         "version": info.get("CFBundleShortVersionString", ""),
                         "build": info.get("CFBundleVersion", ""),
@@ -1227,6 +1232,9 @@ class Device:
 
 
 START_SLACK = 1.0  # seconds two readings of one process's start time may differ
+# what user_apps reads of each app (the installation proxy's ReturnAttributes)
+APP_ATTRIBUTES = ("CFBundleIdentifier", "CFBundleDisplayName", "CFBundleName", "CFBundleShortVersionString",
+                  "CFBundleVersion", "CFBundleExecutable")
 
 
 def own_line(image: object, executable: object) -> bool:
