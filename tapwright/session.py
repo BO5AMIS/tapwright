@@ -865,6 +865,9 @@ class Session:
                 source = None
             if source is not None:
                 return source
+            # (CodeRabbit, PR #26) a compact answer that was then discarded (a quick give-up whose retry was refused) left
+            # its tier: the tree returned is /source's, which is whole
+            self.last_tier, self.last_why = "full", ""
         return (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
 
     async def _bounded_tree(self, timeout: float) -> str | None:

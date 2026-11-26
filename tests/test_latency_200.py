@@ -294,6 +294,36 @@ def test_quick_give_ups_that_use_the_whole_budget_end_as_a_cut_read(monkeypatch)
     assert len(runner.paths("/wda/tw/tree")) == 3 and s.budgets.short(TIKTOK)  # kept under the budget first asked
 
 
+def test_a_source_read_after_a_refused_retry_is_whole_not_the_given_up_roots_tier(monkeypatch):
+    """(CodeRabbit, PR #26) the quick give-up left `root` as the tier; its retry was refused, so the tree came by
+    /source, which is whole: it must not be told as cut short (every check on it would be undecided)."""
+    from tapwright.device import DeviceError
+    from test_vision_200 import TIKTOK, V9Runner, _app
+
+    monkeypatch.setattr(session_module, "RETRY_GAP", 0.0)
+    runner = V9Runner()
+    runner.trees = [{"token": "r1", "tree": _app(), "tier": "root", "truncated": True,
+                     "why": "full: Error getting main window kAXErrorServerNotFound (after 8 ms)"}]
+    real = runner.http
+    asked = []
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if "/wda/tw/tree" in path:
+            asked.append(path)
+            if len(asked) == 2:
+                raise DeviceError("WebDriverAgent: unknown error: the retry was refused")
+        if "/source" in path:
+            runner.requests.append((method, path, payload))
+            return {"value": SETTINGS_TREE}
+        return await real(method, path, payload, timeout)
+    runner.http = http
+    s = Session(runner)
+    s.read_app = ("TikTok", TIKTOK)
+    tree = asyncio.run(s.refresh())
+    assert len(asked) == 2 and any("/source" in p for _, p, _ in runner.requests)
+    assert s.last_tier == "full" and s.last_why == "" and tree.tier == "full"
+
+
 # ---- a still screen that doesn't answer ----
 
 def test_a_still_screen_that_doesnt_answer_gets_the_normal_budget_once_not_every_time():
