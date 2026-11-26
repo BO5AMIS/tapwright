@@ -2,6 +2,7 @@
 holds the connection and WebDriverAgent's session, connecting on first use."""
 import asyncio
 import base64
+import binascii
 import contextvars
 import io
 import os
@@ -392,6 +393,20 @@ class _FieldGone(Exception):
 
 KEYS ={"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 ROOT_BUNDLE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bbundleId="([^"]*)"')
+
+
+def _jpeg_of(value: object, what: str) -> bytes:
+    """The JPEG bytes of a runner answer's `jpeg` (base64, route version 11). Raises DeviceError when there are none."""
+    data = value.get("jpeg") if isinstance(value, dict) else None
+    if not isinstance(data, str) or not data:
+        raise DeviceError(f"the runner's {what} came without a picture")
+    try:
+        picture = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise DeviceError(f"the runner's {what} sent a picture that can't be read") from None
+    if not picture.startswith(b"\xff\xd8"):
+        raise DeviceError(f"the runner's {what} sent no JPEG")
+    return picture
 
 
 def _root_bundle(source: object) -> str | None:
@@ -1048,6 +1063,36 @@ class Session:
         """WebDriverAgent's /screenshot (PNG, full resolution): the fallback when the stream has no frame."""
         return base64.b64decode((await self._call("GET", "/screenshot", timeout=60))["value"])
 
+    def shoots(self) -> bool:
+        """Does the runner take JPEG shots, and send the OCR read's picture with its text (route version 11)? Known
+        once the session has started."""
+        return self.tw_version >= FRONT_VERSION
+
+    async def shot_jpeg(self, width: int | None = None) -> bytes:
+        """(route version 11) The screen as a JPEG by SHOT_PATH, `width` pixels wide (None: the screenshot's own),
+        upright as /screenshot's PNG is: about 50 ms, where the PNG took 250-640 ms. Raises DeviceError when the answer
+        has no picture that can be read."""
+        query = [*([f"width={int(width)}"] if width else []), f"quality={SHOT_QUALITY}"]
+        answer = await self._call("GET", f"{SHOT_PATH}?{'&'.join(query)}", timeout=SHOT_WAIT)
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if isinstance(value, dict) and isinstance(value.get("ms"), dict):
+            trace.note("shot_wda_ms", {k: v for k, v in value["ms"].items()
+                                       if isinstance(v, (int, float)) and not isinstance(v, bool)})
+        return _jpeg_of(value, "shot")
+
+    async def screen_picture(self, width: int | None = None) -> bytes:
+        """A picture of the screen now, for an answer when the stream has none: the runner's JPEG shot (route version
+        11; `width` pixels wide, None: full size), else /screenshot's PNG. A shot that fails is taken as a PNG."""
+        await self.ensure()
+        if self.shoots():
+            try:
+                return await self.shot_jpeg(width)
+            except ConnectionLost:
+                raise
+            except DeviceError as e:
+                getattr(self.device, "log", lambda *a: None)(f"the runner's JPEG shot failed ({e}): /screenshot instead")
+        return await self.screenshot_png()
+
     def reads_text(self) -> bool:
         """Can the runner read the screen's text itself (OCR_PATH, route version 9)? Known once a read has asked the
         runner's routes (the first look of a session)."""
@@ -1057,19 +1102,36 @@ class Session:
         """The text lines on the screen now, read on the phone by Apple's Vision (OCR_PATH): placed in this session's
         points, in reading order. `level`: "accurate" (a look) or "fast" (wait_for's polls). Raises DeviceError when the
         runner can't (the caller reads the picture on this computer instead)."""
+        return (await self._read_text(level, None))[0]
+
+    async def read_text_and_picture(self, level: str = "accurate",
+                                    width: int | None = None) -> "tuple[list[ocr.Seen], bytes]":
+        """(route version 11) read_text, and the picture the text was read from as a JPEG `width` pixels wide (None:
+        full size), in one request (`image=1`): a look whose tree was cut short needs both. Raises DeviceError when the
+        runner can't, or its answer has no picture (an older runner ignores `image`)."""
+        if not self.shoots():
+            raise DeviceError("this runner can't send the OCR read's picture (route version 11)")
+        seen, value = await self._read_text(level, width or 0)
+        return seen, _jpeg_of(value, "OCR read")
+
+    async def _read_text(self, level: str, image: int | None) -> "tuple[list[ocr.Seen], object]":
+        """(the lines, the answer's value): read_text's request; with `image` (a width, 0: full size) it asks for the
+        picture too."""
         if level not in ("fast", "accurate"):
             raise ValueError(f"level must be fast or accurate, not {level!r}")
         languages = ",".join(p.strip() for p in OCR_LANGUAGES.split(",") if p.strip())
         if level == "fast" and not fast_reads(languages):
             level = "accurate"  # (review R200v M4) the fast level would fail every read in these languages
         path = f"{OCR_PATH}?level={level}" + (f"&languages={urllib.parse.quote(languages, safe=',-')}" if languages else "")
+        if image is not None:
+            path += f"&image=1{f'&width={int(image)}' if image else ''}&quality={SHOT_QUALITY}"
         answer = await self._call("GET", path, timeout=OCR_WAIT, again=False)
         value = answer.get("value", answer) if isinstance(answer, dict) else None
         if isinstance(value, dict) and isinstance(value.get("ms"), dict):
             trace.note("ocr_wda_ms", {k: v for k, v in value["ms"].items()
                                       if isinstance(v, (int, float)) and not isinstance(v, bool)})
         try:
-            return ocr.of_runner(value, self.screen)
+            return ocr.of_runner(value, self.screen), value
         except ValueError as e:
             raise DeviceError(f"the runner's OCR answer can't be read: {e}") from None
 

@@ -466,3 +466,144 @@ def test_a_session_whose_runner_gave_the_scale_needs_no_wda_screen_read(state):
     old = Session(Recorder())  # (Appium's build: no screen route; the connect reads /wda/screen as before)
     asyncio.run(old.ensure())
     assert not old.scale_by_runner
+
+
+# ---- 5. pictures: the runner's JPEG shot, and a cut-short look's picture with its text in one request ----
+
+def _jpeg(width=400, height=868) -> bytes:
+    import io
+
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("RGB", (width, height), (0, 0, 255)).save(out, "JPEG")
+    return out.getvalue()
+
+
+def test_the_session_takes_jpeg_shots_and_reads_text_with_its_picture_on_a_v11_runner(state):
+    import base64
+
+    from tapwright.session import Session
+    runner = _v11()
+    picture = _jpeg()
+    real = runner.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        bare = path.replace("/session/S", "")
+        if bare.startswith("/wda/tw/shot"):
+            runner.requests.append((method, path, payload))
+            return {"value": {"jpeg": base64.b64encode(picture).decode(), "size": [400, 868], "screen": [430, 932],
+                              "ms": {"shot": 35, "encode": 22}}}
+        if bare.startswith("/wda/tw/ocr") and "image=1" in bare:
+            runner.requests.append((method, path, payload))
+            return {"value": {"screen": [430, 932], "lines": [{"text": "For You", "rect": [170, 60, 70, 20],
+                                                                "confidence": 1}],
+                              "jpeg": base64.b64encode(picture).decode(), "size": [400, 868]}}
+        return await real(method, path, payload, timeout)
+    runner.http = http
+    s = Session(runner)
+    assert asyncio.run(s.screen_picture(400)) == picture
+    assert runner.paths("/wda/tw/shot") == ["/wda/tw/shot?width=400&quality=80"] and runner.paths("/screenshot") == []
+    seen, jpeg = asyncio.run(s.read_text_and_picture("accurate", 400))
+    assert [x.text for x in seen] == ["For You"] and jpeg == picture
+    assert runner.paths("/wda/tw/ocr") == ["/wda/tw/ocr?level=accurate&image=1&width=400&quality=80"]
+
+
+def test_an_older_runner_or_a_failed_shot_takes_the_png_as_before(state):
+    from tapwright.session import Session
+    for runner in (_v11(version=10), _v11()):
+        runner.fail["/wda/tw/shot"] = daemon_module.DeviceError("unable to capture screen")
+        s = Session(runner)
+        asyncio.run(s.ensure())
+        with pytest.raises(Exception):  # (the fake's /screenshot answers no PNG: what matters is that it was asked)
+            asyncio.run(s.screen_picture(400))
+        assert runner.paths("/screenshot") == ["/screenshot"]
+        assert len(runner.paths("/wda/tw/shot")) == (1 if runner.version >= 11 else 0)
+    with pytest.raises(daemon_module.DeviceError):
+        asyncio.run(Session(_v11(version=10)).read_text_and_picture())
+
+
+def _shooting_feed(d_box):
+    """The feed's fake session (no stream frames: the look's picture comes from the phone) on a v11 runner."""
+    from test_vision_200 import feed_session
+    s = feed_session()
+    s.pictures = []  # what each phone picture was asked as
+
+    def shoots():
+        return True
+
+    async def read_text_and_picture(level="accurate", width=None):
+        s._record("read_text_and_picture")
+        s.pictures.append(("ocr+image", width))
+        if d_box.get("unlock_during"):
+            d_box["d"]._unlock_spans = [(d_box["d"].hub.mono(), None)]
+        return list(s.runner_text), _jpeg()
+
+    async def screen_picture(width=None):
+        s._record("screen_picture")
+        s.pictures.append(("shot", width))
+        return _jpeg()
+    s.shoots, s.read_text_and_picture, s.screen_picture = shoots, read_text_and_picture, screen_picture
+    return s
+
+
+def test_a_cut_short_look_without_a_stream_frame_gets_picture_and_text_in_one_request(monkeypatch):
+    from test_daemon import finish, run, started
+
+    from tapwright import ocr, ui
+    from tapwright import shot as shotlib
+    monkeypatch.setattr(ocr, "available", lambda: False)
+
+    async def go():
+        box = {}
+        s = _shooting_feed(box)
+        d = box["d"] = make(s)
+        stop, task = await started(d)
+        r = await d.run_tool("a", "look", {})
+        assert s.pictures == [("ocr+image", shotlib.DEFAULT_WIDTH)] and "read_text" not in s.calls and "screenshot" not in s.calls
+        assert r["image"] is not None and ui.ELEMENTS_NONE + "; text read from the picture:" in r["text"]
+        # an action's picture on the cut-short screen: the JPEG shot, never the PNG
+        r = await d.run_tool("a", "swipe", {"x0": 200, "y0": 700, "x1": 200, "y1": 200})
+        assert s.pictures[-1] == ("shot", shotlib.DEFAULT_WIDTH) and "screenshot" not in s.calls and r["image"] is not None
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_paired_look_during_an_unlock_shows_no_picture(monkeypatch):
+    from test_daemon import finish, run, started
+
+    from tapwright import ocr
+    from tapwright.control import Refused
+    monkeypatch.setattr(ocr, "available", lambda: False)
+
+    async def go():
+        box = {"unlock_during": True}
+        s = _shooting_feed(box)
+        d = box["d"] = make(s)
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "look", {})
+        assert e.value.code == "busy" and "unlocked" in str(e.value)
+        d._unlock_spans = []
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_whole_look_or_a_stream_frame_keeps_the_picture_and_the_text_apart(monkeypatch):
+    from fakes import FrameFeeder
+    from test_daemon import finish, run, started
+
+    from tapwright import ocr
+    monkeypatch.setattr(ocr, "available", lambda: False)
+
+    async def go():
+        box = {}
+        s = _shooting_feed(box)
+        d = box["d"] = make(s)
+        stop, task = await started(d)
+        feeder = FrameFeeder(d.hub).start(then=_jpeg())
+        await asyncio.sleep(0.05)
+        await d.run_tool("a", "look", {})  # the stream's fresh frame is the picture: only the text is asked
+        assert s.pictures == [] and "read_text" in s.calls
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)

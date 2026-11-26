@@ -4239,15 +4239,17 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if no_ocr and not self._hints_wanted():
                 raise Refused("unsupported", ocr.INSTALL)  # (--no-hints: 1.8.5's refusal)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
-            answer = await self._look(view, shot, [], notes)
+            answer = await self._look(view, shot, [], notes, paired=args.get("ocr") is not False)
             # (2.0) the runner learns its routes with the look's read: now the runner's OCR may be known to be there
             no_ocr = no_ocr and not self._ocr_possible()
             # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
             # another app that comes forward after the look (last Opus review, L); a cut-short look too (R200v M3)
             view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
             if (tier := self._tier_now()) != "full" and args.get("ocr") is not False:
-                # a screen that didn't answer the whole read: its text, read from the picture, comes without asking
-                return await self._with_ocr(view, answer, tier=tier)
+                # a screen that didn't answer the whole read: its text, read from the picture, comes without asking (and
+                # the picture with it in one request, when the stream had none: _pairs_text)
+                return await self._with_ocr(view, answer, tier=tier,
+                                            shot=shot if self._pairs_text(view, shot) else None)
             if no_ocr:
                 # (1.9.0 round 2) the look the agent asked for, with a note: no failed call and its retry
                 answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_NO_OCR}
@@ -6186,7 +6188,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 raise Refused("busy", UNLOCK_BUSY)
             picture = await jpeg_of(frame)
         else:
-            picture = await self._read(self.session.screenshot_png)
+            picture = await self._phone_picture()  # (full size: this computer's OCR reads it)
             if self.unlocked_since(asked):
                 raise Refused("busy", UNLOCK_BUSY)
         try:
@@ -6199,11 +6201,36 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return [], f"no text read from the picture: reading it here failed ({type(e).__name__})."
             return [], f"{failed}, and so did reading the picture here ({type(e).__name__})."
 
-    async def _with_ocr(self, view, answer: dict, tier: str = "full") -> dict:
+    async def _with_ocr(self, view, answer: dict, tier: str = "full", shot: "tuple[int, bool] | None" = None) -> dict:
         """`look` with `ocr: true`, and (2.0) every look whose tree was cut short (`tier` shallow or root): the text the
         picture shows that no element carries, as lines with refs o1, o2… after the list (before its notes). On a
-        screen with no elements at all (root) the header's `Elements: none` line says the text follows."""
-        seen, note = await self._screen_text(implicit=tier != "full")
+        screen with no elements at all (root) the header's `Elements: none` line says the text follows. `shot`: the
+        look's picture is added here, read with the text in one request (_pairs_text)."""
+        if shot is None:
+            seen, note = await self._screen_text(implicit=tier != "full")
+            return self._ocr_lines(view, answer, tier, seen, note)
+        seen, note, picture = await self._screen_text_and_picture(shot[0])
+        return await self._add_shot(self._ocr_lines(view, answer, tier, seen, note), view, shot, picture=picture)
+
+    async def _screen_text_and_picture(self, width: int) -> "tuple[list[ocr.Seen], str, bytes | None]":
+        """(the text lines, a note or "", the picture they were read from or None) by one runner request (route version
+        11's `image=1`). If it fails, the text is read as _screen_text reads it and the picture is left to _add_shot."""
+        asked = self.hub.mono()
+        try:
+            seen, picture = await self._read(lambda: self.session.read_text_and_picture("accurate", width))
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - the text and the picture are had the usual ways
+            self.log(f"runner OCR with its picture failed ({type(e).__name__}: {self._redact(str(e))[:160]}): "
+                     "reading them apart")
+            seen, note = await self._screen_text(implicit=True)
+            return seen, note, None
+        if self.unlocked_since(asked):  # (M1: an unlock's keypad is never read, nor shown)
+            raise Refused("busy", UNLOCK_BUSY)
+        return seen, "", picture
+
+    def _ocr_lines(self, view, answer: dict, tier: str, seen: "list[ocr.Seen]", note: str) -> dict:
+        """The answer with the text read from the picture (`seen`, or the `note` saying why there is none): _with_ocr."""
         # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
         # shows is its placeholder, §18.6)
         known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
@@ -9029,28 +9056,30 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return latest
         return await self.hub.next_after(latest.seq if latest else 0, timeout=self.shot_wait)
 
-    async def _add_shot(self, answer: dict, view, shot: tuple[int, bool] | None, at_read: bool = True) -> dict:
-        """Add the picture to an answer: from the stream (full resolution), else the phone's /screenshot.
-        A picture that can't be had is a Note line, never an error. Decoding and resizing happen only here,
-        so only when a picture was asked for. The picture is the frame from when the tree was read (`at_read`),
-        else the newest one (the no-change shortcut read no tree); /screenshot only when there is no frame."""
+    async def _add_shot(self, answer: dict, view, shot: tuple[int, bool] | None, at_read: bool = True,
+                        picture: bytes | None = None) -> dict:
+        """Add the picture to an answer: from the stream (full resolution), else the phone's own (the runner's JPEG shot,
+        route version 11, else /screenshot's PNG). A picture that can't be had is a Note line, never an error. Decoding
+        and resizing happen only here, so only when a picture was asked for. The picture is the frame from when the tree
+        was read (`at_read`), else the newest one (the no-change shortcut read no tree); the phone's only when there is
+        no frame. `picture`: one already taken for this answer (a cut-short look's, with its text: _with_ocr)."""
         if shot is None:
             return answer
         width, labels = shot
         try:
-            frame = view.read_frame if at_read else await self._newest_frame()
+            frame = None if picture is not None else view.read_frame if at_read else await self._newest_frame()
             if self.frame_private(frame):  # (M1: an unlock ran when it was taken; a Note, the call itself is done)
                 raise Refused("busy", UNLOCK_BUSY)
             try:
-                source = await jpeg_of(frame) if frame is not None else None  # a video picture is encoded here
+                source = await jpeg_of(frame) if frame is not None else picture  # a video picture is encoded here
             except PictureGone:  # it was one of the older pictures, whose pixels are let go
                 source = None
             turn = getattr(self.session, "turn", 0)
-            if source is not None and turn and getattr(frame, "picture", None) is None:
+            if source is not None and turn and frame is not None and getattr(frame, "picture", None) is None:
                 source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
             if source is None:
                 asked = self.hub.mono()
-                source = await self._read(self.session.screenshot_png)
+                source = await self._phone_picture(width)
                 if self.unlocked_since(asked):
                     raise Refused("busy", UNLOCK_BUSY)
             boxes = [(e.ref, *e.rect) for e in view.items if e.actions] if labels else None
@@ -9063,7 +9092,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         answer["image"], answer["image_size"] = base64.b64encode(jpeg).decode(), [size[0], size[1]]
         return answer
 
-    async def _look(self, view, shot: tuple[int, bool] | None, lines: list, notes: list) -> dict:
+    async def _phone_picture(self, width: int | None = None) -> bytes:
+        """The screen as the phone takes it, through the queue: the runner's JPEG shot (route version 11, about 50 ms;
+        `width` pixels wide, None: full size), else /screenshot's PNG (250-640 ms). The caller checks the unlock rule."""
+        picture = getattr(self.session, "screen_picture", None)
+        if callable(picture):
+            return await self._read(lambda: picture(width))
+        return await self._read(self.session.screenshot_png)
+
+    def _pairs_text(self, view, shot: "tuple[int, bool] | None") -> bool:
+        """(2.0, worker H) Does a look's picture come with its text in ONE request (the OCR read's `image=1`, route version
+        11)? When the look's tree was cut short (its text is read from the picture anyway), a picture is wanted, and the
+        stream had no fresh frame at the read (else the picture is the stream's and only the text is asked for)."""
+        if shot is None or self._tier_now() == "full" or getattr(view, "read_frame", None) is not None:
+            return False
+        shoots = getattr(self.session, "shoots", None)
+        return self._runner_reads_text() and callable(shoots) and bool(shoots())
+
+    async def _look(self, view, shot: tuple[int, bool] | None, lines: list, notes: list,
+                    paired: bool = False) -> dict:
+        """The agent's look: the tree read into its list, and the picture when `shot`. `paired`: a look whose text is
+        read with its picture in one request (_pairs_text) leaves the picture to _with_ocr."""
         async def read():
             self._mark_read(view)
             text, image = await self.session.look(screenshot=False)
@@ -9087,6 +9136,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             view.place = None
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
         text, mapped = self._mapped_look(view, text)
+        if paired and self._pairs_text(view, shot):
+            return _answer([*lines, text], [*notes, *mapped], image)  # (its picture comes with its text: _with_ocr)
         return await self._add_shot(_answer([*lines, text], [*notes, *mapped], image), view, shot)
 
     async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool | None = False,
