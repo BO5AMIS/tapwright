@@ -189,6 +189,7 @@ so the next call starts a new daemon). None is needed for normal use.
 | `TAPWRIGHT_TREE_BUDGET` | milliseconds a screen read may take (default 3000) |
 | `TAPWRIGHT_AX_TIMEOUT` | seconds any other accessibility read may take (default 3) |
 | `TAPWRIGHT_TREE_PATH=direct` or `xctest` | force the runner's way of reading (for measuring) |
+| `TAPWRIGHT_TREE_PATH=lean` | every screen read is the runner's fast direct read, as in 2.0.0: quicker looks, but a view another process draws inside an app (an in-app browser sheet) lists no elements |
 | `TAPWRIGHT_RUNNER_OCR=0` | read the picture's text on this computer only (RapidOCR), never on the phone |
 | `TAPWRIGHT_OCR_LANGUAGES` | languages the phone reads in the picture, for example `en-US,ar-SA` |
 | `TAPWRIGHT_TRACE=1` | log the time of each touch and each request to the phone |

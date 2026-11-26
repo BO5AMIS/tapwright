@@ -103,6 +103,9 @@ FROZEN_TOOLS = frozenset({"look", "tap", "long_press", "swipe", "press_button"})
 # (2.0) the touches a {text} target may be found for in the picture's text, on a screen whose elements weren't read
 # (_by_picture_text). Not type_text, toggle or scroll: they act on an element (a field, a switch, a list), not a point.
 TEXT_BY_PICTURE = frozenset({"tap", "long_press"})
+# What _by_picture_text's answers say of a cut-short screen, and what they say instead when the screen was read whole
+# and no element carries the text (2.0.1)
+PICTURE_CUT, PICTURE_WHOLE = "this screen's elements weren't read", "no element of this screen shows it"
 # (2.0) the tools whose gesture the hands play on the touchscreen (not press_button: the buttons are another service),
 # and what an answer says when the hands doubt their touch connection (hands.Hands.judged)
 HANDS_GESTURES = frozenset({"tap", "long_press", "swipe", "scroll", "back", "pinch", "drag", "toggle"})
@@ -179,6 +182,9 @@ _EXPLORING: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_exp
 _TOUCH_FLOOR: contextvars.ContextVar["explorefloor.Floor | None"] = contextvars.ContextVar("tapwright_touch_floor", default=None)
 # (2.0, review K-H2) the screen generation as the picture's text was read, for the touch aimed from it (_by_picture_text)
 _PICTURE_AIM: contextvars.ContextVar["int | None"] = contextvars.ContextVar("tapwright_picture_aim", default=None)
+# (2.0.1, review R201 M1) the touch under way is aimed by a {text} found in the picture (_by_picture_text): the agent
+# meant what shows the text, not a point of its own, so the touch waits out a notification banner as an element's does
+_PICTURE_TEXT: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_picture_text", default=False)
 # A repaired script's check replay: the floor gates only the steps the repair made (they carry `repaired`); the script's own
 # unchanged steps run as a plain replay would, as the person wrote them (lead's ruling on review R180 M6).
 _FLOOR_REPAIRED_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_floor_repaired_only", default=False)
@@ -4607,6 +4613,22 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 near = self._closest(view, target, str(e)) if tier == "shallow" else None
                 raise Refused("not_found", "\n".join([str(e), *([near] if near else []),
                                                       HINT_NO_ELEMENTS if tier == "root" else HINT_PART_ELEMENTS])) from None
+            if (e.code == "not_found" and target is not None and target.kind == "text" and name in TEXT_BY_PICTURE
+                    and self._ocr_possible() and not self._some_element_shows(view, target)):
+                # (2.0.1) the screen was read whole and no element carries the text: it may still be on the screen
+                # (a canvas, a web view that exposes nothing, a picture with words; seen 2026-11-26 on a sign-in sheet
+                # whose look had just listed the text as an o ref). Looked for among the lines a look lists as o refs
+                try:
+                    by_picture = await self._by_picture_text(client_id, view, name, args, target, whole=True)
+                except Refused as other:
+                    if PICTURE_CUT not in str(other):  # the touch's own refusal (a gate, stale, busy): as it is
+                        raise
+                    # its words and its hint are a cut-short screen's: this one was read whole
+                    said = "\n".join(line for line in str(other).replace(PICTURE_CUT, PICTURE_WHOLE).split("\n")
+                                     if line not in (HINT_NO_ELEMENTS, HINT_PART_ELEMENTS))
+                    raise Refused(other.code, said) from None
+                if by_picture is not None:
+                    return {**by_picture, "text": by_picture["text"].replace(PICTURE_CUT, PICTURE_WHOLE)}
             if e.code == "not_found" and (near := self._closest(view, target, str(e))):
                 raise Refused("not_found", f"{e}\n{near}") from None
             if e.code == "ambiguous" and self._other_app_shown():
@@ -6317,7 +6339,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         a few ms; the question cost 70 ms and more before, which is why the wait was off since 1.7.5)."""
         if getattr(self.session, "tw_version", 0) < session_module.FRONT_VERSION:
             return False
-        return name == "back" or (target is not None and target.point is None)
+        return name == "back" or (target is not None and target.point is None) or _PICTURE_TEXT.get()
+
+    async def _banner_shown(self) -> bool:
+        """Is a notification banner over the app now (the runner names SpringBoard in front while the newest read is of
+        an app: Session._clear_of_banner)? False when the runner can't say in a few ms (route version 11)."""
+        s = self.session
+        if getattr(s, "tw_version", 0) < session_module.FRONT_VERSION:
+            return False
+        read_app = getattr(s, "read_app", None)
+        if isinstance(read_app, tuple) and read_app[1] == session_module.SPRINGBOARD:
+            return False  # SpringBoard's own screen: nothing slid over an app
+        front = await s.front_app()
+        return front is not None and front[0] == session_module.SPRINGBOARD
 
     async def _locked_by_press(self) -> bool:
         """After the agent's own `press_button lock`: ask the phone whether it is locked now (it takes a moment), for
@@ -6368,16 +6402,44 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return NOTE_HANDS_RUNNER
         return None
 
-    async def _by_picture_text(self, client_id: str, view, name: str, args: dict, target: ui.Target) -> dict | None:
+    @staticmethod
+    def _some_element_shows(view, target: ui.Target) -> bool:
+        """Does an element of the list match this {text} when its `index` is left out? Then the not_found is of the
+        index (past the elements that match), and the picture's lines are another list to count in (review R201 L1)."""
+        if target.index is None:
+            return False
+        try:
+            ui.resolve(view.items, dataclasses.replace(target, index=0))
+        except Refused as e:
+            return e.code != "not_found"
+        return True
+
+    async def _by_picture_text(self, client_id: str, view, name: str, args: dict, target: ui.Target,
+                               whole: bool = False) -> dict | None:
         """(2.0) A touch aimed by {text} that no element of a cut-short read carries: the text is looked for in what the
         picture shows (the same words, or them inside a longer line, as wait_for's _seen_text), and the touch goes to
         the centre of the line that shows it, as a touch on its o ref would. Lines that are the text itself come before
         lines that only hold it. Several: `index` picks one in reading order, else the refusal lists them as the o refs
         of this new reading. None when the picture's text can't be read or doesn't show it: the caller's refusal says
         how to go on. Never for a move explore or a repair makes itself (their floor reads the element a touch goes
-        to, and a point on a screen with no elements has none)."""
+        to, and a point on a screen with no elements has none).
+
+        `whole` (2.0.1): the screen was read whole and no element carries the text. Then only the lines a look lists as
+        o refs can be meant (review R201 M1): text no element carries, above the keyboard (its keys and its word
+        suggestions are in no list, and a return key that reads "Send" is not the app's button), and never for a step
+        of a recorded script, whose not_found is a break to report or repair (L2). A banner's own text is never a
+        match on either kind of screen, and the touch waits a banner out as an element's does (_PICTURE_TEXT)."""
         if _TOUCH_FLOOR.get() is not None or not self._ocr_possible():
             return None
+        keys_top = None
+        if whole:
+            if SCRIPT.get() is not None:
+                return None
+            if getattr(self.session, "last_keyboard", False):
+                inset = (getattr(self.session, "last_insets", None) or (None, None))[1]
+                if inset is None:
+                    return None  # the keyboard is up and the read doesn't say where: no line can be told from a key
+                keys_top = self.session.screen[1] - inset
         want = " ".join(str(target.text).casefold().split())
         if not want:
             return None
@@ -6396,7 +6458,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         width, height = self.session.screen
         top = STATUS_BAR if height > width else 0.0  # (the clock and the battery are the phone's, as in a look's o refs)
+        if await self._banner_shown():
+            top = max(top, session_module.BANNER_ZONE)  # (the banner's own words are no part of the app's screen)
         lines = [(s, " ".join(s.text.casefold().split())) for s in seen if s.rect[1] >= top]
+        if whole:
+            known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
+            lines = [(s, text) for s, text in lines if not _said(s.text, known)
+                     and (keys_top is None or s.rect[1] + s.rect[3] <= keys_top)]
         hits = [s for s, text in lines if text == want] or [s for s, text in lines if want in text]
         if not hits:
             return None
@@ -6415,11 +6483,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                        f"{hint}")
         x, y = hits[target.index or 0].center
         again = {**{k: v for k, v in args.items() if k != "index"}, "target": {"x": round(x, 1), "y": round(y, 1)}}
-        token = _PICTURE_AIM.set(aimed_at)
+        token, meant = _PICTURE_AIM.set(aimed_at), _PICTURE_TEXT.set(True)
         try:
             answer = await self._run_tool_core(client_id, name, again)
         finally:
             _PICTURE_AIM.reset(token)
+            _PICTURE_TEXT.reset(meant)
         note = (f'Note: this screen\'s elements weren\'t read; "{said}" was found in the text read from its picture, and '
                 f"the touch {'would go' if args.get('dry_run') else 'went'} to its centre.")
         lines_out = answer["text"].split("\n")
@@ -7785,6 +7854,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         s = self.session
         if name not in KEYBOARD_TOOLS or target is None or not view.read_keyboard or view.alert_now is not None:
             return ""  # (an OS alert in front is modal: a touch outside it closes nothing, and behind_alert decides)
+        if _PICTURE_TEXT.get():
+            # (CodeRabbit, PR #28) the point is where the picture showed the text, above the keyboard, a moment ago.
+            # Closing the keyboard first can move the form, and the touch would go to the text's old place with
+            # nothing to say so (no element is there to compare). The touch goes where the text was read; in an app
+            # where a first touch outside the field only closes the keyboard, the answer shows that, and the next
+            # call reads the picture again.
+            return ""
         top, bottom = s.last_insets
         top = SCROLL_TOP_INSET if top is None else top
         bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)

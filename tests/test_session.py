@@ -550,6 +550,61 @@ def test_typing_focuses_the_field_at_the_point_it_is_given(phone, monkeypatch):
     assert s.last_point == (60.0, 15.0)
 
 
+NO_FOCUS = "WebDriverAgent: no such element: unable to find an element using '(null)', value '(null)'"
+
+
+def _focus_late(phone, after, rect=FIELD_RECT, error=NO_FOCUS):
+    """element/active as WebDriverAgent answers it: an error while nothing has the focus (`after` times), then the
+    element."""
+    asked = []
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.endswith("/element/active"):
+            asked.append(1)
+            if len(asked) <= after:
+                raise DeviceError(error)
+            return {"value": {"ELEMENT": "f0"}}
+        if path.endswith("/element/f0/rect"):
+            x, y, w, h = rect
+            return {"value": {"x": x, "y": y, "width": w, "height": h}}
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    return asked
+
+
+def test_focus_that_arrives_a_moment_after_the_tap_is_waited_for(phone, monkeypatch):
+    """(2.0.1, seen 2026-11-26 on an in-app browser sign-in sheet) WebDriverAgent answers "who has the focus" with an
+    error while nothing has it. The first question after the focusing tap came before the page's field took it, and
+    `type_text {ref}` answered `internal: the phone side failed: WebDriverAgent: no such element`."""
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.5)
+    _keyboard_after(phone, 10 ** 9)
+    asked = _focus_late(phone, 2)
+    s = Session(phone)
+    s.items = list(FIELD)
+    assert asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1"))) == "typed 2 characters"
+    assert len(asked) == 3 and phone.requests[-1][1].endswith("/wda/keys")
+
+
+def test_focus_that_never_arrives_is_refused_in_words_and_another_error_is_passed_on(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)
+    _focus_late(phone, 10 ** 9)
+    s = Session(phone)
+    s.items = list(FIELD)
+    with pytest.raises(Refused) as e:
+        asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1")))
+    assert e.value.code == "not_actionable" and "didn't take focus" in str(e.value)
+    assert not any(r[1].endswith("/wda/keys") for r in phone.requests)
+    assert asyncio.run(s.type_text("hi", replace=True)) == (  # no target: typed, and the answer says what wasn't done
+        "typed 2 characters (couldn't find the focused field to clear, so the old text may remain)")
+    _focus_late(phone, 10 ** 9, error="WebDriverAgent: unknown error: the app is not running")
+    with pytest.raises(DeviceError) as other:
+        asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1")))
+    assert "unknown error" in str(other.value)
+
+
 def test_typing_into_a_field_that_never_gets_focus_is_refused(phone, monkeypatch):
     monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
     monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)

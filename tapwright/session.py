@@ -220,6 +220,8 @@ def tree_path(budget_ms: int, normal_ms: int, forced: str | None = None) -> str:
     forced = TREE_PATH_FORCED if forced is None else forced
     if forced in ("direct", "xctest"):
         return forced
+    if forced == "lean":  # (2.0.1) every read the direct way with the lean set, as 2.0.0 read: faster, and blind to
+        return "direct"  # views another process draws inside the app
     return "direct" if budget_ms < normal_ms else "xctest"
 
 
@@ -998,12 +1000,15 @@ class Session:
         last = self.last_compact if since else None
         # (route version 10) the direct read asking only for the attributes the list uses is the fastest way on every
         # screen measured (lead, phone, 2026-11-26: Settings > General 543 ms against 942 by xctest and 1269 by direct
-        # with the standard set; Settings root 168 / 315 / 184; home screen 206 / 416 / 273), gives the same nodes (the
-        # same token) and keeps to its budget. So with a version 10 runner every budgeted read goes that way.
-        lean = (budget_ms is not None and self.tw_version >= 10 and TREE_ATTRS != "std"
+        # with the standard set; Settings root 168 / 315 / 184; home screen 206 / 416 / 273) and keeps to its budget.
+        # (2.0.1) But it asks the app's own process only: a view another process draws inside the app (an in-app
+        # browser sign-in sheet, ASWebAuthenticationSession; most likely the share sheet and the photo picker too)
+        # isn't in it, and such a screen read as "0 elements" where 1.10 listed its fields and buttons (2.0.0 sent
+        # every budgeted read this way). XCTest's own snapshot follows those views. So the lean set goes only with a
+        # read the caller already sends the direct way: the short budget of an app whose screen didn't answer in time
+        # (tree_path), or every read with TAPWRIGHT_TREE_PATH=lean.
+        lean = (budget_ms is not None and self.tw_version >= 10 and TREE_ATTRS != "std" and read_path == "direct"
                 and TREE_PATH_FORCED not in ("direct", "xctest"))
-        if lean:
-            read_path = "direct"
         query = [*([f"budget={budget_ms}"] if budget_ms is not None else []),
                  *([f"path={read_path}"] if budget_ms is not None and read_path else []),
                  *(["attrs=lean"] if lean else []),
@@ -1928,7 +1933,18 @@ class Session:
         return True
 
     async def _active_element(self) -> str | None:
-        focused = (await self._call("GET", "/session/{sid}/element/active")).get("value") or {}
+        """WebDriverAgent's element with the keyboard's focus; None when none has it. WebDriverAgent says that as an
+        error (`no such element`), which was passed on as `internal` (2.0.1, seen 2026-11-26: a field of an in-app
+        browser sheet takes the focus a moment after the tap, the app around it being idle at once, and the first
+        question after the focusing tap came before it). None, so the wait for focus asks again."""
+        try:
+            focused = (await self._call("GET", "/session/{sid}/element/active")).get("value") or {}
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            if "no such element" not in str(e).lower():
+                raise
+            return None
         return focused.get("ELEMENT") or next(iter(focused.values()), None)
 
     async def _attribute(self, element: str, name: str) -> str | None:
