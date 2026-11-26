@@ -113,12 +113,13 @@ LOCK_PRESS_WAIT = 1.5  # seconds `press_button lock` waits for the phone to say 
 LOCK_PRESS_POLL = 0.15
 LOCKED_BY_PRESS = "Locked the phone."  # (the note every answer of a locked phone carries says how to go on)
 HANDS_EXPECTED = frozenset({"tap", "long_press", "toggle"})  # ... of which these, aimed at an element, should show
-NOTE_HANDS_REOPENED = ("no touch has changed the screen since the touch connection was opened (the phone acknowledges "
-                       "them either way), so the connection may not be reaching the screen: it was opened again. If "
-                       "this touch should have changed something, look, then repeat it.")
-NOTE_HANDS_RUNNER = ("still no touch from this computer has changed the screen, also after the touch connection was "
-                     "opened again: to be safe, touches go through the runner on the phone from now on (slower, about "
-                     "0.3 s each). If this touch should have changed something, look, then repeat it.")
+NOTE_HANDS_REOPENED = ("the last touches aimed at an element changed nothing on the screen (the phone acknowledges a "
+                       "touch either way), so the touch connection may not be reaching the screen: it was opened "
+                       "again. If this touch should have changed something, look, then repeat it.")
+NOTE_HANDS_RUNNER = ("touches from this computer still change nothing on the screen, also after the touch connection "
+                     "was opened again: to be safe, touches go through the runner on the phone for a while (10 minutes "
+                     "the first time; slower, about 0.3 s each). If this touch should have changed something, look, "
+                     "then repeat it.")
 # (2.0) TAPWRIGHT_RUNNER_OCR=0: text is read from the picture on this computer only (RapidOCR), never by the runner
 RUNNER_OCR = os.environ.get("TAPWRIGHT_RUNNER_OCR", "1")
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
@@ -6379,15 +6380,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                            target: "ui.Target | None" = None) -> str | None:
         """After the settle of a touchscreen gesture the hands played (Session.hands_at is from this call): tell the
         hands whether the screen changed (Hands.judged), and give the note for the answer when they doubt their
-        connection. Any gesture that changed the screen proves the connection. Against it counts only a tap, long press
-        or toggle aimed at an element that changed nothing (review L-L3): a scroll at a list's end, a `back` with
-        nothing to go back to and a tap at a point the agent chose change nothing by right. A nicety that never
-        fails a call."""
+        connection. Only a tap, long press or toggle aimed at an element counts, for the connection or against it
+        (review L-L3; 2.0.2 for "for it"): a scroll at a list's end, a `back` with nothing to go back to and a tap at
+        a point the agent chose change nothing by right, and a screen that changed after a scroll or a swipe may have
+        changed by itself (that proved a connection that reached nothing, 2026-11-26). A nicety that never fails a
+        call."""
         s = self.session
         hands, at = getattr(s, "hands", None), getattr(s, "hands_at", None)
         if name not in HANDS_GESTURES or hands is None or began is None or at is None or at < began:
             return None
-        if not changed and not (name in HANDS_EXPECTED and target is not None and target.point is None):
+        if not (name in HANDS_EXPECTED and target is not None and target.point is None):
             return None
         try:
             verdict = await hands.judged(changed)

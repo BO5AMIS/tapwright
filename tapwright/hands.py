@@ -46,10 +46,15 @@ SEND_WAIT = 2.0  # seconds one report may take to be acked (1.3 ms measured)
 # on was entered), and a failed release closes the connection.
 DIRTY_HOLD = 5.0
 RETRY_OPEN = 30.0  # seconds before an open that failed for a passing reason is tried again on the same tunnel
-# Touches in a row that changed nothing, on a connection none of whose touches has changed the screen yet, before the
-# connection is doubted (Hands.judged). Seen once on the phone (2026-11-26): a whole session of touches acked in
-# 60-110 ms that did nothing, with nothing logged; the start after it worked, and so did the next 8.
+# Touches aimed at an element, in a row, that changed nothing before the connection is doubted (Hands.judged). Seen on
+# the phone (2026-11-26, twice): a whole session of touches acked in 60-110 ms that did nothing, with nothing logged;
+# the start after it worked, and so did the next 8.
 DOUBT_AFTER = 3
+# Seconds touches go through the runner after a connection that was opened again for doubt changed nothing either
+# (2.0.2: was for the life of the tunnel, which on an always-on service is for good; a row of touches that change
+# nothing by right, a button that does nothing, must not cost the hands for days)
+RUNNER_FOR = 600.0
+RUNNER_MAX = 6 * 3600.0  # each time on the runner is twice the one before, up to this
 BUTTON_MS = 50  # how long a button is held (Phase 0: 52 ms a press)
 KEY_GAP_MS = 12  # between two keyboard reports (15 characters in 396 ms, measured)
 LEFT_SHIFT = 0xE1
@@ -239,6 +244,7 @@ class Hands:
         self._proven = False  # a touch of the open connection changed the screen (judged)
         self._unchanged = 0  # touches in a row of the open connection that changed nothing, while it isn't proven
         self._doubted: Any = None  # the tunnel whose touch connection was opened again for doubt, once
+        self._spells = 0  # times on the runner in a row for this tunnel (judged), with no touch landed between
 
     # ---- state ----
     @property
@@ -307,38 +313,52 @@ class Hands:
                          f"touch can't go through CoreDevice HID to let go of it first ({e.reason}); nothing was "
                          "touched: wait a few seconds, then look") from None
 
-    async def judged(self, changed: bool) -> str | None:
+    async def judged(self, changed: bool, meant: bool = True) -> str | None:
         """The caller's word on a touchscreen gesture these hands just played: did the screen change after it? The phone
         acks a report as it is written, whether or not it does anything, so only the screen can say that touches land.
-        A connection is proven by its first touch that changes the screen. One that isn't proven and has played
-        DOUBT_AFTER touches in a row that changed nothing is closed: the next touch opens a new one ("reopened"). If
-        that one goes the same way, the hands are left for this tunnel and touches go through the runner ("runner").
-        None otherwise. A proven connection is never doubted: touches that change nothing are ordinary."""
-        if self._touch is None:
+
+        `meant`: the gesture was a tap, long press or toggle aimed at an element, which should change the screen. Only
+        such a touch counts, either way (2.0.2). A scroll or a swipe after which the screen changed proves nothing: a
+        screen that changes by itself (a list still loading, a page that searches) said "it lands" of a connection that
+        reached nothing, and that connection was never doubted after it (the phone, 2026-11-26 12:41: taps answered
+        "No visible change" for as long as the service ran).
+
+        DOUBT_AFTER such touches in a row that changed nothing close the connection: the next touch opens a new one
+        ("reopened"). A connection that had landed a touch is doubted the same way (2.0.2: it was never doubted): the
+        cost is one opening. When the connection opened for doubt changes nothing either, touches go through the
+        runner for RUNNER_FOR ("runner"), then the hands are tried again: that connection has one touch to land, and
+        each time on the runner is twice the one before (up to RUNNER_MAX), so a connection that never reaches the
+        screen costs one touch now and then, not three every ten minutes. None otherwise."""
+        if self._touch is None or not meant:
             return None
         if changed:
             self._proven, self._unchanged = True, 0
-            return None
-        if self._proven:
+            # it lands: the next doubt of this tunnel starts with an opening again, and a first time on the runner
+            self._doubted, self._spells = None, 0
             return None
         self._unchanged += 1
-        if self._unchanged < DOUBT_AFTER:
+        after = 1 if self._spells and not self._proven else DOUBT_AFTER
+        if self._unchanged < after:
             return None
         async with self._lock:
             rsd = self._rsd
             # (CodeRabbit, PR #26) asked again under the lock: a connection opened while this call waited counts anew
-            if rsd is None or self._proven or self._unchanged < DOUBT_AFTER:
+            if rsd is None or self._unchanged < after:
                 return None
+            landed = self._proven
             await self._drop()
-            if self._doubted is not rsd:
+            if landed or self._doubted is not rsd:
                 self._doubted = rsd
-                self.log(f"hands: {DOUBT_AFTER} touches in a row changed nothing and none of this connection's has "
-                         "changed the screen yet: opening CoreDevice HID again")
+                self.log(f"hands: {DOUBT_AFTER} touches aimed at an element changed nothing in a row"
+                         + (" (earlier touches of this connection did)" if landed else
+                            " and none of this connection's has changed the screen yet")
+                         + ": opening CoreDevice HID again")
                 return "reopened"
-            why = (f"touches through CoreDevice HID were acknowledged but changed nothing, also after it was opened "
-                   f"again ({2 * DOUBT_AFTER} touches)")
-            self._failed = (rsd, why, math.inf)
-            self._say(rsd, f"hands: not used ({why}); touches go through the runner")
+            why = "touches through CoreDevice HID were acknowledged but changed nothing, also after it was opened again"
+            spell = min(RUNNER_FOR * 2 ** self._spells, RUNNER_MAX)
+            self._spells += 1
+            self._failed = (rsd, why, asyncio.get_running_loop().time() + spell)
+            self._say(rsd, f"hands: not used for {spell / 60:.0f} minutes ({why}); touches go through the runner")
             return "runner"
 
     async def warm(self) -> bool:
@@ -386,7 +406,7 @@ class Hands:
         self._failed = None
         self._proven, self._unchanged = False, 0
         if self._doubted is not None and self._doubted is not rsd:
-            self._doubted = None  # another tunnel: a new connection altogether
+            self._doubted, self._spells = None, 0  # another tunnel: a new connection altogether
         self._say(rsd, f"hands: CoreDevice HID (touchscreen {TOUCHSCREEN})")
         if self.dirty:
             try:
