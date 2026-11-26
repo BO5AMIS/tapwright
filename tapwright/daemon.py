@@ -31,7 +31,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                diagnostics, dialog, driving, explorefloor, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, scriptrepair, scriptrepairrun, store, trace, trip, ui, uxcheck)
-from . import autoroute, tokentext
+from . import autoroute, loopdog, tokentext
 from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
 from . import auditlog, center_tool, grants as grantlib, otp as otplib, schedules as schedulelib
@@ -1488,6 +1488,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                suspended=self._fed_by_video)
         self._stream_wait_failed: int | None = None  # (2.0.3) the newest frame's seq when a wait for the stream got nothing
         self.log = lambda message: log(self.scrub_everywhere(message))  # (what any sink gets holds no account's value)
+        # (2.0.3) the sink itself, for the loop watchdog's thread (loopdog.py): what it writes is file, line and function
+        # names, never a value, and the accounts' scrub belongs to the loop's thread
+        self._raw_log = log
         self._media_lock = asyncio.Lock()  # makes a media add's lookup, start and claim of the photo wait one step
         # the add that holds the phone, and until when: iOS's photo prompt, or a video's copy and import (1.7.9). The
         # runner answers nothing else meanwhile (Codex, PR #8); `_photo_wait_kind` says which (HOLD_WORDS)
@@ -2229,13 +2232,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         from outside like a phone that doesn't answer."""
         loop = asyncio.get_running_loop()
         worst, told = 0.0, loop.time()
-        while not stop.is_set():
-            before = loop.time()
-            await asyncio.sleep(LOOP_TICK)
-            worst = max(worst, loop.time() - before - LOOP_TICK)
-            if worst >= LOOP_HELD and loop.time() - told >= LOOP_SAY_EVERY:
-                self.log(f"the event loop was held for {worst:.2f} s; the tunnel's packets waited meanwhile")
-                worst, told = 0.0, loop.time()
+        # (2.0.3, brief Q fix 5) and, while it is held past loopdog.STALL, by what: a thread writes the loop thread's stack
+        dog = loopdog.LoopDog(self._raw_log).start()
+        try:
+            while not stop.is_set():
+                before = loop.time()
+                await asyncio.sleep(LOOP_TICK)
+                dog.beat()
+                worst = max(worst, loop.time() - before - LOOP_TICK)
+                if worst >= LOOP_HELD and loop.time() - told >= LOOP_SAY_EVERY:
+                    self.log(f"the event loop was held for {worst:.2f} s; the tunnel's packets waited meanwhile")
+                    worst, told = 0.0, loop.time()
+        finally:
+            dog.stop(wait=False)  # (a daemon thread: it ends at its next look, without holding the loop for it)
 
     # ---- the stream's pace ----
     def _preset_fps(self) -> int:
