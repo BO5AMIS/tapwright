@@ -293,6 +293,28 @@ def test_o_refs_end_with_an_action_that_may_have_sent_input_and_failed(no_pc_ocr
     run(go)
 
 
+def test_an_o_ref_after_another_clients_action_is_refused_stale(no_pc_ocr):
+    # (CodeRabbit, PR #26) b's swipe moved the feed after a's look: a's o2 is a point of the screen before it, and on a
+    # cut-short screen no picture check stands in the way (_moved_under), so the refs carry the generation they were
+    # read at, as a {text} aimed by the picture does (review K-H2)
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("b", "swipe", {"x0": 215, "y0": 700, "x1": 215, "y1": 200, "look": False})
+        taps = s.calls.count("tap")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "o2"}, "look": False})
+        assert e.value.code == "stale" and "Nothing was touched" in str(e.value)
+        assert s.calls.count("tap") == taps
+        await d.run_tool("a", "look", {"screenshot": False})  # a new look: its refs are of the screen now
+        r = await d.run_tool("a", "tap", {"target": {"ref": "o2"}, "look": False})
+        assert r["text"].startswith("Tapped")
+        await finish(stop, task)
+    run(go)
+
+
 def test_o_refs_stay_after_a_refusal_before_any_input(no_pc_ocr):
     async def go():
         s = feed_session()

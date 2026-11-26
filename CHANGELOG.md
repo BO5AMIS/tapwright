@@ -49,7 +49,8 @@
 - A tap or long press aimed by `{text}` on a screen whose elements weren't read looks for the text in the text read from
   the picture and touches the centre of the line that shows it, as `wait_for` does. Several lines show it: `ambiguous`,
   listing them as `o` refs of a new reading, or pick one with `index`. When the phone was used between the reading
-  of the text and the touch (a person in the live view, another agent), the touch is refused `stale`: look again. A
+  of the text and the touch (a person in the live view, another agent), the touch is refused `stale`: look again. The
+  same holds for a touch on an `o` ref, and an action of your own that may have sent input ends your `o` refs. A
   target by id, label or `e` ref there, a
   `{text}` the picture doesn't show, and a `{text}` target of any other call than `tap` and `long_press` (`toggle`,
   `type_text` into a named field, `scroll` to a target) answer `not_found` with how to reach the screen. `wait_for` a

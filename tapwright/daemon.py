@@ -4271,7 +4271,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
         if name in DIAG_TOOLS:  # a dedicated device; personal mode answers these in _within
             return await self._diag_tool(name, args, None)
-        args = self._ocr_target(client_id, args)
+        args, read_at = self._ocr_target(client_id, args)
+        if read_at is not None:
+            # (CodeRabbit, PR #26) an o ref is a point of the screen as its text was read: the touch is refused `stale`
+            # in its turn when another's action came since (a person, another agent), as a {text} by picture is (K-H2)
+            token = _PICTURE_AIM.set(read_at)
+            try:
+                return await self._run_tool_core(client_id, name, args)
+            finally:
+                _PICTURE_AIM.reset(token)
         if "index" in args and isinstance(args.get("target"), dict) and "index" not in args["target"]:
             # `index` belongs inside `target`; a first-time agent put it beside it and got an ambiguous error back
             # with no hint (2026-11-12). Taken where it was meant to go.
@@ -6278,17 +6286,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         answer = await self._after(view, result, notes, full)  # no `Settled in`: the app did nothing
         return await self._add_shot(answer, view, shot)
 
-    def _ocr_target(self, client_id: str, args: dict) -> dict:
-        """A ref from the last OCR reading (`o3`) is a point: the centre of that text."""
+    def _ocr_target(self, client_id: str, args: dict) -> "tuple[dict, int | None]":
+        """A ref from the last OCR reading (`o3`) is a point: the centre of that text. With it, the generation that
+        reading was made at (None when the target is no o ref)."""
         target = args.get("target")
         ref = target.get("ref") if isinstance(target, dict) else None
         if not isinstance(ref, str) or not OCR_REF.fullmatch(ref):
-            return args
-        point = self.control.client(client_id).ocr.get(ref)
+            return args, None
+        view = self.control.client(client_id)
+        point = view.ocr.get(ref)
         if point is None:
             raise Refused("not_found", f"{ref} isn't in your last OCR reading; look with ocr: true again (a screen "
                                        "whose elements weren't read gets o refs with any look).")
-        return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}
+        return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}, view.ocr_gen
 
     def _guards_banners(self, name: str, target: "ui.Target | None") -> bool:
         """Does this action's touch wait out a notification banner over the top of the screen (Session.banner_guard,
@@ -6384,7 +6394,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         said = ui.shown(str(target.text))
         if target.index is None and len(hits) > 1:
-            view.ocr = {f"o{n}": s.center for n, s in enumerate(hits, 1)}
+            view.ocr, view.ocr_gen = {f"o{n}": s.center for n, s in enumerate(hits, 1)}, aimed_at
             listed = "\n".join(dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(hits, 1))
             raise Refused("ambiguous", f'{len(hits)} texts in the picture show "{said}" (this screen\'s elements weren\'t '
                                        f'read, so they are what there is). Touch one by its ref, or add "index" '
@@ -6465,11 +6475,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         picture shows that no element carries, as lines with refs o1, o2… after the list (before its notes). On a
         screen with no elements at all (root) the header's `Elements: none` line says the text follows. `shot`: the
         look's picture is added here, read with the text in one request (_pairs_text)."""
+        gen = self.control.generation  # (CodeRabbit, PR #26) the refs are of the screen as of this generation
         if shot is None:
             seen, note = await self._screen_text(implicit=tier != "full")
-            return self._ocr_lines(view, answer, tier, seen, note)
+            return self._ocr_lines(view, answer, tier, seen, note, gen)
         seen, note, picture = await self._screen_text_and_picture(shot[0])
-        return await self._add_shot(self._ocr_lines(view, answer, tier, seen, note), view, shot, picture=picture)
+        return await self._add_shot(self._ocr_lines(view, answer, tier, seen, note, gen), view, shot, picture=picture)
 
     async def _screen_text_and_picture(self, width: int) -> "tuple[list[ocr.Seen], str, bytes | None]":
         """(the text lines, a note or "", the picture they were read from or None) by one runner request (route version
@@ -6488,15 +6499,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("busy", UNLOCK_BUSY)
         return seen, "", picture
 
-    def _ocr_lines(self, view, answer: dict, tier: str, seen: "list[ocr.Seen]", note: str) -> dict:
-        """The answer with the text read from the picture (`seen`, or the `note` saying why there is none): _with_ocr."""
+    def _ocr_lines(self, view, answer: dict, tier: str, seen: "list[ocr.Seen]", note: str, gen: int) -> dict:
+        """The answer with the text read from the picture (`seen`, or the `note` saying why there is none): _with_ocr.
+        `gen`: the generation as the text was read."""
         # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
         # shows is its placeholder, §18.6)
         known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
         width, height = self.session.screen
         top = STATUS_BAR if height > width else 0.0  # the clock and the battery are the phone's, not the app's
         new = [s for s in seen if s.rect[1] >= top and not _said(s.text, known)]
-        view.ocr = {f"o{n}": s.center for n, s in enumerate(new, 1)}
+        view.ocr, view.ocr_gen = {f"o{n}": s.center for n, s in enumerate(new, 1)}, gen
         lines = answer["text"].split("\n")
         cut = next((i for i, line in enumerate(lines) if line.startswith("Note: ")), len(lines))
         refs = [dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(new, 1)]
