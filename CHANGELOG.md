@@ -6,11 +6,17 @@
   (`ASWebAuthenticationSession`, `SFSafariViewController`) read as "0 elements" in 2.0.0, where 1.10 listed its fields
   and buttons. 2.0.0 made every screen read the runner's direct read, which asks the app's own process only. An ordinary
   read is XCTest's own snapshot again, as in 1.10; the direct read stays for an app whose screen didn't answer in time.
-  A look is about as fast as in 1.10 again (touches stay as fast as in 2.0.0). `TAPWRIGHT_TREE_PATH=lean` reads the
-  2.0.0 way.
+  The touch itself stays as fast as in 2.0.0; a look, and the read that follows an action, take about as long as in
+  1.10 again (measured: Settings > General 0.94 s against 0.54 s, the home screen 0.42 s against 0.21 s).
+  `TAPWRIGHT_TREE_PATH=lean` reads the 2.0.0 way.
 - A tap or long press aimed by `{text}` that no element carries looks for the text in the picture on a screen that was
   read whole as well (a canvas, a web view that exposes nothing, a picture with words), not only on one whose elements
-  weren't read: a look had listed the text as an `o` ref and `tap {text}` answered `not_found`.
+  weren't read: a look had listed the text as an `o` ref and `tap {text}` answered `not_found`. There it matches only
+  what a look lists as `o` refs: text no element carries, above the keyboard (never a key or a word suggestion, so a
+  return key that reads "Send" is not pressed), and not for a step of a replayed script. A `not_found` of such a tap
+  now costs one read of the picture's text.
+- A touch aimed by a `{text}` found in the picture never takes a notification banner's own words for the app's, and
+  waits a banner out as a touch aimed at an element does (on a screen whose elements weren't read too).
 - `type_text` into a field that takes the keyboard's focus a moment after the tap (a field of an in-app browser sheet)
   waits for it, up to 1.5 s as for any field. It answered `internal: the phone side failed: WebDriverAgent: no such
   element`: the runner says "nothing has the focus yet" as an error, and the first question came before the focus did.
