@@ -4536,7 +4536,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     self._touch_in_scope()  # (personal mode, a tap whose scope came from its read: before each touch)
                 await notify(ms)
             self.session.touch_hook = touching
-            self.session.banner_guard = False  # banners are visible UI, not a scope boundary
+            # banners are visible UI, not a scope boundary: a point the agent chose itself is touched as it is. (2.0)
+            # A touch aimed at an element in the top of the screen waits a banner out (_guards_banners).
+            self.session.banner_guard = self._guards_banners(name, target)
             touched_token = _SCOPE_TOUCHED.set([])
             try:
                 return await act()
@@ -6265,6 +6267,17 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("not_found", f"{ref} isn't in your last OCR reading; look with ocr: true again (a screen "
                                        "whose elements weren't read gets o refs with any look).")
         return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}
+
+    def _guards_banners(self, name: str, target: "ui.Target | None") -> bool:
+        """Does this action's touch wait out a notification banner over the top of the screen (Session.banner_guard,
+        _clear_of_banner: only touches in the top BANNER_ZONE are held)? A touch aimed at an element (by ref, id, label
+        or text, and `back`'s button): the agent meant the element, and a banner that slid over it takes the touch and
+        opens its own app (the phone, 2026-11-26: `back` opened X; before it Mail and another app). Not a point the
+        agent chose itself, and only when the runner says the app in front without reading it (route version 11:
+        a few ms; the question cost 70 ms and more before, which is why the wait was off since 1.7.5)."""
+        if getattr(self.session, "tw_version", 0) < session_module.FRONT_VERSION:
+            return False
+        return name == "back" or (target is not None and target.point is None)
 
     async def _locked_by_press(self) -> bool:
         """After the agent's own `press_button lock`: ask the phone whether it is locked now (it takes a moment), for
