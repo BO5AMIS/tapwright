@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0
+## 2.0.0 (2026-11-26)
 
 - Faster over USB: Tapwright's requests to the runner on the phone and the live screen stream now go straight through
   the cable's own channel (usbmuxd) instead of through the developer tunnel: a status check answers in 1 ms, a screenshot
