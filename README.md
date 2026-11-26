@@ -40,13 +40,20 @@ Appium) on your phone, signed with your developer identity, and talks to it thro
 [pymobiledevice3](https://github.com/doronz88/pymobiledevice3)'s tunnel. That tunnel needs
 no admin rights and works on any OS.
 
+Since 2.0, taps, swipes, scrolls and the hardware buttons are sent from the computer to the phone's touchscreen through
+CoreDevice HID, which needs no runner; the runner reads the screen and is the fallback for touches. A screen that
+doesn't answer reads in time (a video feed, a game) no longer stops a call: see
+[docs/AGENT-TOOLS.md](https://github.com/bo5amis/tapwright/blob/main/docs/AGENT-TOOLS.md).
+
 Tapwright drives **the whole phone from the outside** (any app, system alerts, the home
 screen). Its sibling project [Tapline](https://github.com/bo5amis/tapline) drives **your own
 React Native app from the inside**, through a small SDK in the app.
 
 ## You need
 
-- An iPhone on iOS 17 or later, and a USB cable for the one-time setup.
+- An iPhone on iOS 17 or later, and a USB cable for the one-time setup. Touches from the computer (the
+  "hands" of 2.0) need iOS 18 or later; on iOS 17 they go through the runner, as before. Tapwright installs
+  pymobiledevice3 11.63 or later by itself.
 - A computer with Python 3.10+. On Windows, install **Apple Devices** from the Microsoft
   Store (it provides the USB connection); on Linux, `usbmuxd`.
 - An Apple Developer Program membership, for an App Store Connect API key (setup then
@@ -123,13 +130,14 @@ repository too.
 | Tool | What it does |
 |---|---|
 | `apps`, `open_app`, `close_app` | the apps you installed (TestFlight and development builds included); open one by bundle id or name, or close it; `open_app` can open it in another `language`, `region` or `text_size` (for that launch only, nothing in Settings changes); with those arguments the app is closed first, so a launch that fails leaves it closed |
-| `look` | the screen: every visible element (role, text, id, position in points, what you can do with it) and a screenshot; `ocr: true` also reads the text in the picture that no element carries (games, canvases, web views), as refs `o1`, `o2` a touch can take (`pip install "tapwright[ocr]"`, about 300 MB, runs on the computer's CPU, about 1.5 s) |
-| `tap`, `long_press`, `toggle` | by element `{id}` (`testID`/accessibility identifier), `{label}`, `{text}`, `{ref}` from the last list, or `{x, y}` |
+| `look` | the screen: every visible element (role, text, id, position in points, what you can do with it) and a screenshot; `ocr: true` also reads the text in the picture that no element carries (games, canvases, web views), as refs `o1`, `o2` a touch can take until your next action (the phone reads them with Apple's Vision; `pip install "tapwright[ocr]"`, about 300 MB, is the fallback on the computer's CPU, about 1.5 s). A screen that doesn't answer in time says `Elements: none` or `Elements: partly read` and lists them by itself |
+| `tap`, `long_press`, `toggle` | by element `{id}` (`testID`/accessibility identifier), `{label}`, `{text}`, `{ref}` from the last list, or `{x, y}`; on a screen whose elements weren't read, `tap` and `long_press` also take an `o` ref, or a `{text}` found in the picture |
 | `type_text` | into a field (clearing it first by default, or pressing return after) |
+| `pinch` | two fingers spread (`scale` above 1) or pinched (below 1) about a point, to zoom a photo or a map; needs touches from the computer (iOS 18 or later) |
 | `scroll`, `swipe`, `back` | lists and pages, to the start, the end, or straight to an element; drags between points; up one screen (an open sheet closes first) |
 | `wait`, `wait_for` | a fixed delay, or until some text, id or label shows up or goes |
 | `alert` | accept, dismiss or read permitted alerts; `action: "cancel"` explicitly presses a verified Cancel button to recover from a system obstruction when the owner requests it, without showing private alert content |
-| `press_button` | home, volume |
+| `press_button` | home, lock, volume (`lock` needs touches from the computer, iOS 18 or later) |
 | `rotate` | turn the phone to portrait or either landscape side, to test an app's landscape layout |
 | `network` | make the whole phone's network `offline`, `3g` or `lossy` (Apple's developer network conditions) to see an app's errors and loading states, or `normal` to restore it; every answer says the condition while it is on, and it ends with the session (or after 10 minutes without a call from the agent that set it, or 30 minutes at most). Over Wi-Fi only `3g` and `normal` (the other two would cut Tapwright's own link) |
 | `open_url` | deep links |
@@ -274,7 +282,9 @@ Screenshots, live view, video and saved `--screenshots` images show actual scree
 
 - Apple's automation sees what accessibility sees. Give important views accessibility
   identifiers (`testID` in React Native) and labels. Games and custom-drawn screens show
-  little beyond their screenshot; `look` with `ocr: true` reads their text from the picture.
+  little beyond their screenshot; `look` with `ocr: true` reads their text from the picture. A screen that
+  doesn't answer in time (a video feed such as TikTok's) comes back as `Elements: none` with that text as `o` refs;
+  there `tap` an `o` ref, a point or a `{text}`, and `audit` and `ux_check` say `unsupported`.
 - Face ID and Touch ID require the person. With the phone's passcode saved (`--accounts FILE`, `phone.passcode`) an agent unlocks a locked phone with `unlock`, and `tapwright serve --phone` does it by itself at a new call; genuine XCTest passcode prompts still require the person.
 - Before it lets a UI test start, iOS may ask for the passcode ("Enable UI Automation").
   Tapwright waits and tells the agent. Turn on Settings > Developer > Enable UI Automation
