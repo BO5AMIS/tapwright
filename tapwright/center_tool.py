@@ -294,10 +294,12 @@ class CenterTools:
             failed.append(type(e).__name__)
         try:
             front = await s.foreground_bundle_id()
+            pressed = False
             if before and before != SPRINGBOARD and front != before:
                 await s.launch(before)  # (it was running: this brings it back as it was)
             elif home_ok and (not before or before == SPRINGBOARD) and front == SPRINGBOARD:
                 await s.press_button("home")  # the home screen, with nothing pulled down over it
+                pressed = True
             # the check: the app that was in front is again, or (from the home screen) no Notification Center is read
             if before and before != SPRINGBOARD:
                 closed = await s.foreground_bundle_id() == before
@@ -305,6 +307,11 @@ class CenterTools:
                     closed = not notes_lib.is_center(await s.read_center())
             else:
                 closed = not notes_lib.is_center(await s.read_center())
+                if not closed and pressed:
+                    # (CodeRabbit, PR #26) through the hands the press answers as it is pressed (the runner's route
+                    # waited for the home screen): the center may still be going up. Read once more after it has time
+                    await asyncio.sleep(CENTER_CLOSE_WAIT)
+                    closed = not notes_lib.is_center(await s.read_center())
         except Refused:
             raise
         except Exception as e:  # noqa: BLE001 - not shown closed

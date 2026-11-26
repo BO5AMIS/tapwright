@@ -196,6 +196,43 @@ def test_b_m4_a_banner_over_an_app_never_sends_it_home(tmp_path):
     run(go)
 
 
+def test_a_home_press_that_answers_before_the_home_screen_shows_isnt_taken_for_a_center_still_down(tmp_path):
+    """(CodeRabbit, PR #26) through the hands the home press answers as it is pressed; the runner's route waited for the
+    home screen. Read at once, Notification Center was still going up: NOT_CLOSED, for a center that closed."""
+    import asyncio
+    from test_daemon import finish, run, started
+    tn = _nc()
+
+    async def go():
+        d, s = tn.center_daemon(tmp_path, [], foreground="com.apple.springboard")
+
+        async def none_running():  # the home screen: no app under a banner
+            return []
+        s.device.foreground_apps = none_running
+        original_swipe = s.swipe
+        swipes = []
+
+        async def swipe(*a, **k):  # the swipe up from the bottom is swallowed: only the home press closes it
+            swipes.append(a)
+            return await original_swipe(*a, **k) if len(swipes) == 1 else "swiped"
+        s.swipe = swipe
+
+        async def press_button(name):
+            s._record(f"button:{name}")
+
+            async def later():
+                await asyncio.sleep(0.15)
+                s.center_open, s.foreground = False, "com.apple.springboard"
+            asyncio.ensure_future(later())
+            return f"pressed {name}"
+        s.press_button = press_button
+        stop, task = await started(d)
+        r = await d.run_tool("a", "notifications", {})
+        assert r["text"].startswith("Notifications:") and "button:home" in s.calls and not s.center_open
+        await finish(stop, task)
+    run(go)
+
+
 def test_b_l2_notifications_on_a_locked_phone_answers_locked_and_touches_nothing(tmp_path):
     import pytest
     from test_daemon import finish, run, started
