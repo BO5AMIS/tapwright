@@ -355,6 +355,8 @@ class DaemonCheck:
             return None
         if not isinstance(data, dict) or place not in (data.get("places") or {}):
             return None
+        if tree is not None and getattr(tree, "tier", "full") != "full":
+            return None  # (R200v M1) the runner cut the read short: where the app is can't be told
         if tree is None or self.d._bundle() != self.app or not places.has_structure(tree):
             return False
         return places.locate(data, places.read_place(tree, self.d._language.get(self.app)))[0] == place

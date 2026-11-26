@@ -55,8 +55,10 @@ def _number(value: object) -> float:
 
 def of_runner(value: object, screen: tuple[float, float]) -> list[Seen]:
     """The runner's OCR answer (GET /wda/tw/ocr, route version 9: {"screen": [w, h], "lines": [{"text", "rect": [x, y,
-    w, h] in points, "confidence"}]}) as Seen lines in `screen`'s points (the runner's screen may be the other way up
-    in landscape), in reading order as `read` gives them. Raises ValueError for an answer that isn't one."""
+    w, h] in points, "confidence"}]}) as Seen lines in `screen`'s points (scaled when the runner's size differs), in
+    reading order as `read` gives them. Raises ValueError for an answer that isn't one, and (review R200v L1) for one
+    whose screen is turned from the session's (the phone turned between the tree read and the OCR): stretched per axis,
+    its points would be elsewhere; the caller reads the picture another way."""
     if not isinstance(value, dict) or not isinstance(value.get("lines"), list):
         raise ValueError("no lines")
     sx = sy = 1.0
@@ -64,6 +66,9 @@ def of_runner(value: object, screen: tuple[float, float]) -> list[Seen]:
     if isinstance(size, list) and len(size) == 2:
         w, h = _number(size[0]), _number(size[1])
         if w > 0 and h > 0:
+            if (w > h) != (screen[0] > screen[1]):
+                raise ValueError(f"the runner's screen ({w:g}x{h:g}) is turned from the session's "
+                                 f"({screen[0]:g}x{screen[1]:g})")
             sx, sy = screen[0] / w, screen[1] / h
     found = []
     for line in value["lines"]:

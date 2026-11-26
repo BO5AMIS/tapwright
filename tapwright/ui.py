@@ -303,8 +303,8 @@ class Tree:
     structure: Structure = field(default_factory=Structure)  # what the screen is made of, for places.py
     back: "Back | None" = None  # what `back` would do on this screen (back_button), when the screen's size is known
     # (2.0, runner route version 9) how much of the tree the read got: "full"; "shallow" (the runner's budget ran out
-    # part way: what it read is here, more may be missing); "root" (the application node alone: the screen doesn't
-    # answer accessibility reads, as TikTok's For You feed)
+    # part way: what it read is here, more may be missing); "root" (the application node alone: none of the screen's
+    # elements were read in the time given, as on TikTok's For You feed)
     tier: str = "full"
 
     @property
@@ -1573,8 +1573,24 @@ def on_glass(items: list[Element]) -> list[Element]:
                        and b.rect[1] <= e.center[1] < b.rect[1] + b.rect[3] for b in e.covered_by)]
 
 
-ELEMENTS_NONE = "Elements: none (this screen doesn't answer accessibility reads)"
-ELEMENTS_PART = "Elements: partly read (this screen didn't answer the whole accessibility read in time; more may be missing)"
+# (review R200v H1) said as known: the read ran out of the time it was given (a short budget may be why), not that the
+# screen never answers
+ELEMENTS_NONE = "Elements: none (the screen's elements weren't read within the time given)"
+ELEMENTS_PART = "Elements: partly read (not all of the screen's elements were read within the time given; more may be missing)"
+
+
+# (2.0) a target by id, label, text or element ref on a screen that gave no elements, or only some (the daemon's
+# not_found says it; a repair and a route's count read it: review R200v M1)
+HINT_NO_ELEMENTS = ("This screen's elements weren't read within the time given, so there are none to find: look shows "
+                    "the text read from its picture as o refs; touch one of them, or a point {x, y}.")
+HINT_PART_ELEMENTS = ("Not all of this screen's elements were read within the time given, so the element may be among "
+                      "those left out: look shows the text read from its picture as o refs; touch one of them, or a point "
+                      "{x, y}.")
+
+
+def cut_hint(text: str) -> bool:
+    """Does a refusal's text carry the hint of a screen read in part (not_found only because elements weren't read)?"""
+    return HINT_NO_ELEMENTS in text or HINT_PART_ELEMENTS in text
 
 
 def tier_line(tier: str) -> str | None:

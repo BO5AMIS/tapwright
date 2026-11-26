@@ -21,6 +21,7 @@ class Break:
     index: int
     code: str
     reason: str
+    unread: bool = False  # (2.0, R200v M1) not_found only because the screen's elements weren't (all) read
 
     @property
     def off_screen(self) -> bool:
@@ -39,7 +40,8 @@ def parse_break(text: str, code: str, steps: list[dict]) -> Break | None:
     prefix = f"{found.group(0)[:-2]} ({batch.summary(steps[index - 1])}): "
     if not text.startswith(prefix):
         return None
-    return Break(index, code, text[len(prefix):].split("\n")[0])
+    said = text[len(prefix):]
+    return Break(index, code, said.split("\n")[0], unread=code == "not_found" and ui.cut_hint(said))
 
 
 def _no_way(a: str, b: str) -> list[tuple[dict, dict]] | None:
@@ -100,6 +102,9 @@ def analyse(steps: list[dict], at: int, brk: Break, screen: Screen, drafts_only:
     never = never_repaired(step, screen.floor, drafts_only)
     if never is not None:
         return Analysis("none", reason=never)
+    if brk.unread:  # (R200v M1) nothing on that screen could be read: no candidate could be found or checked
+        return Analysis("none", reason="the screen's elements weren't read within the time given at that step, so the "
+                                       "step can't be repaired from them")
     if not (brk.code in ("not_found", "ambiguous") or brk.off_screen):
         return Analysis("none", reason="an expect that fails is a finding, never a break to repair" if brk.code == "expect_failed"
                         else f"a {brk.code} failure is a finding, not a break to repair")

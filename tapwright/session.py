@@ -127,6 +127,15 @@ OCR_WAIT = 8.0  # seconds the runner's OCR may take (Vision's accurate level: ab
 # doesn't support fails the read, and the picture is then read on this computer instead
 OCR_LANGUAGES = os.environ.get("TAPWRIGHT_OCR_LANGUAGES", "").strip()
 TIERS = ("full", "shallow", "root")
+# (review R200v M4) the languages Vision's fast level reads (Latin script; Apple's fast revision lists English, French,
+# Italian, German, Spanish and Portuguese), by their primary subtag. A fast read asked in any other language fails with
+# `unknown error` (RUNNER-V9-PROTOCOL §4), so wait_for's polls read at the accurate level then.
+FAST_LANGUAGES = frozenset({"en", "fr", "it", "de", "es", "pt"})
+
+
+def fast_reads(languages: str) -> bool:
+    """Can Vision's fast level read every one of these comma-separated BCP 47 codes ("" = its default, English)?"""
+    return all(code.strip().split("-")[0].lower() in FAST_LANGUAGES for code in languages.split(",") if code.strip())
 
 
 def _env_float(name: str, default: float) -> float:
@@ -139,8 +148,27 @@ def _env_float(name: str, default: float) -> float:
 
 AX_TIMEOUT = _env_float("TAPWRIGHT_AX_TIMEOUT", 3.0)  # seconds: the runner's ceiling for any one accessibility read
 TREE_BUDGET_MS = int(_env_float("TAPWRIGHT_TREE_BUDGET", 3000))  # ms a tree read may take on the runner
-SHORT_BUDGET_MS = 600  # ms for an app whose last read was cut short (TikTok's profile answers in 0.2 s)
+# ms for an app whose last read was cut short. (Review R200v H1) The runner gives `full` 60 % of the budget, after
+# finding the app and an idle wait of up to a quarter of it, and tries `shallow` only with 0.25 s left past a reserve
+# for `root`: at 600 ms nearly every read came back `root`, even of a screen that reads whole in 0.4 s (the home screen's
+# tree took 0.4 s in Phase 0). 1500 ms leaves `full` about 0.9 s and room for `shallow`.
+SHORT_BUDGET_MS = 1500
 BUDGET_MEMORY = 20.0  # seconds a cut-short read keeps its app on the short budget
+# (2.0) how the runner reads a tree (RUNNER-V9-PROTOCOL §1 `path`). Measured on the phone (lead, 2026-11-26): `direct`
+# keeps to its budget on TikTok's feed (1500 ms -> 1.43 s) where `xctest` takes 2.9-3.9 s whatever the budget, but on
+# a screen that reads (Settings > General, 264 nodes) `xctest` is about 30 % faster (0.97 s against 1.25-1.32 s). So
+# the normal budget reads by `xctest` and the short one (an app whose read was just cut, on a screen that isn't still)
+# by `direct`: a screen that never answers costs 3-4 s once, then stays bounded. TAPWRIGHT_TREE_PATH=direct|xctest
+# forces one (for measuring).
+TREE_PATH_FORCED = os.environ.get("TAPWRIGHT_TREE_PATH", "").strip().lower()
+
+
+def tree_path(budget_ms: int, normal_ms: int, forced: str | None = None) -> str:
+    """The runner's way of reading for a read with `budget_ms` (see TREE_PATH_FORCED)."""
+    forced = TREE_PATH_FORCED if forced is None else forced
+    if forced in ("direct", "xctest"):
+        return forced
+    return "direct" if budget_ms < normal_ms else "xctest"
 
 
 class ReadBudget:
@@ -149,19 +177,25 @@ class ReadBudget:
     look and every action. So, per bundle id: when a read with the normal budget came back truncated, that app's reads
     use the short budget for BUDGET_MEMORY seconds; a read that comes back full gives it the normal budget again at
     once. A truncated answer to a short-budget read doesn't renew the time: once it runs out, one read with the normal
-    budget asks again (a screen that is only slow to read gets its whole tree back within BUDGET_MEMORY seconds)."""
+    budget asks again (a screen that is only slow to read gets its whole tree back within BUDGET_MEMORY seconds).
+    A screen that is still (the caller's `still`: the stream's pictures show nothing moving) gets the normal budget even
+    then: a playing feed is never still, and a still screen of the same app (a profile, a settings page) is usually one
+    that reads whole (review R200v H1)."""
 
     def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
                  memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic) -> None:
         self.normal_ms, self.short_ms, self.memory, self.clock = normal_ms, short_ms, memory, clock
         self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
 
-    def budget(self, bundle: str | None) -> int:
-        """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget)."""
+    def budget(self, bundle: str | None, still: Callable[[], bool] | None = None) -> int:
+        """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget). `still` is asked only
+        when the short budget would apply: True gives the normal one."""
         if bundle is None or bundle not in self._cut:
             return self.normal_ms
         if self.clock() - self._cut[bundle] >= self.memory:
             del self._cut[bundle]
+            return self.normal_ms
+        if still is not None and still():
             return self.normal_ms
         return self.short_ms
 
@@ -179,6 +213,51 @@ class ReadBudget:
 
     def forget(self) -> None:
         self._cut.clear()
+
+
+SHORT_SETTLE = 0.5  # seconds an action's settle may wait on a screen that never stands still (SettleCap)
+
+
+class SettleCap:
+    """(2.0, lead's decision) How long an action's answer waits for the screen of an app to stand still. A screen that
+    never does (TikTok's playing feed) made every settle wait its whole cap (2 s, 4 s after a launch): a swipe there took
+    3.2 s. So, per bundle id: when a settle ended by its cap with the picture still changing while the newest tree of that
+    app was cut short, its next settles wait at most `short` seconds; a settle of the app that ends still, or a read of it
+    that comes back whole, gives it the normal cap again. Pure: the daemon says what happened and asks for the cap."""
+
+    def __init__(self, short: float = SHORT_SETTLE) -> None:
+        self.short = short
+        self._restless: set[str] = set()
+
+    def cap(self, bundle: str | None, cap: float) -> float:
+        """The cap for a settle of `bundle`'s screen whose normal cap is `cap`."""
+        return min(cap, self.short) if bundle is not None and bundle in self._restless else cap
+
+    def settled(self, bundle: str | None, capped: bool, cut: bool) -> bool:
+        """A settle of `bundle` ended: by its cap with frames still changing (`capped`), the newest tree cut short (`cut`).
+        True when the app's cap switched (the caller logs it)."""
+        if bundle is None:
+            return False
+        if capped and cut and bundle not in self._restless:
+            self._restless.add(bundle)
+            return True
+        if not capped and bundle in self._restless:
+            self._restless.discard(bundle)
+            return True
+        return False
+
+    def read_whole(self, bundle: str | None) -> bool:
+        """A read of `bundle` came back whole: the normal cap again. True when it switched."""
+        if bundle is not None and bundle in self._restless:
+            self._restless.discard(bundle)
+            return True
+        return False
+
+    def restless(self, bundle: str | None) -> bool:
+        return bundle is not None and bundle in self._restless
+
+    def forget(self) -> None:
+        self._restless.clear()
 
 
 PINCH_GAP = 60.0  # points between a pinch's two fingers at its narrow end
@@ -352,6 +431,12 @@ class Session:
         self.last_tier = "full"
         self.last_why = ""
         self.budgets = ReadBudget()
+        # Set by the daemon: does the stream show the screen still right now (Daemon._proven_still)? A still screen's
+        # read gets the normal budget even while its app is on the short one (ReadBudget). None: never taken as still.
+        self.screen_still: Callable[[], bool] | None = None
+        self.budget_app: str | None = None  # the app the newest bounded read was budgeted for or named (L2)
+        self.center_tier = "full"  # how much of Notification Center the newest read_center got (R200v L4)
+        self.settles = SettleCap()  # (2.0) which apps' screens never stand still: their settles wait less
         self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
 
     async def ensure(self) -> None:
@@ -400,6 +485,8 @@ class Session:
         self.fast_read, self.last_compact = None, None
         self.bounded, self.last_tier, self.last_why = bounded, "full", ""
         self.budgets.forget()
+        self.settles.forget()
+        self.budget_app = None
         self.sid = sid  # committed last: a failure above leaves no half-started session
 
     async def _probe_version(self) -> int | None:
@@ -621,41 +708,65 @@ class Session:
         except ConnectionLost as e:
             raise await self._why_stuck(False, e) from e
 
-    async def _read_tree(self, timeout: float):
+    async def _read_tree(self, timeout: float, center: bool = False):
         """One read of the tree as /source's XML: through the fork's compact read when this runner has it (FAST_READ),
-        else /source itself."""
+        else /source itself. `center` (Notification Center's read, review R200v L4): with the normal budget, outside the
+        budget memory and the "unchanged" token."""
         self.last_tier, self.last_why = "full", ""
         if FAST_READ != "0" and self.fast_read is not False:
             await self.ensure()  # (2.0: a session's start learns the runner's version: no second question then)
             if self.fast_tap is None:
                 await self._fast_routes()  # (once per session: the version route doesn't read the app)
-            if self.tw_version >= 4:
+            if self.tw_version >= BOUNDED_VERSION and center:
+                normal = self.budgets.normal_ms
+                source = await self._compact_tree(timeout, since=False, budget_ms=normal, remember=False,
+                                                  read_path=tree_path(normal, normal))
+            elif self.tw_version >= 4:
                 source = await self._bounded_tree(timeout) if self.tw_version >= BOUNDED_VERSION else \
                     await self._compact_tree(timeout)
-                if source is not None:
-                    return source
+            else:
+                source = None
+            if source is not None:
+                return source
         return (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
 
     async def _bounded_tree(self, timeout: float) -> str | None:
         """(route version 9) The compact read with a budget: the app's own (ReadBudget), by the app the newest read
         found in front. A read cut short on the short budget whose answer names another app than the one the budget
         was for is read again with the normal budget: the short budget was that app's, not this one's."""
-        bundle = self.read_app[1] if isinstance(self.read_app, tuple) else None
-        budget = self.budgets.budget(bundle)
-        source = await self._compact_tree(timeout, budget_ms=budget)
-        if (source is not None and self.last_tier != "full" and budget < self.budgets.normal_ms
-                and _root_bundle(source) != bundle):
-            source = await self._compact_tree(timeout, budget_ms=self.budgets.normal_ms)
+        # (review R200v L2) a root the runner couldn't name an app for (RUNNER-V9-PROTOCOL §1: `b` left out) is kept
+        # under the app the read was budgeted for, so the short budget still applies to it; and such a root is never
+        # taken for another app's
+        bundle = (self.read_app[1] if isinstance(self.read_app, tuple) else None) or self.budget_app
+        normal = self.budgets.normal_ms
+        budget = self.budgets.budget(bundle, still=self.screen_still)
+        source = await self._compact_tree(timeout, budget_ms=budget, budget_for=bundle,
+                                          read_path=tree_path(budget, normal))
+        named = _root_bundle(source)
+        if (source is not None and self.last_tier != "full" and budget < normal
+                and named is not None and named != bundle):
+            source = await self._compact_tree(timeout, budget_ms=normal, budget_for=named,
+                                              read_path=tree_path(normal, normal))
+            named = _root_bundle(source)
+        if source is not None:
+            self.budget_app = named or bundle
         return source
 
-    async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None) -> str | None:
+    async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None,
+                            budget_for: str | None = None, remember: bool = True,
+                            read_path: str | None = None) -> str | None:
         """The tree through the fork's compact read (TREE_PATH), as the XML /source would have sent; None when it
         can't be had that way (the caller reads /source). A dropped line or a frozen app is raised as from /source.
         `since`: send the last read's token, so an unchanged screen comes back as "unchanged" without the tree.
         `budget_ms` (route version 9): the runner answers within about that long with what it could read, and says
-        how much (`tier`); a cut-short answer is kept as `last_tier`, never as the token an "unchanged" reuses."""
+        how much (`tier`); a cut-short answer is kept as `last_tier`, never as the token an "unchanged" reuses.
+        `budget_for`: the app the budget was chosen for, which the answer is kept under when its root names none.
+        `remember` False: the answer feeds no budget memory (Notification Center's read). `read_path`: the runner's way
+        of reading (`direct` or `xctest`, tree_path), sent with a budget."""
         last = self.last_compact if since else None
-        query = [*([f"budget={budget_ms}"] if budget_ms is not None else []), *([f"since={last[0]}"] if last else [])]
+        query = [*([f"budget={budget_ms}"] if budget_ms is not None else []),
+                 *([f"path={read_path}"] if budget_ms is not None and read_path else []),
+                 *([f"since={last[0]}"] if last else [])]
         path = TREE_PATH + ("?" + "&".join(query) if query else "")
         try:
             value = (await self._call("GET", path, timeout=min(timeout, READ_CUT))).get("value")
@@ -675,7 +786,8 @@ class Session:
             if last is not None and last[0] == token:
                 return last[1]  # (only a whole tree is kept as the token's: unchanged is a full read)
             # an "unchanged" this read can't use (it sent no such token): read the whole tree
-            return await self._compact_tree(timeout, since=False, budget_ms=budget_ms) if since else None
+            return await self._compact_tree(timeout, since=False, budget_ms=budget_ms, budget_for=budget_for,
+                                            remember=remember, read_path=read_path) if since else None
         try:
             source = ui.xml_of_tree(value.get("tree"))
         except ValueError as e:
@@ -690,7 +802,11 @@ class Session:
         why = value.get("why")
         self.last_tier, self.last_why = tier, why if isinstance(why, str) else ""
         if budget_ms is not None:
-            self.budgets.answered(_root_bundle(source), tier != "full", budget_ms)
+            if remember:
+                self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_ms)
+                if tier == "full" and self.settles.read_whole(_root_bundle(source) or budget_for):
+                    getattr(self.device, "log", lambda *a: None)(
+                        f"{_root_bundle(source) or budget_for} read whole again: actions settle with the normal cap")
             if tier != "full":
                 getattr(self.device, "log", lambda *a: None)(
                     f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")
@@ -702,10 +818,15 @@ class Session:
         """Notification Center's tree (SpringBoard's) as XML, read once and kept nowhere: not as the last read, not as the
         compact read's token, never traced but for its timing (notifications.py drops every other app's notification
         from it at once). No banner wait: its notifications are what is read."""
+        tier_was, why_was = self.last_tier, self.last_why
         try:
-            return str(await self._read_tree(timeout) or "")
+            source = str(await self._read_tree(timeout, center=True) or "")
+            self.center_tier = self.last_tier
+            return source
         finally:
             self.last_compact = None
+            # (R200v L4) not the newest read of the app either: its tier is left as the app's read left it
+            self.last_tier, self.last_why = tier_was, why_was
 
     async def foreground_bundle_id(self) -> str | None:
         try:
@@ -811,6 +932,8 @@ class Session:
         if level not in ("fast", "accurate"):
             raise ValueError(f"level must be fast or accurate, not {level!r}")
         languages = ",".join(p.strip() for p in OCR_LANGUAGES.split(",") if p.strip())
+        if level == "fast" and not fast_reads(languages):
+            level = "accurate"  # (review R200v M4) the fast level would fail every read in these languages
         path = f"{OCR_PATH}?level={level}" + (f"&languages={urllib.parse.quote(languages, safe=',-')}" if languages else "")
         answer = await self._call("GET", path, timeout=OCR_WAIT, again=False)
         value = answer.get("value", answer) if isinstance(answer, dict) else None
@@ -1149,6 +1272,23 @@ class Session:
             return  # do not cache a malformed response as proof of a legacy runner
         self.fast_tap, self.fast_drag = version >= 1, version >= 2
         self.tw_version = version
+        if version >= BOUNDED_VERSION and not self.bounded and self.sid is not None:
+            await self._bound_late()
+
+    async def _bound_late(self) -> None:
+        """(review R200v L6) ensure's version probe couldn't tell, so the session started as 1.10.0's did; a later probe
+        says version 9: the runner's ceiling for every accessibility read is set now (its reads are budgeted from now
+        on too), so the session isn't half-bounded. A setting that can't be posted leaves it as it was (asked again by
+        the next session)."""
+        try:
+            await self._call("POST", "/session/{sid}/appium/settings", {"settings": {"twAXTimeout": AX_TIMEOUT}},
+                             timeout=READ_CUT)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            getattr(self.device, "log", lambda *a: None)(f"the runner's AX timeout couldn't be set ({e})")
+            return
+        self.bounded = True
 
     async def runner_version(self) -> int:
         """The fork's route version of this phone's runner (0: not the fork)."""

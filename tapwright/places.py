@@ -54,6 +54,7 @@ class PlaceRead:
     title: str
     lang: str
     chrome: frozenset[str] = frozenset()  # the tab bar's ids (`tab_ids`): never stored, only to compare with an old place
+    whole: bool = True  # (2.0, R200v M1) False: read from a tree the runner cut short, which `locate` takes for no place
 
 
 @dataclass(frozen=True)
@@ -164,7 +165,11 @@ def has_structure(tree: ui.Tree) -> bool:
 
 def recognisable(tree: ui.Tree) -> bool:
     """Could a later read tell this screen from the others of its kinds? Only by an identifier or a title (`locate`): a
-    screen with only container kinds would be saved as a new place at every visit and never found again."""
+    screen with only container kinds would be saved as a new place at every visit and never found again. (2.0, review
+    R200v M1) Never from a tree the runner cut short (`tier` shallow or root): what it left out would make it another
+    place, so nothing is saved or recognised from it (a look, a move, explore, a route's way)."""
+    if getattr(tree, "tier", "full") != "full":
+        return False
     return has_structure(tree) and bool(tree.structure.ids or " ".join(tree.structure.title.split()))
 
 
@@ -173,7 +178,8 @@ def read_place(tree: ui.Tree, lang: str | None = None) -> PlaceRead:
     language the app was started with, when it is known."""
     parts = parts_of(tree)
     title = " ".join(tree.structure.title.split())
-    return PlaceRead({"signature": signature(parts), "parts": parts}, title, language_of(title, lang), tab_ids(tree))
+    return PlaceRead({"signature": signature(parts), "parts": parts}, title, language_of(title, lang), tab_ids(tree),
+                     whole=getattr(tree, "tier", "full") == "full")
 
 
 def current(parts: dict) -> bool:
@@ -383,7 +389,9 @@ def locate(data: dict, read: PlaceRead) -> tuple[str | None, float]:
     """The saved place this read is, and how well it fits; (None, 0.0) when it is none. The best fit at or over the
     threshold wins; fits within TIE of each other are told apart by the navigation title, then by the newest.
     A screen with no identifiers at all is only the same place when its title is the same too: nothing else could
-    tell it from any other screen of the same kinds."""
+    tell it from any other screen of the same kinds. A read of a tree cut short (`read.whole` False) is no place."""
+    if not read.whole:
+        return None, 0.0
     wanted = title_hash(data["titleKey"], read.lang, read.title) if read.title else None
     fits: list[tuple[float, bool, str, str]] = []
     chrome = read.chrome | shared_ids(data)

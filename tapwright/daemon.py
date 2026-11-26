@@ -399,12 +399,14 @@ class UxRead(NamedTuple):
     alert_now: "tuple[str, tuple[str, ...], str] | None"
     screen: tuple
     app: "tuple[str, str] | None"
+    whole: bool = True  # (2.0) the tree was read whole: a cut-short one is no screen to check (R200v M1)
 
 
 class Settled(NamedTuple):
     seconds: float
     changed: bool  # False only when the stream showed the screen unchanged for certain
     capped: bool  # the cap ended the wait with frames still changing
+    still: bool = False  # (2.0) it ended on frames that stood still (not a stall, no frames, or the cap)
 WAIT_MIN, WAIT_MAX = 0.1, 30.0  # seconds, for `wait`
 WAIT_FOR_MIN, WAIT_FOR_DEFAULT = 0.5, 10.0  # `wait_for`'s timeout in seconds (its upper end is WAIT_MAX)
 WAIT_FOR_KINDS = ("text", "id", "label")
@@ -421,6 +423,7 @@ SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the direction
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
 WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take
 WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up instead of reading again
+SKIP_TEXT_WAIT = 3.0  # (2.0) seconds a step's `if` may spend reading the picture's text on a cut-short screen
 WAIT_FOR_FIRST_READ = 3.0  # `wait_for`'s first read of the screen gets at least this long (twice the slowest look allowed)
 # The stream's pace. Every frame WebDriverAgent captures costs the phone, mostly in iOS's testmanagerd: about 88% of
 # a core at balanced's ~27 fps and 38% at light's ~10 fps (DVT sysmontap, the lab animating, 2026-11-10). So the
@@ -627,14 +630,36 @@ def _seen_text(want: str, seen: "list[ocr.Seen]") -> bool:
     return bool(w) and any(w in " ".join(s.text.casefold().split()) for s in seen)
 
 
+# (2.0, review R200v H2) a condition (wait_for, expect, a step's `if`) that a cut-short tree can't decide: an id or label
+# missing from it may be among what wasn't read. Callers find a refusal for this reason by these words (a refusal is
+# rebuilt with notes on its way out of run_tool, so they are the mark, not its type): a run's step that stops for it
+# fails `timeout`, never `expect_failed` (no "Check failed" finding, no route repair).
+UNREAD = "this screen's elements couldn't be read"
+
+
+def unread(error: BaseException) -> bool:
+    """Was this refusal a condition no read could decide (UNREAD)?"""
+    return isinstance(error, Refused) and error.code == "timeout" and UNREAD in str(error)
+
+
 # (2.0) after an action on a screen whose tree was cut short: no list of what changed can be read
 AFTER_CUT = "The picture shows the screen after it; look reads its text again (as o refs)."
-# (2.0) a target by id, label, text or element ref on a screen that gave no elements
-HINT_NO_ELEMENTS = ("This screen doesn't answer accessibility reads, so it has no elements to find: look shows the text "
-                    "read from its picture as o refs; touch one of them, or a point {x, y}.")
-HINT_PART_ELEMENTS = ("This screen answered only part of the accessibility read, so the element may be among what it "
-                      "left out: look shows the text read from its picture as o refs; touch one of them, or a point "
-                      "{x, y}.")
+# (2.0) a target by id, label, text or element ref on a screen that gave no elements (kept in ui: a repair reads them)
+HINT_NO_ELEMENTS = ui.HINT_NO_ELEMENTS
+HINT_PART_ELEMENTS = ui.HINT_PART_ELEMENTS
+
+
+def cut_refusal(error: BaseException) -> bool:
+    """(R200v M1) A `not_found` only because the screen's elements weren't (all) read: no failed route, no break to repair."""
+    return isinstance(error, Refused) and error.code == "not_found" and ui.cut_hint(str(error))
+
+
+# (2.0, R200v M1) audit and ux_check on a screen the runner read only in part. `unsupported`: the report can't be made from
+# this read. Not `timeout`, which tells an agent the same call may simply work again: on a playing feed it won't, and a
+# report of "no issues" from a cut list would be false; the agent moves to a still screen (or pauses the video) first.
+CUT_REPORT = ("{tool}: {unread} within the time given (the screen kept moving, or the app didn't answer the "
+              "accessibility read in time), so it can't be checked: a report from part of a screen would say what isn't "
+              "known. Pause what plays or go to a still screen, then {tool} again.")
 
 
 def settled_line(seconds: float) -> str:
@@ -1317,6 +1342,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self.code_fields = otplib.FieldWatch()  # when each app with codes on showed its code field (§20.4)
         try:
             self.session.on_tree = self._watch_code_field  # (each read the daemon builds says whether one shows)
+            self.session.screen_still = self._still_for_budget  # (2.0: a still screen's read gets the normal budget)
         except AttributeError:
             pass
         # the passcode unlock (§18.6, §11.5; unlock.py): its rules and counts, and the lock screen it types on
@@ -3197,7 +3223,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 if counts and made.bundle and made.route_done:
                     # (CodeRabbit, PR #22) the route ran and arrived; a `then` step after it failed: the route worked
                     await self._auto_counted(made.root, made.bundle, req.route, True, made.route_stamp, made.route_end_now)
-                elif (counts and made.bundle and made.route_started and e.code in autoroute.FAIL_CODES):
+                elif (counts and made.bundle and made.route_started and e.code in autoroute.FAIL_CODES
+                      and not cut_refusal(e)):  # (R200v M1: a screen that couldn't be read is no failed route)
                     # (review 1.9.0 H3) only a failure of the route's own steps counts: not the way to its start
                     said = await self._auto_counted(made.root, made.bundle, req.route, False, made.route_stamp)
                     if said is not None:
@@ -3584,7 +3611,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
                 if step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
-                    traced.append(batch.skipped(i, batch.optional_wait_skipped(step)))  # (1.9.0 round 2)
+                    traced.append(batch.skipped(i, batch.optional_wait_skipped(step, unread=unread(e))))  # (1.9.0 round 2)
                     done += 1
                     continue
                 message, crash = _without_crash_note(str(e))  # the note goes with the others, at the end
@@ -3655,16 +3682,23 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             app = getattr(self.session, "app", None)
             raise Refused("not_allowed", _outside(self._bundle(), app[0] if app else None, ", ".join(given.values())))
         there = sorted([*view.items, *self._off_screen_now()], key=lambda e: (e.y, e.x))
+        cut = self._tier_now() != "full"
         cond = step.get("if")
         if cond is not None:
             kind = next(k for k in batch.EXPECT_KINDS if cond.get(k) is not None)
-            absent = self._missing(there, ui.parse_target({kind: cond[kind]}))
-            if absent != bool(cond.get("gone")):
+            shown = await self._presence(there, ui.parse_target({kind: cond[kind]}), kind, cond[kind], cut,
+                                         SKIP_TEXT_WAIT)
+            if shown is None:
+                # (R200v H2) neither held nor failed: the step isn't run on a guess (a guard keeps its step from running)
+                return f"if: {batch.aim_name(kind, cond[kind])} couldn't be checked ({UNREAD})"
+            if shown == bool(cond.get("gone")):
                 verb = "is" if cond.get("gone") else "isn't"
                 return f"if: {batch.aim_name(kind, cond[kind])} {verb} on screen"
         own = step.get("target") if step.get("optional") else None
         if own is not None and self._missing(there, ui.parse_target(own)):
             kind = next(k for k in ("ref", "id", "label", "text") if own.get(k) is not None)
+            if cut:
+                return f"optional: {batch.aim_name(kind, own[kind])} couldn't be found ({UNREAD})"
             return f"optional: {batch.aim_name(kind, own[kind])} isn't on screen"
         return None
     async def _log_boundary(self, scope: "Scope | None") -> None:
@@ -3747,7 +3781,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 app = getattr(self.session, "app", None)
                 raise Refused("not_allowed", _outside(self._bundle(), app[0] if app else None, ", ".join(given.values())))
             there = [*view.items, *self._off_screen_now()]
-            if self._missing(there, target) == gone:
+            # (R200v H2) as wait_for: a cut-short tree proves only what it gave, and a text is looked for in the picture
+            shown = await self._presence(there, target, kind, expect[kind], self._tier_now() != "full",
+                                         deadline - self.control.clock())
+            if shown is None and self.control.clock() >= deadline:
+                raise Refused("timeout", self._expect_unread(expect))
+            if shown is not None and shown != gone:
                 if loading > 0:
                     notes.append(f"the app showed its loading screen after the link; the expect waited it out "
                                  f"({self.control.clock() - began:.1f} s).")
@@ -3799,6 +3838,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                                             "timeout": timeout, "look": False}, scope)
                 return None
             except Refused as e:
+                if unread(e):  # (R200v H2) nothing was proven: the step fails as not checked, never as a failed check
+                    raise Refused("timeout", self._expect_unread(expect, str(e))) from None
                 if e.code == "timeout":
                     return batch.expect_failed(expect)
                 raise
@@ -3818,8 +3859,21 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                                   else batch.has_value(found, expect["value"])):
                 return None
             if self.control.clock() >= deadline:
+                if found is None and self._tier_now() != "full":
+                    # (R200v H2) the element may be among what the cut-short read left out
+                    raise Refused("timeout", self._expect_unread(expect))
                 return batch.expect_failed(expect)
             await self.control.sleep(0.25)
+
+    @staticmethod
+    def _expect_unread(expect: dict, said: str = "") -> str:
+        """(R200v H2) Why a step's expect couldn't be checked: the screen's elements weren't read by its deadline. Not a
+        failed check (no `expect_failed`, no "Check failed" finding): it carries UNREAD, so a run says it this way."""
+        kind = next(k for k in batch.EXPECT_KINDS if expect.get(k) is not None)
+        seconds = f"{float(expect.get('timeout', batch.EXPECT_DEFAULT)):g}"
+        why = said.split("\n", 1)[0] if said else (f"within {seconds} s {UNREAD}, so whether "
+                                                    f"{batch.aim_name(kind, expect[kind])} held isn't known.")
+        return f"its expect couldn't be checked: {why}"
 
     async def _run_tool_inner(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         granted: list[bool] = []
@@ -4162,18 +4216,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             answer = await self._look(view, shot, [], notes)
             # (2.0) the runner learns its routes with the look's read: now the runner's OCR may be known to be there
             no_ocr = no_ocr and not self._ocr_possible()
+            # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
+            # another app that comes forward after the look (last Opus review, L); a cut-short look too (R200v M3)
+            view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
             if (tier := self._tier_now()) != "full" and args.get("ocr") is not False:
                 # a screen that didn't answer the whole read: its text, read from the picture, comes without asking
                 return await self._with_ocr(view, answer, tier=tier)
             if no_ocr:
                 # (1.9.0 round 2) the look the agent asked for, with a note: no failed call and its retry
                 answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_NO_OCR}
-            # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
-            # another app that comes forward after the look (last Opus review, L)
-            view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
             given = _GIVEN.get()  # a screen of another app (personal mode withholds it) is no screen of the journey
-            if given is None or (self.session.app or (None, None))[1] in given:
-                uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
+            if tier == "full" and (given is None or (self.session.app or (None, None))[1] in given):
+                # for naming drift on later ux_checks (AGENT-TOOLS §17.3); never a cut-short list (R200v M1)
+                uxcheck.note_screen(client_id, view.items)
             if args.get("ocr") and not no_ocr:  # (without the extra: the look and its note, never a read)
                 return await self._with_ocr(view, answer)
             if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
@@ -4406,8 +4461,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 e.args = (f"{e}\nNote: {taken}",)
             if (e.code == "not_found" and target is not None and target.point is None
                     and (tier := self._tier_now()) != "full"):
-                # (2.0) the screen gave no elements (or only some): say so, and how to reach what it shows
-                raise Refused("not_found", f"{e}\n{HINT_NO_ELEMENTS if tier == 'root' else HINT_PART_ELEMENTS}") from None
+                # (2.0) the screen gave no elements (or only some): say so, and how to reach what it shows; a near
+                # miss among the elements it did give comes first (review R200v L3)
+                near = self._closest(view, target, str(e)) if tier == "shallow" else None
+                raise Refused("not_found", "\n".join([str(e), *([near] if near else []),
+                                                      HINT_NO_ELEMENTS if tier == "root" else HINT_PART_ELEMENTS])) from None
             if e.code == "not_found" and (near := self._closest(view, target, str(e))):
                 raise Refused("not_found", f"{e}\n{near}") from None
             if e.code == "ambiguous" and self._other_app_shown():
@@ -4432,6 +4490,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             notes = [*notes, changed]
         if fresh[0]:  # its own action keeps what it knew current; after someone else's, it must look
             view.seen = self.control.generation
+        # (review R200v M2) the o refs are points of the screen the last reading saw: any action of this client's ends
+        # them, `look: false` included (a feed's swipe changes the video; a later tap on o2 would hit the old place)
+        view.ocr = {}
         if isinstance(result, Unchanged):  # nothing was done: nothing to settle or diff
             return _answer([str(result)], notes)
         reads_only = name == "alert" and args.get("action") == "text"  # it changes nothing on the phone
@@ -4924,6 +4985,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         seen = self.maps.observe(root, bundle, tree, arrived=None, lang=self._language.get(bundle), previous=previous)
         if seen is None:
             view.place = None
+            if (_cut_short(tree) and isinstance(view.auto, autoroute.Chain) and view.auto.app == bundle
+                    and name not in autoroute.NEUTRAL):
+                # (R200v M1) a move whose arrival couldn't be read: where it went isn't known, so no way through it is
+                # saved as a route (the next place read would otherwise follow on as if this step had led there)
+                view.auto.taint()
             return answer
         view.place, view.place_seen = (bundle, seen.name), self.control.generation
         typed_here = view.typed_at is not None and view.typed_at == before
@@ -6046,7 +6112,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         point = self.control.client(client_id).ocr.get(ref)
         if point is None:
             raise Refused("not_found", f"{ref} isn't in your last OCR reading; look with ocr: true again (a screen "
-                                       "that doesn't answer accessibility reads gets o refs with any look).")
+                                       "whose elements weren't read gets o refs with any look).")
         return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}
 
     def _tier_now(self) -> str:
@@ -6063,11 +6129,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         reads = getattr(self.session, "reads_text", None)
         return bool(reads()) if callable(reads) and RUNNER_OCR != "0" else False
 
-    async def _screen_text(self, level: str = "accurate") -> "tuple[list[ocr.Seen], str]":
+    async def _screen_text(self, level: str = "accurate", implicit: bool = False) -> "tuple[list[ocr.Seen], str]":
         """(the text lines the screen shows now, a note for the answer or ""). The runner reads them on the phone
         (route version 9, Apple's Vision: faster than this computer's CPU); RapidOCR reads the picture here when the
         runner can't (an older runner, or its OCR failed: never a failed call). Neither: no lines, and the note says
-        how to install the extra."""
+        how to install the extra. `implicit`: a read the agent didn't ask for (a cut-short look, a wait's picture): a
+        broken install here is a note too, never a failed call (review R200v L5)."""
         failed = ""
         if self._runner_reads_text():
             asked = self.hub.mono()
@@ -6096,16 +6163,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             return await asyncio.to_thread(ocr.read, picture, self.session.screen), ""
         except Exception as e:  # noqa: BLE001 - a broken install: the look is still the answer
-            if not failed:
+            if not failed and not implicit:
                 raise
-            self.log(f"OCR here failed too: {type(e).__name__}: {e}")
+            self.log(f"OCR here failed{' too' if failed else ''}: {type(e).__name__}: {e}")
+            if not failed:
+                return [], f"no text read from the picture: reading it here failed ({type(e).__name__})."
             return [], f"{failed}, and so did reading the picture here ({type(e).__name__})."
 
     async def _with_ocr(self, view, answer: dict, tier: str = "full") -> dict:
         """`look` with `ocr: true`, and (2.0) every look whose tree was cut short (`tier` shallow or root): the text the
         picture shows that no element carries, as lines with refs o1, o2… after the list (before its notes). On a
         screen with no elements at all (root) the header's `Elements: none` line says the text follows."""
-        seen, note = await self._screen_text()
+        seen, note = await self._screen_text(implicit=tier != "full")
         # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
         # shows is its placeholder, §18.6)
         known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
@@ -6128,6 +6197,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         text = "\n".join(lines) + (f"\nNote: {note}" if note else "")
         return {**answer, "text": text}
 
+    def _refuse_cut_report(self, tool: str) -> None:
+        """(R200v M1) audit and ux_check are made only from a whole tree (CUT_REPORT)."""
+        if self._tier_now() != "full":
+            raise Refused("unsupported", CUT_REPORT.format(tool=tool, unread=UNREAD[0].upper() + UNREAD[1:]))
+
     async def _audit(self, view, args: dict, notes: list) -> dict:
         """AGENT-TOOLS §10: XCTest's own accessibility audit of the screen in front, plus `duplicate_id` from the
         tree, as one report. The tree is read first so each issue is named by the agent's current element line."""
@@ -6135,6 +6209,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         asked = [audit.XCTEST[t] for t in types if t in audit.XCTEST]
         await self._settle_pending()
         await self._read(lambda: self._silent_read(view))
+        self._refuse_cut_report("audit")
         issues = await self._read(lambda: self.session.audit(asked)) if asked else []
         app = getattr(self.session, "app", None)
         name = app[0] if app else "the screen"
@@ -6165,15 +6240,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # tree and come back before the check; CodeRabbit, PR #7).
             first = await front() if given is not None else None
             await self._silent_read(view)
+            whole = self._tier_now() == "full"  # (R200v M1: a cut-short list is refused below, after the app check)
             try:
-                found: list | DeviceError = await session.audit([audit.XCTEST[t] for t in self.UX_AUDIT])
+                found: list | DeviceError = await session.audit([audit.XCTEST[t] for t in self.UX_AUDIT]) if whole else []
             except ConnectionLost:
                 raise
             except DeviceError as e:
                 found = e
             # What this turn read, kept for this call: the agent's view is shared with its other calls, and a look of
             # theirs can replace it before this one is done (Codex, PR #7 cycle 4)
-            seen = UxRead(list(view.items), view.alert_now, tuple(session.screen), getattr(session, "app", None))
+            seen = UxRead(list(view.items), view.alert_now, tuple(session.screen), getattr(session, "app", None), whole)
             return first, found, (await front() if given is not None else None), seen
         for attempt in (1, 2):
             first, issues, last, seen = await self._read(turn)
@@ -6190,6 +6266,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             shown = last if first == last else (last or first)
             raise Refused("not_allowed", _outside(shown, self.session.app_names.get(shown or ""),
                                                   ", ".join(given.values())))
+        if not seen.whole:
+            self._refuse_cut_report("ux_check")  # (nothing is checked, filed on the journey or kept for naming drift)
         rows: list[tuple[str, str, str]] = []
         notes = list(notes)
         if isinstance(issues, DeviceError):
@@ -6732,6 +6810,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                                       ", ".join(given.values())))
             bundle = front
         folder = bundle or "unknown"  # (a recording copies the reference from this folder: it comes back in Compared)
+        if self._tier_now() != "full" and any(e.get("width") is None for e in ignore or []):
+            # (R200v M1) an element to paint out may be among what the cut-short read left out: a reference saved or
+            # compared without it would hold (or fail on) what it was meant to ignore. A rect needs no read.
+            raise Refused("unsupported", f"compare_screen: {UNREAD} within the time given, so the elements to ignore "
+                                         "can't be found. Ignore them by rect ({x, y, width, height}), or go to a still "
+                                         "screen first.")
         rects, notes = compare.ignored(view.items, ignore or [])
         if (other := compare.twin(folder, name, script["path"] if script else None)) is not None:  # before any read or write
             raise Refused("bad_params", namelib.twin_message("reference", name, other))
@@ -6832,13 +6916,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         gone, timeout = bool(args.get("gone", False)), float(args.get("timeout", WAIT_FOR_DEFAULT))
         clock = self.control.clock
         began = clock()
-        timed_out = Refused("timeout", f'Waited {timeout:g} s for {kind} "{args[kind]}" to '
-                                       f"{'disappear' if gone else 'appear'}; it didn't happen.")
+        undecided = False  # (2.0, R200v H2) the newest poll's screen couldn't say either way (UNREAD)
+
+        def timed_out() -> Refused:
+            if undecided:  # never "it didn't happen", never Done: nothing was proven
+                return Refused("timeout", self._unread_message(kind, args[kind], gone, timeout,
+                                                               kind == "text" and self._ocr_possible()))
+            return Refused("timeout", f'Waited {timeout:g} s for {kind} "{args[kind]}" to '
+                                      f"{'disappear' if gone else 'appear'}; it didn't happen.")
         seen = False  # has the screen been read at all during this wait?
         while True:
             left = timeout - (clock() - began)
             if left < WAIT_FOR_MIN_LEFT:
-                raise timed_out
+                raise timed_out()
             # The read gets its own full deadline, so a slow phone isn't taken for a dead one; wait_for's
             # deadline is kept by cancelling the read, which answers `timeout` and leaves the link alone.
             # "It didn't happen" needs one look at the screen, so the first read gets at least
@@ -6855,22 +6945,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     raise Refused("timeout", f"The phone didn't answer within {max(timeout, WAIT_FOR_FIRST_READ):g} s, so it "
                                              f'isn\'t known whether {kind} "{args[kind]}" is on screen; look, then '
                                              "wait again.") from None
-                raise timed_out from None
+                raise timed_out() from None
             seen = True
-            missing = self._missing(tree.items, target)
-            if missing and kind == "text" and _cut_short(tree) and self._ocr_possible():
-                # (2.0) a screen that doesn't answer the whole read: its text is read from the picture too
-                try:
-                    found, _ = await _wait_for(self._screen_text("fast"),
-                                               max(WAIT_FOR_MIN_LEFT, timeout - (clock() - began)))
-                except asyncio.TimeoutError:
-                    found = []  # (the wait's own time ran out while the picture was read)
-                missing = not _seen_text(str(args[kind]), found)
-            if missing == gone:
+            # (2.0) on a screen that didn't answer the whole read, a text is looked for in the picture's text too; an id
+            # or label it didn't give is neither there nor gone, and the wait goes on (the next read may be whole)
+            there = await self._presence(tree.items, target, kind, args[kind], _cut_short(tree),
+                                         timeout - (clock() - began))
+            undecided = there is None
+            if there is not None and there != gone:
                 break
             left = timeout - (clock() - began)
             if left < WAIT_FOR_MIN_LEFT:
-                raise timed_out
+                raise timed_out()
             await self.control.sleep(min(WAIT_FOR_POLL, left))
         result = f"Done after {clock() - began:.1f} s."
         if not args.get("look", True):
@@ -7028,20 +7114,20 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         value, which goes only into a field it was checked against (§20), isn't typed at all."""
         text, submit = str(a["text"]), bool(a.get("submit", False))
         if accountlib.mentions(text):
-            raise Refused("not_found", "this screen doesn't answer accessibility reads, so no field can be checked: a "
+            raise Refused("not_found", "this screen's elements weren't read, so no field can be checked: a "
                                        "saved account's value is typed only into a field Tapwright can read. Nothing "
                                        "was typed.")
         if not text and not submit:
-            raise Refused("not_actionable", "no_action: this screen doesn't answer accessibility reads, so a field "
+            raise Refused("not_actionable", "no_action: this screen's elements weren't read, so a field "
                                             "can't be cleared. Nothing was typed.")
         await self._last_checks("type_text", a, None, hit=False, police=False)
         self._dry(a, f"Would type {len(text)} character{'s' if len(text) != 1 else ''} into the focused field (this "
-                     "screen doesn't answer accessibility reads).")
+                     "screen's elements weren't read).")
         await self.session.type_text(text, replace=False, submit=submit)
         done = Noted(f"Typed {len(text)} character{'s' if len(text) != 1 else ''}"
                      + (" and pressed return" if submit else "") + " into the focused field.")
         if a.get("replace", True) and text:
-            done.note = ("the field wasn't cleared first: this screen doesn't answer accessibility reads, so nothing "
+            done.note = ("the field wasn't cleared first: this screen's elements weren't read, so nothing "
                          "could tell what it held.")
         return done
 
@@ -8362,7 +8448,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         at what that list's moment showed there; if something moved in (a sheet, a banner, a scrolled row) the
         touch would land on something else. Only a fresh stream frame against the frame of the agent's last read
         can tell; without both, or after the agent chose an answer without a list (`look: false`), it can't, and
-        the touch goes ahead as before."""
+        the touch goes ahead as before. (2.0, lead's decision) Not when the agent's last list of this view was cut
+        short: on such a screen (a playing feed) every pixel around a point changes all the time, so the guard would
+        refuse every touch by point or o ref and mean nothing (the o refs already end with any action, R200v M2)."""
+        if _cut_short(getattr(view, "tree", None)):
+            return False
         (_, was), now = view.read_mark, self.hub.latest
         if view.moved or was is None or now is None or now is was or self.hub.now_ms() - now.at > FRESH_FRAME * 1000:
             return False
@@ -8581,7 +8671,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if was is not None and self.hub.latest is not None and not alike(was, self.hub.latest):
             return False
         # after the touch's turn: the read waits its turn in the phone's queue, as every read does
-        return _screen_sig((await self._read(self.session.refresh)).items) == before
+        tree = await self._read(self.session.refresh)
+        if _cut_short(tree):
+            return False  # (R200v M1) a tree cut short can't show that nothing changed (two roots always compare equal)
+        return _screen_sig(tree.items) == before
 
     async def _still_back(self) -> ui.Back:
         """Where `back` would touch, read until two reads in a row agree. A sheet that is still sliding in has
@@ -8681,6 +8774,34 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return e.code == "not_found"
         return False
 
+    async def _presence(self, items: list[ui.Element], target: ui.Target, kind: str, want: object, cut: bool,
+                        left: float) -> bool | None:
+        """(2.0, review R200v H2) Is the text, id or label on screen (True), not on it (False), or can't that be told
+        (None)? An element the read gave proves it there, whole tree or not; only a whole tree proves it absent. On a
+        tree cut short (`cut`) a text is looked for in the picture's text as well (within `left` seconds), and a picture
+        read that failed or ran out of time proves nothing either way."""
+        if not self._missing(items, target):
+            return True
+        if not cut:
+            return False
+        if kind != "text" or not self._ocr_possible():
+            return None
+        try:
+            found, note = await _wait_for(self._screen_text("fast", implicit=True), max(WAIT_FOR_MIN_LEFT, left))
+        except asyncio.TimeoutError:
+            return None  # (the time ran out while the picture was read)
+        if note:
+            return None  # neither the phone nor this computer read it: nothing was seen, and nothing proven absent
+        return _seen_text(str(want), found)
+
+    @staticmethod
+    def _unread_message(kind: str, want: object, gone: bool, seconds: float, text_too: bool) -> str:
+        """The answer when a wait's condition couldn't be decided by its deadline (UNREAD)."""
+        picture = " and its picture's text wasn't read either" if text_too else ""
+        return (f'Waited {seconds:g} s for {kind} "{want}" to {"disappear" if gone else "appear"}, but {UNREAD} within '
+                f"the time given{picture}, so whether it did isn't known. Look (the text in the picture comes as o "
+                "refs), then wait for a text, or touch an o ref or a point.")
+
     async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                      since: Frame | None = None, early: int | None = None) -> tuple[float, bool]:
         """(seconds waited, changed): see _settle."""
@@ -8689,6 +8810,22 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
     async def _settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                       since: Frame | None = None, early: int | None = None) -> Settled:
+        """_settle_frames, with the cap of a screen that never stands still (Session.settles, SettleCap): shorter while
+        the app in front is known for it, and learned from how this settle ends."""
+        caps = getattr(self.session, "settles", None)
+        if caps is None:
+            return await self._settle_frames(after_seq, still, cap, since, early)
+        bundle = self._read_bundle()
+        done = await self._settle_frames(after_seq, still, caps.cap(bundle, cap), since, early)
+        if done.still or done.capped:
+            cut = self._tier_now() != "full"
+            if caps.settled(bundle, done.capped, cut):
+                self.log(f"{bundle}'s screen never stands still: actions settle within {caps.short:g} s"
+                         if caps.restless(bundle) else f"{bundle}'s screen stood still: actions settle as usual")
+        return done
+
+    async def _settle_frames(self, after_seq: int, still: float | None = None, cap: float = CAP,
+                             since: Frame | None = None, early: int | None = None) -> Settled:
         """Wait for the screen to be still, as the stream shows it. `after_seq` is the newest frame when the
         phone call returned: the settle ends only on a later frame, since earlier ones may predate the effect.
         WebDriverAgent streams continuously even when nothing changes, so a silence is a stall, not stillness.
@@ -8726,7 +8863,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 run, run_start, first_of_run = 0, began, None
             elif (gap and last is not None and run >= 2 and began - run_start >= still
                   and began - last <= 1.5 * gap):
-                return Settled(0.0, True, False)  # changed, then still up to a fresh frame at the return
+                return Settled(0.0, True, False, True)  # changed, then still up to a fresh frame at the return
         while (left := deadline - loop.time()) > 0:
             first = seq == after_seq
             wait = min(left, self.settle_first_frame if first else stall)
@@ -8748,10 +8885,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 run, run_start, first_of_run = 1, now, frame
             if run >= 2 and now - run_start >= still:
                 if differs or (seq - after_seq >= 3 and now - began >= self.settle_quiet):
-                    return Settled(now - began, differs, False)
+                    return Settled(now - began, differs, False, True)
         return Settled(loop.time() - began, True, differs)
 
-    def _proven_still(self) -> bool:
+    def _still_for_budget(self) -> bool:
+        """Session.screen_still: the stream shows the screen still now, so a tree read gets the normal budget even while
+        its app is on the short one (ReadBudget; review R200v H1). As _proven_still, without its timing notes (the read
+        that asks is not the settle they describe)."""
+        try:
+            return self._proven_still(noted=False)
+        except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: the short budget stays
+            return False
+
+    def _proven_still(self, noted: bool = True) -> bool:
         """Do the stream's recent frames already show what _settle waits for, so a read needn't wait? A read for
         a target asks no "nothing changed" question (its settle has no `since`, so it counts as changed): the
         screen is still when the frames alike span `still` seconds (at least 2.5 frame gaps), as _settle ends it.
@@ -8764,8 +8910,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         frame compared costs a decode (about 2.5 ms, on the event loop)."""
         gap = self.hub.gap()
         age = self.hub.age()
-        trace.note("frame_gap_ms", None if gap is None else round(gap * 1000, 1))  # (the timing trace only)
-        trace.note("frame_age_ms", None if age is None else round(age * 1000, 1))
+        if noted:
+            trace.note("frame_gap_ms", None if gap is None else round(gap * 1000, 1))  # (the timing trace only)
+            trace.note("frame_age_ms", None if age is None else round(age * 1000, 1))
         if not gap or age is None or age > min(1.5 * gap, self.shot_fresh):
             return False
         still = max(self.settle_still, 2.5 * gap)

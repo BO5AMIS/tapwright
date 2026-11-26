@@ -45,6 +45,8 @@ NOTE_ON_SCREEN = ("Notification Center was on the phone's screen for about a sec
                   "showed it too); only {whose} notifications were read out.")
 FROM_OTHERS_APPS = ("com.apple.MobileSMS", "com.apple.mobilemail")  # their notifications are others' words (§21.1)
 NOT_OPENED = "Notification Center didn't open, so nothing was read."
+CENTER_CUT = ("not all of Notification Center's elements were read within the time given, so more notifications may be "
+              "there than are listed; call notifications again.")  # (2.0, review R200v L4)
 TRIGGER_CLIENT = "notification-trigger"  # the trigger's check: never a client with calls of its own
 NOT_CLOSED = ("Notification Center may still be on the phone's screen: closing it didn't work, so nothing read is "
               "answered. Look at the screen, and close it (or ask the user to) before anything else.")
@@ -223,6 +225,8 @@ class CenterTools:
                 raise Refused("not_found", NOT_OPENED)
             found = notes_lib.parse(source, names, keep)
             del source  # (every other app's notification goes with it)
+            # (2.0, R200v L4) the runner may have cut the read short: what it left out may hold notifications
+            self._center_cut = getattr(s, "center_tier", "full") != "full"
             if open_index is not None and 1 <= open_index <= len(found):
                 chosen = await self._same_notification(found[open_index - 1], open_index, names, keep)
                 await s.tap(ui.Target(x=chosen.center[0], y=chosen.center[1]))
@@ -342,8 +346,11 @@ class CenterTools:
                 f"Opened n{n}: {self._notification_line(opened, n)}", *(f"Note: {x}" for x in [*notes, note]),
                 "Note: look shows the screen it opened."])), "image": None, "image_size": None}
         names = sorted({x.app for x in found})
+        cut = getattr(self, "_center_cut", False)
         head = (f"Notifications: {len(found)} from {', '.join(names)} (newest first)." if found else
-                f"Notifications: none from {apps}.")
+                f"Notifications: none read from {apps}." if cut else f"Notifications: none from {apps}.")
+        if cut:  # (R200v L4) never a list that looks whole when it isn't
+            notes = [*notes, CENTER_CUT]
         lines = [head, *(self._notification_line(x, i) for i, x in enumerate(found, 1))]
         return {"text": self.scrub_everywhere("\n".join([*lines, *(f"Note: {x}" for x in [*notes, note])])),
                 "image": None, "image_size": None}
