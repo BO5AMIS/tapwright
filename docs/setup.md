@@ -188,8 +188,8 @@ so the next call starts a new daemon). None is needed for normal use.
 | `TAPWRIGHT_DIRECT=0` | USB requests to the runner go through the tunnel, not usbmuxd |
 | `TAPWRIGHT_TREE_BUDGET` | milliseconds a screen read may take (default 3000) |
 | `TAPWRIGHT_TREE_LONG_BUDGET` | milliseconds a still screen that the normal read didn't finish is given once more, and a slow app's still screens keep (default 8000; `0`, or a value not above `TAPWRIGHT_TREE_BUDGET`, turns it off) |
-| `TAPWRIGHT_STILL_BOX` | the largest share of the picture (0 to 1, default 0.35) that may change during a read whose screen still counts as still for the long read (a banner moving on); `0`: the picture must not change (for measuring) |
-| `TAPWRIGHT_TREE_LONG_PATH=direct` | the long read goes the runner's lean direct way instead of XCTest's snapshot (default `xctest`; for measuring) |
+| `TAPWRIGHT_STILL_BOX` | the largest area (0 to 1 of the compared picture, default 0.35) of the box enclosing every change between the pictures before and after a read whose screen still counts as still for the long read (a banner moving on). The picture is compared at 1/8 scale, without the status bar and the screen's edge strips when upright, and with the stream's tolerance: two small changes far apart make one large box. `0`: no change outside those strips above that tolerance (for measuring) |
+| `TAPWRIGHT_TREE_LONG_PATH=direct` | the long read goes the runner's direct way instead of XCTest's snapshot (default `xctest`; for measuring). It asks the lean attribute set only with a runner of route version 10 or later and without `TAPWRIGHT_TREE_ATTRS=std`; otherwise the standard set |
 | `TAPWRIGHT_AX_TIMEOUT` | seconds any other accessibility read may take (default 3) |
 | `TAPWRIGHT_TREE_PATH=direct` or `xctest` | force the runner's way of reading (for measuring) |
 | `TAPWRIGHT_TREE_PATH=lean` | every screen read is the runner's fast direct read, as in 2.0.0: quicker looks, but a view another process draws inside an app (an in-app browser sheet) lists no elements |

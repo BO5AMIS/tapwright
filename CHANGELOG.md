@@ -15,7 +15,9 @@
   - that app's next reads of a still screen are given 8 s, never 1.5 s and never left unasked. A warm read still takes
     what it takes (0.4-0.7 s);
   - a screen that moves, in any app, is never given 8 s: it costs exactly what it cost in 2.0.2;
-  - an 8 s read that is cut, or gets no answer, is never asked again and blocks that app's next 8 s read for 5
+  - an 8 s read that is cut, or gets no answer, is never asked again (one the runner gave up within its first quarter,
+    with nothing to answer yet, is asked again within what is left of the 8 s, as any read is), and blocks that app's
+    next 8 s read for 5
     minutes (a paused video would otherwise cost 3 + 8 s every minute), 1 minute for an app that has read whole with
     8 s before, so one screen of it doesn't leave its readable ones unread; the 2.0.2 rules apply meanwhile. The block
     holds across a reconnect to the phone (a service restart starts afresh);
