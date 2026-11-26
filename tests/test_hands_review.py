@@ -184,3 +184,28 @@ def test_a_dropped_connection_error_type_is_never_connection_lost():
     with pytest.raises(Unanswered) as e:
         asyncio.run(hands.tap(10, 10, 20))
     assert not isinstance(e.value, ConnectionLost)
+
+
+def test_a_touch_the_hands_cant_map_waits_for_a_release_still_going_out():
+    # (CodeRabbit, PR #26, follow-up) a gesture cancelled while its release goes out leaves nothing `dirty` yet: a
+    # touch with a turn the hands can't map then answered HandsUnavailable at once, and the runner touched while the
+    # first finger might still be down
+    async def go():
+        hands, wire, _ = make()
+        wire.hang.add(1)  # A's release never gets through
+        a = asyncio.create_task(hands.tap(10, 10, 500))
+        await asyncio.sleep(0.05)
+        a.cancel()
+        await asyncio.sleep(0.05)
+        a.cancel()  # the release is left going out
+        with pytest.raises(asyncio.CancelledError):
+            await a
+        sent = len(wire.sent)
+        b = asyncio.create_task(hands.tap(200, 200, 5, screen=(H, W), turn=TURN_UNKNOWN))
+        await asyncio.sleep(0.05)
+        assert not b.done()  # it waits for A's release: no "use the runner" while that finger may be down
+        b.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await b
+        assert len(wire.sent) == sent
+    asyncio.run(go())

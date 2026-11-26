@@ -540,12 +540,16 @@ class Hands:
         return HandsError(f"sending a HID report failed ({type(e.cause).__name__}: {e}); the {kind} may have been "
                           "played: look before acting again")
 
-    def _portrait(self, screen: tuple[float, float] | None, turn: int) -> tuple[tuple[float, float], int]:
+    async def _portrait(self, screen: tuple[float, float] | None, turn: int) -> tuple[tuple[float, float], int]:
         """The screen and turn a touch is mapped with; HandsUnavailable (the runner plays it) when they can't be
-        mapped, unless something may still be down (_hold: CodeRabbit, PR #26)."""
+        mapped, unless something may still be down (_hold: CodeRabbit, PR #26). A release still going out after its
+        gesture was cancelled is waited for first (the same review's follow-up): until it has ended nothing says
+        whether that finger is down, and the runner must not add a second one."""
         try:
             return self._mapped(screen or self.screen, turn)
         except HandsUnavailable as e:
+            async with self._lock:
+                await self._settle()
             self._hold(e)
             raise
 
@@ -565,7 +569,7 @@ class Hands:
     async def tap(self, x: float, y: float, hold_ms: float = 50, *, screen: tuple[float, float] | None = None,
                   turn: int = 0, before: Before = None) -> None:
         """One finger down at (x, y) in screen points, held `hold_ms`, lifted at the same point."""
-        screen, turn = self._portrait(screen, turn)
+        screen, turn = await self._portrait(screen, turn)
         hx, hy = to_hid(x, y, screen, turn)
         await self._play([(0.0, [(SINGLE, hx, hy, True)]), (float(hold_ms), [(SINGLE, hx, hy, False)])], before, "tap")
 
@@ -573,7 +577,7 @@ class Hands:
                    before: Before = None) -> None:
         """One finger along [(t_ms, x, y), ...] in screen points: pressed at the first, moved through each at its time
         (a contact report at least every STEP_MS), lifted at the last."""
-        screen, turn = self._portrait(screen, turn)
+        screen, turn = await self._portrait(screen, turn)
         filled = timeline(points)
         frames: list[tuple[float, list[tuple[int, int, int, bool]]]] = []
         for t, x, y in filled:
@@ -585,7 +589,7 @@ class Hands:
     async def multi(self, paths: Sequence[Sequence[Point]], *, screen: tuple[float, float] | None = None,
                     turn: int = 0, before: Before = None) -> None:
         """Up to 5 fingers, each along its own [(t_ms, x, y), ...] on one clock (see multi_frames)."""
-        screen, turn = self._portrait(screen, turn)
+        screen, turn = await self._portrait(screen, turn)
         frames = [(t, [(FINGER_IDS[i], *to_hid(x, y, screen, turn), touching) for i, x, y, touching in slots])
                   for t, slots in multi_frames(paths)]
         await self._play(frames, before, "gesture")
