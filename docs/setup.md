@@ -187,6 +187,7 @@ so the next call starts a new daemon). None is needed for normal use.
 | `TAPWRIGHT_HUMAN=0` | swipes are straight lines, not finger-like |
 | `TAPWRIGHT_DIRECT=0` | USB requests to the runner go through the tunnel, not usbmuxd |
 | `TAPWRIGHT_TREE_BUDGET` | milliseconds a screen read may take (default 3000) |
+| `TAPWRIGHT_TREE_LONG_BUDGET` | milliseconds a still screen that the normal read didn't finish is given once more, and a slow screen that read whole keeps (default 8000, at most 8000; `0`, or a value not above `TAPWRIGHT_TREE_BUDGET`, turns it off) |
 | `TAPWRIGHT_AX_TIMEOUT` | seconds any other accessibility read may take (default 3) |
 | `TAPWRIGHT_TREE_PATH=direct` or `xctest` | force the runner's way of reading (for measuring) |
 | `TAPWRIGHT_TREE_PATH=lean` | every screen read is the runner's fast direct read, as in 2.0.0: quicker looks, but a view another process draws inside an app (an in-app browser sheet) lists no elements |

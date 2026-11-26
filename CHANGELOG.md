@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.0.3
+
+- A screen that is slow to read but does read lists its elements again. A shopping app's home screen (900 to 1,000
+  elements) reads whole every time when given about 4 to 5 s, and never within the 3 s a read is given (measured on
+  the phone, straight from the runner: with 1.5 s cut 5 of 5, with 3 s cut 5 of 5 after 2.7 s, with 8 s whole 4 of 4 in
+  4.1-4.2 s, and by XCTest's snapshot whole 3 of 3 in 3.5-7.3 s; a second read at once 0.4-0.7 s). Each cut read put the
+  app on the 1.5 s budget, so every look answered "0 elements: the screen's elements weren't read within the time
+  given" for as long as the agent stayed there, and the agent worked from the picture's text alone. Now:
+  - when the 3 s read is cut on a screen that stands still (the stream's pictures show nothing moving), the same read
+    asks once more with 8 s (`TAPWRIGHT_TREE_LONG_BUDGET`, in ms; `0` turns it off). Whole, it is the answer, with
+    one note that the screen took long to read;
+  - that app's next reads are given 8 s, never 1.5 s and never left unasked, for as long as they come back whole. A
+    warm read still takes what it takes (0.4 s);
+  - a read with 8 s that is cut too ends that: the 2.0.2 rules apply again, and that app gets no 8 s try for 5 minutes
+    (a paused video would otherwise cost 3 + 8 s every minute);
+  - a screen that keeps moving (a playing feed that never answers) never gets the 8 s try: it costs exactly what it
+    cost in 2.0.2.
+  What it costs: the first look at such a screen takes about 3 + 4 s instead of 3 s, once; a still screen that never
+  answers (a paused video) costs one 8 s try at most every 5 minutes. A person's touch from the live view waits for a
+  read under way, so it may wait that long too. `wait_for` gives its reads room for the 8 s while its own wait has it.
+
 ## 2.0.2
 
 - A touch connection that is acknowledged and reaches nothing is caught in more cases. A start of the service can
