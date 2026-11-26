@@ -53,6 +53,7 @@ class PointSession(DescribingSession):
     _front_rules = _real("_front_rules")
     _words = _real("_words")
     see_front = _real("see_front")
+    _wait_banner = _real("_wait_banner")
 
     def __init__(self, app=SHOP) -> None:
         super().__init__()
@@ -294,7 +295,8 @@ def test_springboard_over_the_app_the_agent_saw_alone_is_refused_below_the_zone_
         await d.run_tool("a", "look", {"screenshot": False})
         banner_down(s)
         e = await refused(d, "tap", {"target": {"x": 200, "y": 420}, "look": False})
-        assert e.code == "stale" and "something of the system over Shop (com.example.shop) now" in str(e)
+        # (review RP2 M2: a point is never touched on the system over the app)
+        assert e.code == "not_actionable" and str(e).startswith("covered: something of the system over Shop")
         s.in_front = []  # the home screen itself: the app is gone, and the agent didn't see that
         e = await refused(d, "tap", {"target": {"x": 200, "y": 500}, "look": False})
         assert e.code == "stale" and "the home screen is in front now, not Shop" in str(e)
@@ -347,9 +349,9 @@ def test_p2_no_long_press_on_a_banner_the_agent_didnt_aim_at():
         await d.run_tool("a", "look", {"screenshot": False})
         e = await refused(d, "long_press", {"target": {"x": 200, "y": 85}, "look": False})
         assert "covered" in str(e)
-        # below the zone, the agent saw SpringBoard over Shop: what it touches is what it saw (no expansion happened)
-        await d.run_tool("a", "tap", {"target": {"x": 200, "y": 420}, "look": False})
-        assert s.sent == [("tap", (200, 420))]
+        # (review RP2 M2) below the zone too: a point is never touched on the system over the app
+        e = await refused(d, "tap", {"target": {"x": 200, "y": 420}, "look": False})
+        assert str(e).startswith("covered: something of the system") and s.sent == []
         await finish(stop, task)
     run(go)
 
@@ -577,7 +579,7 @@ def test_one_question_to_the_runner_per_touch_and_one_per_answer(y):
         await d.run_tool("a", "tap", {"target": {"x": 200, "y": y}, "look": False})
         assert s.sent == [("tap", (200, y))] and s.front_questions == 1  # (the touch's own)
         await d.run_tool("a", "tap", {"target": {"x": 200, "y": y}, "screenshot": False})
-        assert s.front_questions == 3  # (the touch's, and the answer's record of what the agent was shown)
+        assert s.front_questions == 4  # (the touch's, and the answer's two: before and after its read, review RP2 H2)
         await finish(stop, task)
     run(go)
 
@@ -592,5 +594,225 @@ def test_an_older_runner_without_the_front_route_touches_as_before():
         s.front, s.in_front = (CHAT[1], 9), [CHAT[1]]
         await d.run_tool("a", "tap", {"target": {"x": 200, "y": 85}, "screenshot": False})
         assert s.sent == [("tap", (200, 85))] and s.front_questions == 0
+        await finish(stop, task)
+    run(go)
+
+
+# ---- review RP2: its attacks (A1-A7), each now refused, and its honest refusals (B*) as decided ----
+
+def test_a1_an_expect_of_something_gone_doesnt_count_as_seeing():
+    async def go():
+        s = unread()
+        s.opens[(100, 600)] = CHAT
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        e = await refused(d, "run", {"steps": [
+            {"tool": "tap", "target": {"x": 100, "y": 600}, "expect": {"text": "Loading", "gone": True}},
+            {"tool": "tap", "target": {"x": 394, "y": 85}}]})
+        assert e.code == "stale" and s.sent == [("tap", (100, 600))]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a2_an_app_that_comes_forward_after_the_read_isnt_recorded_as_seen():
+    async def go():
+        s = PointSession()
+        s.tree = [button("e1", "Contact", rect=(50, 580, 100, 40))]
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        real = s.snapshot
+
+        async def snapshot(*a, **k):
+            snap = await real(*a, **k)
+            s.front, s.in_front = (CHAT[1], 9), [CHAT[1]]  # the read is of Shop; Chat comes forward right after it
+            return snap
+        s.snapshot = snapshot
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "screenshot": False})
+        assert "Note: another app came to the front while this was read; look again." in r["text"]
+        assert d.control.client("a").seen_front.kind == session_module.FRONT_UNKNOWN
+        e = await refused(d, "tap", {"target": {"x": 394, "y": 85}, "look": False})
+        assert e.code == "not_actionable" and str(e).startswith("unknown_front:") and s.sent == [("tap", (100.0, 600.0))]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a3_the_system_the_agent_saw_over_the_app_licenses_nothing_once_it_has_gone():
+    async def go():
+        s = unread()
+        d = make(s)
+        stop, task = await started(d)
+        banner_down(s)  # a banner that stays: the look records the system over Shop
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert r["text"].startswith("Note: something of the system")
+        s.front, s.in_front = (SHOP[1], 7), [SHOP[1]]
+        await d.run_tool("a", "tap", {"target": {"x": 200, "y": 600}, "look": False})  # Shop alone: the record follows
+        assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_APP, SHOP[1])
+        banner_down(s)  # later a system alert over Shop
+        e = await refused(d, "tap", {"target": {"x": 200, "y": 460}, "look": False})
+        assert str(e).startswith("covered: something of the system") and s.sent == [("tap", (200, 600))]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a4_on_the_home_screen_a_point_in_the_banner_zone_is_refused_and_an_element_goes():
+    async def go():
+        s = unread(HOME)
+        s.tree, s.tier = [button("e1", "Weather", rect=(170, 80, 60, 60))], "full"
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        e = await refused(d, "long_press", {"target": {"x": 200, "y": 100}, "look": False})
+        assert e.code == "not_actionable" and str(e) == session_module.COVERED_HOME
+        await d.run_tool("a", "tap", {"target": {"x": 200, "y": 330}, "look": False})  # below the zone: goes
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # an element of the look: goes
+        assert s.sent == [("tap", (200, 330)), ("tap", (200.0, 110.0))]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a5_a_runner_version_not_known_is_never_taken_for_an_old_runner():
+    async def go():
+        s = unread()
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        s.tw_version = 0  # (the version question failed after a reconnect: not answered)
+        s.front, s.in_front = (CHAT[1], 9), [CHAT[1]]
+        e = await refused(d, "tap", {"target": {"x": 394, "y": 85}, "look": False})
+        assert str(e).startswith("unknown_front:") and s.sent == []
+        s.tw_answered = 10  # (a version that was answered, below 11: no check, as before 2.0.3)
+        await d.run_tool("a", "tap", {"target": {"x": 394, "y": 85}, "look": False})
+        assert s.sent == [("tap", (394, 85))]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a6_the_notification_center_tools_looser_rule_ends_with_the_center():
+    from fakes import FakeSession
+    from test_notifications import BUNDLE, SCREEN
+
+    async def go():
+        s = FakeSession()
+        s.foreground, s.center_source = BUNDLE, SCREEN
+        d = make(s)
+        agents = session_module.TouchRules(session_module.Front(session_module.FRONT_APP, BUNDLE))
+        s.touch_rules = agents
+        seen = []
+
+        async def see_front(element=False):
+            s.touch_rules = session_module.TouchRules(session_module.Front(session_module.FRONT_OVER, BUNDLE), True)
+            seen.append(s.touch_rules)
+        s.see_front = see_front
+        await d._read_center(lambda b: True)
+        assert seen and s.touch_rules is agents  # (the agent's own rules again once the center is closed)
+    run(go)
+
+
+class _Hands:
+    """Hands whose touch awaits `before` with its lock held, as Hands._play does."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.sent = False
+
+    async def tap(self, x, y, hold, screen=None, turn=0, before=None):
+        async with self.lock:
+            await before()
+            self.sent = True
+
+
+def _hands_session(on_poll) -> "tuple[PointSession, _Hands]":
+    s = PointSession()
+    s.touch_rules = session_module.TouchRules(session_module.Front(session_module.FRONT_APP, SHOP[1]))
+    banner_down(s)
+    hands = _Hands()
+    polls = {"n": 0}
+
+    async def front_app():
+        polls["n"] += 1
+        on_poll(polls["n"], hands)
+        return (SHOP[1], 7) if polls["n"] >= 3 else (SPRINGBOARD, None)
+    s.front_app = front_app
+    s.hands, s.hands_on = hands, (lambda: True)
+    s.before_input, s.front_apps, s.hands_connection = None, None, None
+
+    async def ensure():
+        return None
+    s.ensure = ensure
+    return s, hands
+
+
+@pytest.mark.parametrize("who", ["pause", "person"])
+def test_a7_a_pause_or_a_persons_touch_during_the_banner_wait_stops_the_touch(who):
+    # (review RP2 H1: the guard ran before the gate's banner wait, never after it, and the wait held the hands' lock)
+    state = {"stop": False, "lock_held_in_wait": None}
+
+    def on_poll(n, hands):
+        if n == 2:
+            state["stop"] = True  # the owner presses pause, or a person touches the phone, as the banner is waited out
+            state["lock_held_in_wait"] = hands.lock.locked()
+
+    async def go():
+        s, hands = _hands_session(on_poll)
+
+        async def guard():
+            if state["stop"]:
+                raise Refused("paused" if who == "pause" else "busy", "stopped")
+        s.execution_guard = guard
+        await s._touching(60, (200, 85))
+        with pytest.raises(Refused):
+            await Session._by_hands(s, "tap", lambda before: hands.tap(200, 85, 60, before=before))
+        assert not hands.sent and state["lock_held_in_wait"] is False  # (a person's own touch could go first)
+    run(go)
+
+
+def test_b1_a_screen_whose_app_the_route_cant_name_says_how_to_go_on_and_open_app_names_it():
+    async def go():
+        s = unread()
+        s.front = None  # the route never names the app on this screen
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        e = await refused(d, "tap", {"target": {"x": 200, "y": 500}, "look": False})
+        assert str(e).startswith("unknown_front:") and "open_app" in str(e)
+        await d.run_tool("a", "open_app", {"app": SHOP[1], "look": False})
+        s.front = None  # (still can't name it; iOS's process list has Shop in the foreground)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"x": 200, "y": 500}, "look": False})
+        assert s.sent == [("tap", (200, 500))]
+        await finish(stop, task)
+    run(go)
+
+
+def test_b2_and_b5_a_touch_with_no_look_yet_says_so():
+    async def go():
+        s = unread()
+        d = make(s)
+        stop, task = await started(d)
+        e = await refused(d, "tap", {"target": {"x": 200, "y": 500}, "look": False})
+        assert e.code == "not_actionable" and str(e) == session_module.NO_LOOK
+        await d.run_tool("a", "look", {"screenshot": False})
+        e = await refused(d, "tap", {"target": {"x": 200, "y": 500}, "look": False}) if False else None
+        with pytest.raises(Refused) as other:  # another client that never looked
+            await d.run_tool("b", "tap", {"target": {"x": 200, "y": 500}, "look": False})
+        assert str(other.value) == session_module.NO_LOOK
+        await finish(stop, task)
+    run(go)
+
+
+def test_b4_a_whole_read_of_the_system_over_the_app_is_recorded_at_once():
+    # (review RP2 L4: Control Center or Notification Center the agent opened, read whole: no 8 s wait for a "banner")
+    async def go():
+        s = PointSession()
+        s.tree = [button("e1", "Wi-Fi", rect=(40, 300, 100, 100))]
+        d = make(s)
+        stop, task = await started(d)
+        banner_down(s)
+        s.front_questions = 0
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert s.front_questions == 2  # (before and after the read: no polls)
+        assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_OVER, SHOP[1])
         await finish(stop, task)
     run(go)

@@ -225,6 +225,7 @@ class CenterTools:
                 raise Refused("not_found", NOT_OPENED)
             see = getattr(s, "see_front", None)
             if callable(see):
+                rules_before = getattr(s, "touch_rules", None)
                 # (2.0.3, review RP L3) the tool's own touches here (a notification's row, the closing swipe) are checked
                 # against what it just opened and read, not the agent's older answer: it can close what it opened
                 await see(element=True)
@@ -259,6 +260,9 @@ class CenterTools:
                 shown_closed = True
             finally:
                 self._center_end(shown_closed)
+                if "rules_before" in locals() and hasattr(s, "touch_rules"):
+                    # (review RP2 L1) the tool's looser rule ends with the center: the agent's own rules again
+                    s.touch_rules = rules_before
         return found, opened
 
     async def _same_notification(self, chosen: "notes_lib.Notification", n: int, names: dict[str, str],

@@ -3796,8 +3796,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     else:
                         missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
                                   if "expect" in step else None)
-                        if "expect" in step and missed is None:
-                            await self._record_front(view)  # (review RP M4: its read showed the screen it expected)
+                        if "expect" in step and missed is None and batch.positive_expect(step["expect"]):
+                            # (review RP M4, RP2 H2) its read found text, an id or a label it named: the screen it expected
+                            read_app = getattr(self.session, "read_app", None)
+                            await self._record_front(view, read_app[1] if isinstance(read_app, tuple) else None)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
                 if ran and step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
@@ -4653,6 +4655,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # app the agent's last look or answer didn't show it (Session._seen_check)
             self.session.banner_guard = self._guards_banners(name, target)
             self.session.touch_rules = self._touch_rules(view, name, target)
+            self.session.found_front = None
             touched_token = _SCOPE_TOUCHED.set([])
             try:
                 return await act()
@@ -4665,7 +4668,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     box["hands"] = (getattr(self.session, "hands_at", None),
                                     getattr(self.session, "hands_connection", None))
                     self.session.touch_hook, self.session.banner_guard = None, False
-                    self.session.touch_rules = None
+                    found = getattr(self.session, "found_front", None)
+                    if isinstance(found, session_module.Front):  # (review RP2 M2: the system the agent saw has gone)
+                        view.seen_front = found
+                    self.session.touch_rules = self.session.found_front = None
                     self.session.before_input = None
                     self.session.execution_guard = None
                     self.session.front_apps = None  # (a tap that checked the app in front cleared it already)
@@ -6084,6 +6090,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # target goes only to it, and no field of the app before is typed into again
         # (its name alone: `shown` already ends with the bundle id, and the stale-app refusal adds it once more)
         view.aimed_app, view.typed_field = (_bare_name(shown, bundle_id), bundle_id), None
+        self.session.opened_app = bundle_id  # (2.0.3, review RP2 M4: the app in front when the route can't name it)
         self.session.typed_into = self.session.typed_place = None
         if a.get("language"):  # the language its titles are kept under (§18.9); a start in the phone's own language clears it
             self._language[bundle_id] = str(a["language"])
@@ -6454,18 +6461,44 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         element = (target is not None and target.kind in ("ref", "id", "label") and not _PICTURE_TEXT.get())
         return session_module.TouchRules(front if isinstance(front, session_module.Front) else None, element)
 
-    async def _front_answer(self, alert: bool) -> "tuple[session_module.Front | None, bool]":
+    async def _front_now(self) -> "session_module.Front | None":
+        """Session.front_state, None without one (a fake, or a runner that answered a version below 11)."""
+        front_state = getattr(self.session, "front_state", None)
+        state = await front_state() if callable(front_state) else None
+        return state if isinstance(state, session_module.Front) else None
+
+    def _bannerish(self, source: str | None, cut: bool) -> bool:
+        """(review RP2 L4) May the read that shows the system over the app be a banner's (wait it out)? Its tree holds a
+        banner, or it was cut (it can't say). A whole tree without one (Control or Notification Center the agent
+        opened, an alert) is recorded at once, with no 8 s wait."""
+        return cut or session_module.BANNER_ID in (source or "")
+
+    @staticmethod
+    def _front_agreed(before: "session_module.Front | None", after: "session_module.Front | None",
+                      read_bundle: str | None, compare: bool = True) -> "session_module.Front | None":
+        """(review RP2 H2) What the agent saw: the state asked after the read, when the one asked before it agrees
+        (`compare`) and, for an app in front, the read's own root names that app (when it names one). Else unknown
+        (the next touch is refused, and the agent looks again)."""
+        if after is None:
+            return None
+        if compare and before != after:
+            return session_module.Front(session_module.FRONT_UNKNOWN)
+        if after.kind == session_module.FRONT_APP and read_bundle and read_bundle != after.app:
+            return session_module.Front(session_module.FRONT_UNKNOWN)
+        return after
+
+    async def _front_answer(self, alert: bool, bannerish: bool = True) -> "tuple[session_module.Front | None, bool]":
         """(2.0.3, review RP) What is in front as an answer shows the agent the screen (Session.front_state: the front
         route, the process list when it names SpringBoard), inside the read's turn. While SpringBoard is over an app
-        and the tree is no alert's (a banner, also on a read cut short: H1), it is waited out as the banner wait does;
-        (the state, whether it left: the caller reads again). None: the runner can't say in a few ms (no check)."""
+        and the tree is no alert's and may be a banner's (`bannerish`: also on a read cut short), it is waited out as
+        the banner wait does; (the state, whether it left: the caller reads again). None: no check."""
         front_state = getattr(self.session, "front_state", None)
         if not callable(front_state):
             return None, False
         state = await front_state()
         waited, polled = 0.0, False
         while (isinstance(state, session_module.Front) and state.kind == session_module.FRONT_OVER and not alert
-               and waited < session_module.BANNER_WAIT):
+               and bannerish and waited < session_module.BANNER_WAIT):
             await asyncio.sleep(session_module.BANNER_POLL)
             waited += session_module.BANNER_POLL
             state, polled = await front_state(), True
@@ -6476,19 +6509,21 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """(2.0.3) The first line of an answer whose screen SpringBoard is over (a notification that stayed, Notification or
         Control Center), the tree no alert's: what the agent saw is that state, never the home screen."""
         front = getattr(view, "seen_front", None)
+        if getattr(view, "front_moved", False):
+            return "Note: another app came to the front while this was read; look again."
         if (isinstance(front, session_module.Front) and front.kind == session_module.FRONT_OVER
                 and getattr(view, "alert", None) is None):
             return ("Note: something of the system (a notification, Notification Center or Control Center) is over the "
                     "app; a touch near the top waits for it to go.")
         return None
 
-    async def _record_front(self, view) -> None:
+    async def _record_front(self, view, read_bundle: str | None = None) -> None:
         """(2.0.3, review RP M4) What is in front now, as the agent's: after `open_app` and `open_url` (where they went,
-        `look: false` too) and a run's step whose `expect` held (its read found what the agent expected)."""
-        front_state = getattr(self.session, "front_state", None)
-        if callable(front_state):
-            state = await self._read(front_state)
-            view.seen_front = state if isinstance(state, session_module.Front) else None
+        `look: false` too) and a run's step whose positive `expect` held (its read found what the agent expected; that
+        read's app, `read_bundle`, must be the one in front: review RP2 H2)."""
+        state = await self._read(self._front_now)
+        view.seen_front = self._front_agreed(None, state, read_bundle, compare=False)
+        view.front_moved = False
 
     async def _banner_shown(self) -> bool:
         """Is a notification banner over the app now (the runner names SpringBoard in front while the newest read is of
@@ -9922,11 +9957,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         read with its picture in one request (_pairs_text) leaves the picture to _with_ocr."""
         async def read():
             self._mark_read(view)
+            before = await self._front_now()  # (review RP2 H2: what is in front as the read begins)
             text, image = await self.session.look(screenshot=False)
-            front, left = await self._front_answer(self.session.last_alert is not None)
+            front, left = await self._front_answer(
+                self.session.last_alert is not None,
+                self._bannerish(getattr(self.session, "last_source", None), self._tier_now() != "full"))
             if left:  # a banner was over the app as it was read: read again, now that it has gone (review RP H1)
+                before = front
                 text, image = await self.session.look(screenshot=False)
-            view.seen_front = front
+                front = await self._front_now()
+            app = getattr(self.session, "app", None)
+            view.seen_front = self._front_agreed(before, front, app[1] if isinstance(app, tuple) else None)
+            view.front_moved = before != front and before is not None and front is not None
             view.items = view.shown = self.session.items
             view.shown_off = self._off_screen_now()
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
@@ -9969,11 +10011,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
         async def read():
             self._mark_read(view)
+            before = await self._front_now() if snap is None else None  # (review RP2 H2)
             read_now = snap or await s.snapshot()  # `snap`: a read the caller already made (wait_for's last poll)
-            front, left = await self._front_answer(read_now.tree.alert is not None)
+            front, left = await self._front_answer(
+                read_now.tree.alert is not None,
+                self._bannerish(getattr(s, "last_source", None), _cut_short(read_now.tree)))
             if left and snap is None:  # a banner was over the app as it was read: read again (review RP H1)
+                before = front
                 read_now = await s.snapshot()
-            view.seen_front = front
+                front = await self._front_now()
+            bundle = read_now.app[1] if isinstance(read_now.app, tuple) else None
+            view.seen_front = self._front_agreed(before, front, bundle, compare=snap is None)
+            view.front_moved = snap is None and before != front and before is not None and front is not None
             s.items = read_now.tree.items
             app_changed = read_now.app is not None and view.app is not None and read_now.app != view.app
             head = _furniture(view, read_now.tree.alert, read_now.tree.keyboard)

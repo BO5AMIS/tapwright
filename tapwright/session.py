@@ -595,9 +595,22 @@ class TouchRules:
     element: bool = False
 
 
-UNKNOWN_FRONT = ("couldn't tell which app is in front of the phone, so nothing was touched; look, then try again.")
-UNSEEN_FRONT = ("your last look couldn't tell which app was in front, so nothing was touched; look again, then try "
-                "again.")
+# (review RP2 L2, M4) every refusal of the rules starts with its reason word; a screen where the route can't name the app
+# says how to go on: open_app names it (and is exempt), then look
+UNKNOWN_FRONT = ("unknown_front: couldn't tell which app is in front of the phone, so nothing was touched; open_app the "
+                 "app you mean (that names it), then look and try again.")
+UNSEEN_FRONT = ("unknown_front: your last look couldn't tell which app was in front, so nothing was touched; look again "
+                "(or open_app the app you mean, then look), then try again.")
+NO_LOOK = "no_look: no look yet in this session shows what is in front, so nothing was touched; look first."
+COVERED_BANNER = ("covered: a notification is over the top of the screen, so nothing was touched; wait a few seconds, "
+                  "then look and try again.")
+COVERED_HOME = ("covered: a notification may be over the top of the home screen, so nothing was touched; aim at an "
+                "element (by ref, id or label), or look again.")
+
+
+class _BannerUp(Exception):
+    """(review RP2 H1) The front check would wait a banner out: raised inside the hands' `before`, so the wait happens
+    with the hands' lock let go (Session._by_hands), and the guard and the check run again right before the touch."""
 
 
 class FrontUnchecked(Refused):
@@ -748,6 +761,9 @@ class Session:
         # before each one goes out (_gate); None: no check (a person's input, an action that changes the app on purpose)
         self.touch_rules: TouchRules | None = None
         self._gate_at: tuple[float, float] | None = None  # the point of the touch whose check is still to come
+        self.found_front: Front | None = None  # (review RP2 M2) the app alone in front, as a touch of this action found it
+        self.tw_answered: int | None = None  # (review RP2 M1) the last route version a runner answered (kept across starts)
+        self.opened_app: str | None = None  # (review RP2 M4) the app the agent's newest open_app named
         # whether one of the agent's touches since the daemon last cleared it began where a banner comes down: a
         # banner landing between the check and the touch takes it (Daemon._taken_away)
         self.top_touch = False
@@ -843,6 +859,7 @@ class Session:
         self.tw_version = 0
         if version is not None:  # the session-less route said it (the fork has answered both since route 1): kept
             self.fast_tap, self.fast_drag, self.tw_version = version >= 1, version >= 2, version
+            self.tw_answered = version
         self.fast_read, self.last_compact = None, None
         self.bounded, self.last_tier, self.last_why = bounded, "full", ""
         self.budgets.forget()
@@ -1754,22 +1771,67 @@ class Session:
         self._gate_at = at if self.touch_rules is not None and at is not None else None
         trace.mark("guard")
 
-    async def _gate(self) -> None:
+    async def _gate(self, wait: bool = True) -> None:
         """(2.0.3) The check of a touch that _touching left to the last moment, once: _front_rules for its point. What is
-        left between this answer and the finger: on the hands path, the HID report itself (the next statement after
-        `before`, a few ms); on the runner path, the touch request's way to the runner and its own start (one request,
-        a few ms on USB). Not closed, only made as small as the code can make it."""
-        at, self._gate_at = self._gate_at, None
-        if at is not None and self.touch_rules is not None:
-            await self._front_rules(at)
+        left between this answer and the finger (review RP2 L6): on the hands path, no await between the check (and the
+        guard after it) and the first HID report; the check itself is the route's lookup (a few ms over USB, up to about
+        1.8 s on a slow screen) and, when SpringBoard is in front, iOS's process list (about 100-500 ms) after it. On
+        the runner path, the touch request's way to the runner and XCTest's own start (tens of ms). Not closed, only
+        made as small as the code can make it. `wait` False: a banner to wait out raises _BannerUp (the hands' lock)."""
+        at = self._gate_at
+        if at is None or self.touch_rules is None:
+            return
+        try:
+            await self._front_rules(at, wait)
+        except _BannerUp:
+            raise  # (the gate stays: it runs again once the banner is waited out)
+        except BaseException:
+            self._gate_at = None
+            raise
+        self._gate_at = None
+
+    async def _wait_banner(self) -> None:
+        """(review RP2 H1) Wait a banner out with no lock held, up to BANNER_WAIT; refused `covered` if it stays."""
+        waited = 0.0
+        while waited < BANNER_WAIT:
+            await asyncio.sleep(BANNER_POLL)
+            waited += BANNER_POLL
+            now = await self.front_state()
+            if now is None or now.kind != FRONT_OVER:
+                return
+        self._gate_at = None
+        raise Refused("not_actionable", COVERED_BANNER)
 
     async def front_state(self) -> "Front | None":
         """(2.0.3) What is in front now (FRONT_*): one question to the front route, and iOS's process list only when it
-        names SpringBoard. None on a runner older than route version 11 (it can't say in a few ms: no check)."""
-        if self.tw_version < FRONT_VERSION:
+        names SpringBoard. None only on a runner that answered a route version older than 11 (it can't say in a few
+        ms: no check). (Review RP2 M1) A version not known (its question failed, after a reconnect) is asked once; still
+        unknown: FRONT_UNKNOWN, never "old". (M4) When the route can't name the app and the agent's newest open_app named
+        one that iOS's process list still has in the foreground, that app."""
+        if not self.tw_version and getattr(self, "fast_tap", None) is None:
+            routes = getattr(self, "_fast_routes", None)
+            if callable(routes):
+                try:
+                    await routes()
+                except ConnectionLost:
+                    raise
+                except Exception:  # noqa: BLE001 - not learned: unknown below
+                    pass
+        version = self.tw_version or getattr(self, "tw_answered", None)
+        if version is None or (not self.tw_version and version >= FRONT_VERSION):
+            return Front(FRONT_UNKNOWN)  # (never answered, or answered once and not now: can't ask the route)
+        if version < FRONT_VERSION:
             return None
         front = await self.front_app()
         if front is None:
+            opened = getattr(self, "opened_app", None)
+            if opened:
+                try:
+                    in_front = list(await asyncio.wait_for(self.device.foreground_apps(), 5))
+                except Exception:
+                    return Front(FRONT_UNKNOWN)
+                if in_front == [opened]:
+                    return Front(FRONT_APP, opened)
             return Front(FRONT_UNKNOWN)
         if front[0] != SPRINGBOARD:
             return Front(FRONT_APP, front[0])
@@ -1791,22 +1853,25 @@ class Session:
             return f"something of the system over {app(front.app)}"
         return app(front.app)
 
-    async def _front_rules(self, at: tuple[float, float]) -> None:
-        """(2.0.3, safety; review RP) May an agent's touch at `at` go out? The owner's phone, 2026-11-26: two point taps
-        on a screen whose elements weren't read went, the first to a notification banner that opened another app on a
-        chat with a person, the second to that chat's call button: a call was started. When Tapwright can't tell that a
-        touch is safe, it doesn't touch. Against what the agent's last answer showed (`touch_rules.seen`):
-        - the same app in front (or that app, after a banner the agent saw over it has gone): yes;
-        - the home screen, seen as the home screen: yes;
-        - SpringBoard over the app: yes when the agent's last answer showed that state, below the banner zone or aimed at
-          an element of its list; a point, an `o` ref or a text of the picture in the banner zone waits a banner out
-          and is refused `covered` if it stays. When the agent saw the app alone: in the banner zone the same wait;
-          below it `stale` (something of the system came over the app since);
-        - anything else (another app, the home screen where the agent saw an app, an app where it saw the home screen):
+    async def _front_rules(self, at: tuple[float, float], wait: bool = True) -> None:
+        """(2.0.3, safety; reviews RP and RP2) May an agent's touch at `at` go out? The owner's phone, 2026-11-26: two
+        point taps on a screen whose elements weren't read went, the first to a notification banner that opened another
+        app on a chat with a person, the second to that chat's call button: a call was started. When Tapwright can't
+        tell that a touch is safe, it doesn't touch. Against what the agent's last answer showed (`touch_rules.seen`),
+        `element` meaning the touch is aimed at an element of that answer's list (by ref, id or label):
+        - the same app in front (or that app, after the system the agent saw over it has gone): yes (and the agent's
+          record becomes that app alone: `found_front`);
+        - the home screen, seen as the home screen: yes; but a point in the banner zone is refused `covered` (a banner
+          over the home screen can't be told from it);
+        - SpringBoard over the app: an element-aimed touch when the agent's last answer showed that state; a point,
+          an `o` ref or a text of the picture: in the banner zone a banner is waited out (`covered` if it stays),
+          anywhere else refused `covered`. Element-aimed when the agent saw the app alone: the zone waits, below it
           `stale`;
-        - the route or the process list can't say (asked twice, 0.2 s apart), or the agent's last answer couldn't:
-          `not_actionable`, nothing touched.
-        A runner older than route version 11 can't say in a few ms: no check (no protection; the docs say so)."""
+        - anything else: `stale`;
+        - the route or the process list can't say (asked twice, 0.2 s apart), the agent's last answer couldn't:
+          `unknown_front`; no answer of the agent recorded anything: `no_look`.
+        A runner that answered a route version older than 11 can't say in a few ms: no check (no protection; the docs
+        say so). `wait` False: a banner to wait out raises _BannerUp instead (the caller waits with no lock held)."""
         rules = self.touch_rules
         if rules is None:
             return
@@ -1819,32 +1884,42 @@ class Session:
             if now is None or now.kind == FRONT_UNKNOWN:
                 raise Refused("not_actionable", UNKNOWN_FRONT)
         seen = rules.seen
-        if seen is None or seen.kind == FRONT_UNKNOWN:
+        if seen is None:
+            raise Refused("not_actionable", NO_LOOK)
+        if seen.kind == FRONT_UNKNOWN:
             raise Refused("not_actionable", UNSEEN_FRONT)
         zone = at[1] < BANNER_ZONE
         waited = 0.0
         while True:
             if now.kind == FRONT_APP:
                 if seen.kind in (FRONT_APP, FRONT_OVER) and seen.app == now.app:
+                    self.found_front = now  # (review RP2 M2: what the agent saw over the app has gone)
                     return
                 break
             if now.kind == FRONT_HOME:
-                if seen.kind == FRONT_HOME:
-                    return
-                break
+                if seen.kind != FRONT_HOME:
+                    break
+                if zone and not rules.element:
+                    raise Refused("not_actionable", COVERED_HOME)  # (review RP2 M3)
+                return
             if now.kind != FRONT_OVER:  # (unknown while a banner was being waited out)
                 raise Refused("not_actionable", UNKNOWN_FRONT)
             if seen.app != now.app or seen.kind == FRONT_HOME:
                 break
-            if seen.kind == FRONT_OVER and (not zone or rules.element):
-                return  # it saw SpringBoard over the app, and aims at what it saw
-            if seen.kind == FRONT_APP and not zone:
-                raise Refused("stale", f"{self._words(now)} now, not {self._words(seen)} as your last look showed. "
-                                       "Nothing was touched; look again.")
+            if rules.element and seen.kind == FRONT_OVER:
+                return  # it saw the system over the app, and aims at an element of what it saw
+            if not zone:
+                if rules.element:  # (it saw the app alone: something of the system came over it since)
+                    raise Refused("stale", f"{self._words(now)} now, not {self._words(seen)} as your last look showed. "
+                                           "Nothing was touched; look again.")
+                # (review RP2 M2) a point, an o ref, a text of the picture: never on the system over the app
+                raise Refused("not_actionable", f"covered: {self._words(now)}, so nothing was touched; aim at one of "
+                                                "its elements by ref, or look again.")
             # in the banner zone, SpringBoard over the app: a banner may be there; wait it out (rule A)
+            if not wait:
+                raise _BannerUp()
             if waited >= BANNER_WAIT:
-                raise Refused("not_actionable", "covered: a notification is over the top of the screen, so nothing "
-                                                "was touched; wait a few seconds, then look and try again.")
+                raise Refused("not_actionable", COVERED_BANNER)
             await asyncio.sleep(BANNER_POLL)
             waited += BANNER_POLL
             now = await self.front_state() or Front(FRONT_UNKNOWN)
@@ -1960,18 +2035,27 @@ class Session:
         pending: list = []
 
         async def before() -> None:
+            if input_:
+                # (2.0.3) the app in front, right before the first HID report; then the guard, after it (review RP2 H1:
+                # a pause, a lock or a person's touch during the check stops the touch)
+                await self._gate(wait=False)
             guard = getattr(self, "execution_guard", None)
             if guard is not None:
                 await guard()
-            if input_:
-                await self._gate()  # (2.0.3) the app in front, right before the first HID report
             if validate is not None:
                 await validate(self.input_point)
             pending.append(None if QUIET.get() else trace.request("POST", f"{HANDS_PATH}/{what}"))
 
         began = time.monotonic()
         try:
-            await act(before)
+            while True:
+                try:
+                    await act(before)
+                    break
+                except _BannerUp:
+                    # (review RP2 H1) nothing was sent; the hands' lock is let go while a banner is waited out (a
+                    # person's touch goes first), then the touch starts again: the check and the guard run again
+                    await self._wait_banner()
         except hands_module.HandsUnavailable:
             return False
         except BaseException:
@@ -2113,6 +2197,7 @@ class Session:
                     raise
                 return  # fast_tap stays None: no fast route for this call, and the next one asks again
             self.fast_tap, self.fast_drag, self.tw_version = False, False, 0
+            self.tw_answered = 0  # (an answer: a runner without the fork's routes)
             return
         value = answer.get("value") if isinstance(answer, dict) else None
         version = value.get("tapwright") if isinstance(value, dict) else None
@@ -2121,7 +2206,7 @@ class Session:
                 raise DeviceError("tapwright runner: capability_unproven")
             return  # do not cache a malformed response as proof of a legacy runner
         self.fast_tap, self.fast_drag = version >= 1, version >= 2
-        self.tw_version = version
+        self.tw_version = self.tw_answered = version
         if version >= BOUNDED_VERSION and not self.bounded and self.sid is not None:
             await self._bound_late()
 

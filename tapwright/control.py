@@ -88,6 +88,7 @@ class ClientView:
     # (2.0.3, review RP) what was in front as the agent's newest answer showed it the screen (session.Front, from the runner's
     # front route and iOS's process list, never a tree's root); its touches are checked against it. None: none recorded
     seen_front: object | None = None
+    front_moved: bool = False  # (review RP2 H2) another app came to the front while the newest answer was read
     # (1.9.0, AGENT-TOOLS 1.17 §30) the way from the app's start this session is on (autoroute.Chain), the apps whose
     # `Known:` line was given, the hints given, the top-level calls made, single taps in a row along known roads, whether
     # `logs` was read, and whether the last move went along a road the map had
