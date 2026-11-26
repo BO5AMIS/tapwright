@@ -160,6 +160,7 @@ SHORT_BUDGET_MS = 1500
 QUICK_CUT = 0.25  # a read that comes back with no elements in under this part of its budget wasn't kept waiting by the
 #                   app: the app had nothing to answer with yet. It is asked again, RETRY_GAP seconds later, while at
 #                   least RETRY_MIN_MS of the budget is left
+BY_STILL_FOR = 30.0  # seconds a read may take to answer and still count as the one a still screen was given
 RETRY_GAP = 0.25
 RETRY_MIN_MS = 300
 _AFTER_MS = re.compile(r"\(after (\d+) ms\)")
@@ -229,7 +230,8 @@ class ReadBudget:
         self.unasked_for = unasked_for
         self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
         self._still_cut: dict[str, float] = {}  # bundle id -> when a read its stillness gave the normal budget was
-        self._by_still: str | None = None  # the app whose next read has the normal budget because its screen is still
+        # (the app whose next read has the normal budget because its screen is still, when that was decided)
+        self._by_still: tuple[str, float] | None = None
         self._tried: dict[str, float] = {}  # bundle id -> when a real read of it last went out
 
     def plan(self, bundle: str | None, still: Callable[[], bool] | None = None) -> tuple[int, bool]:
@@ -262,11 +264,11 @@ class ReadBudget:
             del self._cut[bundle]
             self._still_cut.pop(bundle, None)
             if still is not None and still():
-                self._by_still = bundle  # (cut short again, this read is the still screen's one too)
+                self._by_still = (bundle, self.clock())  # (cut short again, this read is the still screen's one too)
             return self.normal_ms
         at = self._still_cut.get(bundle)
         if still is not None and (at is None or self.clock() - at >= self.memory) and still():
-            self._by_still = bundle
+            self._by_still = (bundle, self.clock())
             return self.normal_ms
         return self.short_ms
 
@@ -275,10 +277,15 @@ class ReadBudget:
 
     def answered(self, bundle: str | None, truncated: bool, budget_ms: int, took_ms: float | None = None) -> None:
         """A read of `bundle` with `budget_ms` came back truncated or full, after `took_ms` (None: not timed)."""
-        by_still, self._by_still = self._by_still, None
+        held, self._by_still = self._by_still, None
+        # (review K, question 4) a read that raised never came here: what its stillness gave is not the next read's
+        by_still = held[0] if held is not None and self.clock() - held[1] < BY_STILL_FOR else None
         if bundle is None:
             return
         if not truncated:
+            # (review K-H1) the screen in front reads: the next read is asked for real. Left unasked, it was made up
+            # as a root with no elements, for a screen that had just given all of them
+            self._tried.pop(bundle, None)
             if took_ms is None or took_ms >= self.short_ms:
                 self._cut.pop(bundle, None)
                 self._still_cut.pop(bundle, None)
@@ -325,13 +332,18 @@ class SettleCap:
             return cap
         return min(cap, self.launch if launch else self.short if cut else self.readable)
 
-    def settled(self, bundle: str | None, capped: bool, cut: bool, seconds: float = 0.0) -> bool:
+    def settled(self, bundle: str | None, capped: bool, cut: bool, seconds: float = 0.0,
+                unread: bool | None = None) -> bool:
         """A settle of `bundle` ended after `seconds`: by its cap with frames still changing (`capped`), else on frames
-        that stood still; the newest tree of the app cut short (`cut`). True when the app's cap switched (the caller
-        logs it)."""
+        that stood still; the newest tree of the app cut short (`cut`). `unread`: that tree gave no elements at all
+        (None: as `cut`). True when the app's cap switched (the caller logs it).
+        (review K-M2) A settle that stood still, only later than the short cap, counts as moving on a screen that gave
+        no elements (a feed between two videos). On one that was read in part (a heavy page) it is an ordinary push:
+        counting it capped that app's settles at half a second from then on, so its next page was read mid-push."""
         if bundle is None:
             return False
-        moving = capped or seconds > self.short  # still changing when the short cap would have ended it
+        nothing_read = cut if unread is None else unread
+        moving = capped or (seconds > self.short and nothing_read)  # still changing when the short cap would have ended it
         if moving and cut and bundle not in self._restless:
             self._restless.add(bundle)
             return True
@@ -486,6 +498,7 @@ class Session:
         self.not_installed: set[str] = set()  # bundle ids already looked for in the installed apps and not found
         self._apps: tuple[float, list[dict]] | None = None  # (when, the installed apps as the phone last listed them)
         self._apps_task: asyncio.Task | None = None  # the list being read again behind a call
+        self._apps_asked = self._apps_kept = 0  # (how many reads of the list began; which of them the kept list is)
         # (field key, element id) of the input our last type_text verified and typed into, while nothing else has
         # touched the phone since: typing there again needs no tap. Every other action clears it.
         self.typed_into: tuple[str, str] | None = None
@@ -881,6 +894,13 @@ class Session:
         application node, the screen in points). None (read as before) when another app is in front or it can't say."""
         front = await self.front_app()
         if front is None or front[0] != bundle:
+            return None
+        # (review K-M1) the screen's size and turn are learned from a real read's root: a root made here would keep
+        # the old ones for as long as reads are left unasked, and a touch after the phone was turned would be placed
+        # for the old way up. The runner's screen route asks no app; when it shows another shape, or can't say, the
+        # read is made for real.
+        shape = await self._screen_of_runner()
+        if shape is None or (shape[0] > shape[1]) != (self.screen[0] > self.screen[1]):
             return None
         node: dict = {"t": "Application", "r": [0, 0, self.screen[0], self.screen[1]], "b": bundle}
         if front[1] is not None:
@@ -2092,9 +2112,13 @@ class Session:
         self._apps_task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a nicety: never fails)
 
     async def _list_apps(self) -> list[dict]:
+        self._apps_asked += 1
+        mine = self._apps_asked
         apps = await self.device.user_apps()
-        self._apps = (time.monotonic(), apps)
-        self.app_names = {a["bundle_id"]: a["name"] for a in apps if a["name"]}
+        if mine >= self._apps_kept:  # (review K, question 6: a read begun earlier never replaces a later one's list)
+            self._apps_kept = mine
+            self._apps = (time.monotonic(), apps)
+            self.app_names = {a["bundle_id"]: a["name"] for a in apps if a["name"]}
         return apps
 
     async def launch(self, bundle_id: str, arguments: list[str] | None = None) -> str:

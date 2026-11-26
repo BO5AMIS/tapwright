@@ -164,6 +164,8 @@ _EXPLORING: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_exp
 # only. Since 1.7.5 no policy word stops an agent's touch, so this is the ONE dispatch gate those moves pass: `_last_checks`
 # reads it on the element the touch really goes to (after resolution and any scroll), dry runs included (_floor_gate).
 _TOUCH_FLOOR: contextvars.ContextVar["explorefloor.Floor | None"] = contextvars.ContextVar("tapwright_touch_floor", default=None)
+# (2.0, review K-H2) the screen generation as the picture's text was read, for the touch aimed from it (_by_picture_text)
+_PICTURE_AIM: contextvars.ContextVar["int | None"] = contextvars.ContextVar("tapwright_picture_aim", default=None)
 # A repaired script's check replay: the floor gates only the steps the repair made (they carry `repaired`); the script's own
 # unchanged steps run as a plain replay would, as the person wrote them (lead's ruling on review R180 M6).
 _FLOOR_REPAIRED_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_floor_repaired_only", default=False)
@@ -2972,7 +2974,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         target = self._opened if name == "open_app" else before
         left, self._left_front = self._left_front, None  # a touch found the home screen where the app was (_taken_away)
-        closed, self._closed_on_purpose = self._closed_on_purpose, None  # (it holds for the one call after the close)
+        # (it holds for the one call after the close, of the client that closed it: review K, question 5)
+        closed = None
+        if self._closed_on_purpose is not None and self._closed_on_purpose[1] is self.control.client(client_id):
+            closed, self._closed_on_purpose = self._closed_on_purpose[0], None
         if not target or target == SPRINGBOARD:
             return None
         if closed == target and name != "open_app":
@@ -4289,6 +4294,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         async def act():
             trace.mark("act")  # (the queue's turn came)
             self._require_connected()
+            if (aimed_at := _PICTURE_AIM.get()) is not None and self.control.generation != aimed_at:
+                raise Refused("stale", "the phone was used after this screen's text was read, so the text may be "
+                                       "elsewhere now; look again, then aim again. Nothing was touched.")
             await self._quicken()
             s = self.session
             aim = target  # what the touch is aimed at: after a scroll to an off-screen element, that element's ref
@@ -4397,6 +4405,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     s.front_apps = tuple(scoped)
             handler = self._handlers.get(name)
             people = self.control.person_generation
+            if name == "open_url":
+                # (review K, question 1) a link may start an app the runner is still being told was closed: its
+                # terminate must not come after the app's new start
+                await self._closing_done()
             await self._last_checks(name, args, None, hit=False)
             touched_first = bool(box.get("input"))  # the keyboard reflex or a scroll to the target touched already
             try:
@@ -4820,7 +4832,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return None
 
     async def _apps(self, notes: list) -> dict:
-        apps = await self._read(self.session.apps)
+        # (review K-M3) the agent asked what is installed: the phone is asked now, never the kept list
+        apps = await self._read(lambda: self.session.apps(fresh=True))
         if not apps:
             return _answer(["No apps installed by you."], notes)
         try:
@@ -4953,7 +4966,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if held is not None and now - held[0] < BUILD_TTL:
             return held[1]
         try:
-            installed = await asyncio.wait_for(self.session.apps(), 5)
+            # (review K-M3: asked fresh, a reinstalled build is a new one; this has its own BUILD_TTL memory)
+            installed = await asyncio.wait_for(self.session.apps(fresh=True), 5)
         except Exception:
             return held[1] if held is not None else None
         for entry in installed:
@@ -5827,7 +5841,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         elif not resume:
             self._launched_with.pop(bundle_id, None)
         self._opened = bundle_id
-        if self._closed_on_purpose == bundle_id:
+        if self._closed_on_purpose is not None and self._closed_on_purpose[0] == bundle_id:
             self._closed_on_purpose = None  # it runs again: its stopping would be news
         view.opened = True
         view.auto = autoroute.Chain(bundle_id)  # (1.9.0, §30) the way from the app's start begins at what it shows now
@@ -5874,7 +5888,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # closed (iOS ended it, or WebDriverAgent's terminate did): the process is gone, and its launch conditions with
         # it. A close that failed leaves the app running as it was launched, so they are kept (Codex, PR #8).
         self._launched_with.pop(bundle_id, None)
-        self._closed_on_purpose = bundle_id  # its leaving the front is no news to the next call (_crash_check)
+        self._closed_on_purpose = (bundle_id, view)  # its leaving the front is no news to this client's next call
         self.log(f"closed {bundle_id} through {way} in {time.monotonic() - began:.1f} s")
         return f"Closed {shown}."
 
@@ -5903,7 +5917,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             device_module.BEFORE_SEND.reset(token)
         return ("iOS process control", found) if found else (way + " (iOS process control found no process)", 0)
 
-    _closed_on_purpose: str | None = None  # the app the agent's last close_app ended, until the next call has run
+    # (the app an agent's last close_app ended, that agent's view), until that agent's next call has run
+    _closed_on_purpose: "tuple[str, object] | None" = None
 
     def _tell_runner_closed(self, bundle_id: str) -> None:
         """After a kill that ended the app: tell WebDriverAgent, behind the call. Its request is never cancelled (that
@@ -6193,6 +6208,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         want = " ".join(str(target.text).casefold().split())
         if not want:
             return None
+        # (review K-H2) the text is read here and the touch goes in a turn of its own: whoever uses the phone between
+        # the two (a person in the live view, another agent) moves the screen under the point. The generation as the
+        # text is read goes with the touch, which is refused `stale` when it is another by its turn (act).
+        aimed_at = self.control.generation
         try:
             seen, note = await self._screen_text("accurate", implicit=True)
         except Refused:
@@ -6220,7 +6239,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                        f'"{said}" (this screen\'s elements weren\'t read); look, then pick again.')
         x, y = hits[target.index or 0].center
         again = {**{k: v for k, v in args.items() if k != "index"}, "target": {"x": round(x, 1), "y": round(y, 1)}}
-        answer = await self._run_tool_core(client_id, name, again)
+        token = _PICTURE_AIM.set(aimed_at)
+        try:
+            answer = await self._run_tool_core(client_id, name, again)
+        finally:
+            _PICTURE_AIM.reset(token)
         note = (f'Note: this screen\'s elements weren\'t read; "{said}" was found in the text read from its picture, and '
                 f"the touch {'would go' if args.get('dry_run') else 'went'} to its centre.")
         lines_out = answer["text"].split("\n")
@@ -8992,7 +9015,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         done = await self._settle_frames(after_seq, still, caps.cap(bundle, cap, cut=not reads, launch=launch), since, early)
         if (done.still or done.capped) and bundle == read:
             cut = self._tier_now() != "full"
-            if caps.settled(bundle, done.capped, cut, done.seconds):
+            if caps.settled(bundle, done.capped, cut, done.seconds, unread=self._tier_now() == "root"):
                 self.log(f"{bundle}'s screen never stands still: actions settle within {caps.short:g} s"
                          if caps.restless(bundle) else f"{bundle}'s screen stood still: actions settle as usual")
         return done
