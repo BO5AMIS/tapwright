@@ -39,10 +39,12 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # shallow, root) with `tier` and `truncated`, the setting twAXTimeout caps the other reads, GET /wda/tw/screen gives the
 # screen's size without reading the app, and GET /wda/tw/ocr reads the screen's text with Apple's Vision on the phone.
 # A tree read without `budget` (a client older than 2.0) is answered the version 8 way.
+# tw-16.15.3.10 (tw version 10, 2.0.0) lets the direct tree read ask for chosen attributes (`attrs=lean|std|names`), with
+# `arraycap`, `modal`, and GET /wda/tw/attrs to see the phone's attribute lists. Every v9 behaviour is kept.
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
-    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.9", "529b4e0b965a67314a65648c22c2b32934289b06f17deb8fd2ac57cabf01a872", "fork-tw-16.15.3.9"),
+    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.10", "264d1b769ef060b834610a0901d51355d0f70c34f62033948339ec8b9f275b5f", "fork-tw-16.15.3.10"),
 }
 WDA_DEFAULT = "fork"
 WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]
