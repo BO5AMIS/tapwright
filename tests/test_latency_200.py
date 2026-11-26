@@ -385,13 +385,13 @@ def test_press_button_lock_takes_the_daemon_to_locked_at_once():
         lines = r["text"].splitlines()
         assert lines[0] == daemon_module.LOCKED_BY_PRESS and d.state == "locked"
         assert len(lines) == 2 and "unlock" in lines[1]  # (the locked phone's own note says how to go on)
-        for tool, args in (("look", {}), ("tap", {"target": {"x": 10, "y": 10}})):
-            try:
-                await d.run_tool("a", tool, args)
-            except Refused as e:
-                assert e.code == "locked", tool
-            else:
-                raise AssertionError(f"{tool} went to a locked phone")
+        try:  # a touch is refused at once (a look at a locked phone is allowed, as before: it shows the lock screen)
+            await d.run_tool("a", "tap", {"target": {"x": 10, "y": 10}})
+        except Refused as e:
+            assert e.code == "locked"
+        else:
+            raise AssertionError("a tap went to a locked phone")
+        assert "tap" not in d.session.calls
         await finish(stop, task)
     run(go)
 
