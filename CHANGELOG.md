@@ -6,25 +6,30 @@
   of a screen whose elements weren't read. A notification banner was over the top of the screen: the first tap opened
   the banner's app on a conversation, and the second landed on that conversation's call button and started a call.
   Nothing stopped either tap: the wait for a banner held only touches aimed at an element, and another app in front
-  stopped only typing. Now, with the current runner (route version 11 or later):
+  stopped only typing. Now, with a runner that answered route version 11 or later:
   - every answer that shows the agent the screen (a look, an action's answer, `open_app`, `open_url`, a `run` step
-    whose `expect` held) records what was in front then, from the runner and iOS's process list: an app, the home
-    screen, or something of the system over an app (a notification, an alert, Notification or Control Center). A look
-    taken while a notification is down waits it out first, and if it stays the answer says so in its first line;
-  - right before each touch goes out (after Tapline's notice, as the finger is about to land) the same question is
-    asked again. The touch goes only when it finds what the agent was shown: the same app, the home screen it saw, or
-    the system over the app when the agent saw that. Another app, or the system over an app the agent saw alone, is
-    refused `stale` ("Nothing was touched; look again."). A touch in the top 200 pt while a notification may be there
-    waits it out (up to 8 s) and is refused `covered` if it stays, unless the agent aims at an element of its list it
-    saw there; a point there is always held;
-  - when Tapwright can't tell what is in front (asked twice), the touch is refused, nothing touched;
+    whose `expect` found text, an id or a label) records what was in front then, from the runner and iOS's process
+    list, asked as the read begins and again after it: an app, the home screen, or something of the system over an
+    app (a notification, an alert, Notification or Control Center). When the two disagree, or the read shows another
+    app, the record is "unknown" and the answer says so. A look taken while a notification may be down waits it out
+    first, and if it stays the answer says so in its first line;
+  - right before each touch goes out, the same question is asked again, and then whether a pause, a lock or a person's
+    touch came meanwhile. The touch goes only when it finds what the agent was shown: the same app, or the home screen
+    it saw (a point in its top 200 pt is refused there: a notification over the home screen looks like the home
+    screen), or the system over the app it saw, for a touch aimed at an element of that answer. A point on the system
+    over an app is refused `covered`; in the top 200 pt a notification is waited out (up to 8 s) first. Another app is
+    refused `stale` ("Nothing was touched; look again.");
+  - when Tapwright can't tell what is in front (asked twice), the touch is refused `unknown_front`, nothing touched;
+    on a screen where the runner can't name the app, `open_app` names it. A runner whose version question failed is
+    refused the same way, never treated as an old one. No look yet: `no_look`;
   - `open_app`, `open_url`, `press_button` and `alert` change what is in front on purpose and aren't checked; a
     person's touches from the live view aren't checked; a `run` stops at a step that would touch an app no answer
-    showed (a step that only taps doesn't look), while `open_app`, `open_url` and an `expect` that held let it go on.
-  What it costs: one question to the runner (usually a few ms) per touch and one per answer; iOS's process list only
-  when the system is in front. What it doesn't cover: a runner older than route version 11 (no protection: the
-  question would cost a read); the few ms between the last question and the finger; a notification over the home
-  screen, which looks the same as the home screen itself.
+    showed (a step that only taps doesn't look).
+  What it costs: one question to the runner (usually a few ms) per touch and two per answer; iOS's process list only
+  when the system is in front; a cut read of Control Center, Notification Center or an alert waits up to 8 s per
+  answer. What it doesn't cover: a runner that answered a version below 11; the time between the last question and
+  the finger (on the hands, the question's own answer, about 0.1-0.5 s with the system in front, then nothing until
+  the touch); a notification over the home screen below its top 200 pt, and its action buttons.
 - After an action that changed a slow app's screen, the read of its answer is planned with 8 s at once when the
   action's settle ended on a picture that stood still (the phone: 9.8 s, a cut 3 s read then the 8 s one, where one
   8 s read takes about 5). When the settle ended with the picture still changing (a feed), that read follows 2.0.2's
