@@ -161,10 +161,15 @@
   - the picture-text aim's banner check asks the hit test too, at (the screen's middle, 80).
   The limit, measured: on an app that is slow to answer (a video feed whose reads time out) the hit test said "no
   element answered" at every point for about 3.5 s, and a pile of questions held the runner until it was restarted.
-  So "no element answered" is an answer only at the screen's top edge; below it the question is asked up to three
-  times (about a second), and none answering refuses a point with its own words ("can't be told right now, because
-  the app in front is slow to answer"); never more than one hit question is out, and after one that got no answer in
-  1.5 s none is asked for 5 s. A point near the top of such an app can be refused though nothing is over it. Not asked
+  So "no element answered" is an answer only at the screen's top edge (the portrait panel's, in landscape too); below
+  it the question is asked up to three times within about 1.2 s in all, and none answering, or a question with no
+  answer in that time, refuses a touch that starts in the top 200 pt, a point or an element alike, with its own words
+  ("can't be told right now, because the app in front is slow to answer ...; try again in a moment, or aim lower"):
+  the phone showed the hit test silent at a banner's own points over such an app. Such a silence never counts as a
+  dropped line (no reconnect); never more than one hit question is out, the hit test that proves a touch's element
+  included, and after one that got no answer none is asked for 5 s. Once a banner was seen at a touch's start, only an
+  answer that nothing is over the point ends its wait: a silence keeps it waiting, then `covered`. A touch near the
+  top of such an app can be refused though nothing is over it. Not asked
   (as before): a runner below route version 6 or without the route, `TAPWRIGHT_HIT_CHECK=0`. Cost: one hit question
   (about 20 ms) for each touch, points and elements alike, that starts in the top 200 pt of an app or the home screen
   the agent saw; none lower down.
