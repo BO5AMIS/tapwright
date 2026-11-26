@@ -606,8 +606,32 @@ def test_pinch_without_hands_is_unsupported(phone):
 
 
 def test_pinch_near_an_edge_spreads_less_than_asked():
-    assert session_module.pinch_spread(40, 400, 4.0, (W, H)) == (30.0, 30.0)
+    # (CodeRabbit, PR #26) near an edge the narrow end shrinks too, so the fingers still move (it was 30 -> 30: a still
+    # two-finger press answered as a spread); where they can't move, nothing is touched
+    assert session_module.pinch_spread(40, 400, 4.0, (W, H)) == (7.5, 30.0)
+    assert session_module.pinch_spread(W - 40, 400, 0.25, (W, H)) == (30.0, 7.5)
     assert session_module.pinch_spread(215, 400, 0.5, (W, H)) == (60.0, 30.0)
+    assert session_module.pinch_spread(215, 400, 2.0, (W, H)) == (30.0, 60.0)
+    for x in (12, 0, W):
+        with pytest.raises(Refused) as e:
+            session_module.pinch_spread(x, 400, 2.0, (W, H))
+        assert e.value.code == "bad_params" and "edge" in str(e.value)
+
+
+def test_pinch_on_a_turn_the_hands_cant_map_tells_no_one_of_a_touch(phone):
+    # (CodeRabbit, PR #26) the touch hook (Tapline's notice, a grant's use) ran before the hands refused the turn
+    s, wire = with_hands(phone)
+    asyncio.run(s.ensure())
+    s.screen, s.turn = (H, W), session_module.TURN_UNKNOWN
+    told = []
+
+    async def hook(ms):
+        told.append(ms)
+    s.touch_hook = hook
+    with pytest.raises(Refused) as e:
+        asyncio.run(s.pinch(400, 200, 2.0, 100))
+    assert e.value.code == "unsupported" and "nothing was touched" in str(e.value)
+    assert told == [] and touches(wire) == []
 
 
 def test_hands_keys_types_and_untypable_comes_first(phone):

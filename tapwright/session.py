@@ -375,15 +375,22 @@ class SettleCap:
 
 PINCH_GAP = 60.0  # points between a pinch's two fingers at its narrow end
 PINCH_MARGIN = 10.0  # points a pinch's fingers stay inside the screen's edges
+PINCH_MOVE_MIN = 4.0  # points each finger must travel: less, and a pinch is a still two-finger press
 
 
 def pinch_spread(x: float, y: float, scale: float, screen: tuple[float, float]) -> tuple[float, float]:
     """(start, end) distance of each of a pinch's two fingers from (x, y), along the horizontal line through it: from
     PINCH_GAP / 2 out to `scale` times that (scale > 1), or the other way (scale < 1), kept PINCH_MARGIN inside the
-    screen (so a pinch near an edge spreads less than asked)."""
-    room = max(1.0, min(x, screen[0] - x) - PINCH_MARGIN)
-    narrow = min(PINCH_GAP / 2, room)
-    wide = min(narrow * max(scale, 1 / scale), room)
+    screen. Near an edge the wide end is what fits and the narrow end that divided by the scale, so the fingers still
+    move (CodeRabbit, PR #26: both were capped to the room, a still two-finger press); bad_params when they can't move
+    PINCH_MOVE_MIN points (nothing is touched)."""
+    room = min(x, screen[0] - x) - PINCH_MARGIN
+    ratio = max(scale, 1 / scale)
+    wide = min(PINCH_GAP / 2 * ratio, room)
+    narrow = min(PINCH_GAP / 2, wide / ratio)
+    if wide - narrow < PINCH_MOVE_MIN:
+        raise Refused("bad_params", f"({x:g}, {y:g}) is too near the screen's edge for a pinch's two fingers to move; "
+                                    "pinch farther from it. Nothing was touched.")
     return (narrow, wide) if scale >= 1 else (wide, narrow)
 
 
@@ -1500,6 +1507,12 @@ class Session:
             raise Refused("unsupported", "pinch needs touches through CoreDevice HID, which this phone doesn't take; "
                                          "nothing was touched.")
         near, far = pinch_spread(x, y, scale, self.screen)
+        try:
+            # (CodeRabbit, PR #26) a turn the hands can't map is refused before the touch hook tells anyone of a touch
+            hands_module.Hands._mapped(self.screen, self.turn)
+        except hands_module.HandsUnavailable as e:
+            raise Refused("unsupported", f"pinch needs touches through CoreDevice HID, and they can't be used now "
+                                         f"({e.reason}); nothing was touched.") from None
         await self._touching(ms, (x, y))
         ends = [(-1.0, 0.0), (1.0, 0.0)]
         paths = [[(0.0, x + dx * near, y + dy * near), (float(ms), x + dx * far, y + dy * far)] for dx, dy in ends]

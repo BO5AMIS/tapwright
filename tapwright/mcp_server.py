@@ -616,8 +616,8 @@ async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.3
 
 
 @server.tool(description=describe("pinch"), structured_output=False)
-async def pinch(x: float, y: float, scale: float, seconds: float = 0.5, look: bool = True, screenshot: bool = False,
-                brief: bool | None = None) -> CallToolResult:
+async def pinch(x: float, y: float, scale: float, seconds: float = 0.5, look: bool = True,
+                screenshot: bool | None = None, brief: bool | None = None) -> CallToolResult:
     return await _tool("pinch", x=x, y=y, scale=scale, seconds=seconds, look=look, screenshot=screenshot, brief=brief)
 
 

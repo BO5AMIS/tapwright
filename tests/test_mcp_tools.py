@@ -67,6 +67,7 @@ DEFAULTS = {
     "crash": {"all": False, "pull": False},
     "session_report": {"since": None},
     "swipe": {"seconds": 0.35, "look": True, "screenshot": None, "dry_run": False},
+    "pinch": {"seconds": 0.5, "look": True, "screenshot": None},  # (CodeRabbit, PR #26: None, the daemon's default)
     "filmstrip": {"frames": 6, "interval_ms": 250, "frame_width": 200, "tap": None},
     "compare_screen": {"update": False, "width": 600, "threshold": 0.5, "ignore": None},
 }
