@@ -199,11 +199,13 @@ def _long_path_of(raw: str) -> str:
 
 LONG_PATH = _long_path_of(os.environ.get("TAPWRIGHT_TREE_LONG_PATH", ""))
 LONG_MEMORY = 300.0  # seconds no long try is made for an app after a long-budget read of it was cut, while it never read
-#                      whole with it (a paused video: without this every minute cost 3 + 8 s)
+#                      whole with it (a paused video: without this every minute cost 3 + 8 s); doubled for each such read
+#                      in a row (the lead, after the phone test: the try is the default, and a feed may slip past it)
+LONG_MEMORY_MAX = 6 * 3600.0  # the longest that block grows to
 LONG_RETRY = 60.0  # (review R203 M2) the same for an app that has read whole with the long budget: one cut screen of it
 #                    (a video page) mustn't leave its readable screens unread for 5 minutes
 LONG_NOTE = ("this screen took about {seconds:.0f} s to read, longer than the usual time given; its elements are listed, "
-             "and its next reads are given that time while it stands still")
+             "and its next reads are given that time unless something plays on it")
 
 
 # (2.0.3, review R203 L1) whose call a read belongs to: the daemon sets a fresh list for each tool call, and the
@@ -297,10 +299,12 @@ class ReadBudget:
     def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
                  memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic,
                  unasked_for: float = UNASKED_FOR, long_ms: int = LONG_BUDGET_MS,
-                 long_memory: float = LONG_MEMORY, long_retry: float = LONG_RETRY) -> None:
+                 long_memory: float = LONG_MEMORY, long_retry: float = LONG_RETRY,
+                 long_memory_max: float = LONG_MEMORY_MAX) -> None:
         self.normal_ms, self.short_ms, self.memory, self.clock = normal_ms, short_ms, memory, clock
         self.unasked_for = unasked_for
         self.long_ms, self.long_memory, self.long_retry = long_ms, long_memory, long_retry
+        self.long_memory_max = long_memory_max
         self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
         self._still_cut: dict[str, float] = {}  # bundle id -> when a read its stillness gave the normal budget was
         # (the app whose next read has the normal budget because its screen is still, when that was decided)
@@ -309,19 +313,30 @@ class ReadBudget:
         self._readable: set[str] = set()  # (2.0.3) bundle ids that read whole with the long budget (the daemon's life)
         # bundle id -> when its newest long read that didn't come back whole went out (the block; a whole answer lifts it)
         self._long_cut: dict[str, float] = {}
+        # bundle id -> long reads of it in a row that didn't come back whole (its block doubles with each: LONG_MEMORY,
+        # 2x, 4x... up to LONG_MEMORY_MAX, for an app that never read whole with the long budget)
+        self._long_misses: dict[str, int] = {}
 
     @property
     def long_on(self) -> bool:
         """Is there a long budget (TAPWRIGHT_TREE_LONG_BUDGET above the normal budget)?"""
         return self.long_ms > self.normal_ms
 
+    def block_span(self, bundle: str) -> float:
+        """Seconds a long read of `bundle` that didn't come back whole blocks the next: `long_retry` for an app that read
+        whole with the long budget before; else `long_memory`, doubled for each such read before it in a row, at most
+        `long_memory_max`."""
+        if bundle in self._readable:
+            return self.long_retry
+        misses = max(1, self._long_misses.get(bundle, 1))
+        return min(self.long_memory_max, self.long_memory * 2 ** min(misses - 1, 30))
+
     def blocked(self, bundle: str | None) -> bool:
-        """Is a long read of `bundle` blocked: one went out within `long_memory` seconds (`long_retry` for an app that
-        read whole with the long budget before) and didn't come back whole?"""
+        """Is a long read of `bundle` blocked: one went out within its block_span and didn't come back whole?"""
         at = self._long_cut.get(bundle) if bundle is not None else None
-        if at is None:
+        if at is None or bundle is None:
             return False
-        return self.clock() - at < (self.long_retry if bundle in self._readable else self.long_memory)
+        return self.clock() - at < self.block_span(bundle)
 
     def slow(self, bundle: str | None) -> bool:
         """Is `bundle` slow but readable now: its still screens' reads are planned with the long budget?"""
@@ -335,15 +350,15 @@ class ReadBudget:
     def blocked_for(self, bundle: str | None) -> float:
         """Seconds the block of `bundle` lasts still (0: none)."""
         at = self._long_cut.get(bundle) if bundle is not None else None
-        if at is None:
+        if at is None or bundle is None:
             return 0.0
-        span = self.long_retry if bundle in self._readable else self.long_memory
-        return max(0.0, span - (self.clock() - at))
+        return max(0.0, self.block_span(bundle) - (self.clock() - at))
 
     def long_sent(self, bundle: str | None) -> None:
         """A long read of `bundle` goes out now: blocked until a whole answer to it (answered) lifts that."""
         if bundle is not None:
             self._long_cut[bundle] = self.clock()
+            self._long_misses[bundle] = self._long_misses.get(bundle, 0) + 1  # (a whole answer takes it back to 0)
 
     def plan(self, bundle: str | None, still: Callable[[], bool] | None = None,
              long_ok: bool = True) -> tuple[int, bool]:
@@ -411,6 +426,7 @@ class ReadBudget:
             # first, by long_sent, and marks only the one that read whole)
             self._readable.add(bundle)
             self._long_cut.pop(bundle, None)
+            self._long_misses.pop(bundle, None)
         if not truncated:
             # (review K-H1) the screen in front reads: the next read is asked for real. Left unasked, it was made up
             # as a root with no elements, for a screen that had just given all of them
@@ -430,7 +446,8 @@ class ReadBudget:
         self._still_cut.clear()
         self._by_still = None
         self._tried.clear()
-        # (review R203 H2) not `_readable` nor `_long_cut`: a reconnect changes nothing about an app's screens, and a
+        # (review R203 H2) not `_readable`, `_long_cut` nor `_long_misses`: a reconnect changes nothing about an app's
+        # screens, and a
         # paused video that restarted the runner was given a new 8 s try every time
 
 
@@ -701,11 +718,11 @@ class Session:
         # read gets the normal budget even while its app is on the short one (ReadBudget). None: never taken as still.
         self.screen_still: Callable[[], bool] | None = None
         self.budget_app: str | None = None  # the app the newest bounded read was budgeted for or named (L2)
-        # (2.0.3, review R203 H1) stillness across a read, from the daemon's stream: `still_mark` before the read (the
-        # newest frame, fresh, kept; with `prove`, stillness up to it is proven now; else None), `still_across` after
-        # it (still up to the mark, and does a fresh frame, waited for briefly, show the same picture?). The runner sends no frames while it reads, so "still?" asked
-        # straight after a 3 s read saw a 3 s old frame and always said no. Without them no long read is made.
-        self.still_mark: Callable[[bool], Awaitable[object | None]] | None = None
+        # (2.0.3) the picture across a read, from the daemon's stream: `still_mark` before the read ((the newest frame,
+        # fresh, kept, or None; with `check`, whether the two newest frames say something plays)), `still_across` after
+        # a cut read (may the long try go out: did a fresh frame change no more than STILL_BOX from the kept one?). The
+        # runner sends no frames while it reads (review R203 H1). Without them (no daemon) no long read is made.
+        self.still_mark: Callable[[bool], Awaitable[tuple[object | None, bool]]] | None = None
         self.still_across: Callable[[object], Awaitable[bool]] | None = None
 
         self.center_tier = "full"  # how much of Notification Center the newest read_center got (R200v L4)
@@ -1044,10 +1061,11 @@ class Session:
         slow = self.budgets.slow(bundle)
         bundle_long = self.budgets.long_on and timeout >= long_wait and (
             bundle is None or slow or self.budgets.long_try(bundle))
-        # (re-check R203b L-e) only a slow app's planned long read needs stillness proven before the read; for any
-        # other the newest frame is kept, and proven still only after a cut answer
-        mark = await self._still_mark(prove=slow) if bundle_long else None
-        long_ok = slow and mark is not None and timeout - (time.monotonic() - began) >= long_wait
+        # (the lead, after the phone test) the newest frame is kept, to compare with the frame after a cut read; a slow
+        # app's planned long read is given up only when the two newest frames before it say something plays
+        mark, plays = await self._still_mark(check=slow) if bundle_long else (None, False)
+        long_ok = slow and not plays and self.still_mark is not None and \
+            timeout - (time.monotonic() - began) >= long_wait
         budget, unasked = self.budgets.plan(bundle, still=self.screen_still, long_ok=long_ok)
         if unasked and self.tw_version >= FRONT_VERSION and bundle is not None:
             source = await self._unasked_root(bundle)
@@ -1083,13 +1101,13 @@ class Session:
             named = _root_bundle(source)
         app = named or kept_for  # (the app the answer was kept under: _compact_tree's)
         if (source is not None and self.last_tier != "full" and asked == normal
-                and self._long_try_now(app, mark, bundle_long, timeout, began, long_wait)
+                and self._long_try_now(app, bundle_long, timeout, began, long_wait)
                 and await self._still_across(mark)
                 and self._time_for_long(app, timeout, began, long_wait)):
-            # (2.0.3) the normal budget cut a screen that stood still across the read: it may only be slow to read (a
-            # shopping app's home screen, about 1,000 elements: 3.5-7.3 s cold, every time). Asked once more, in this
-            # read, with the long budget. Never on a screen that moved before or during the read (a playing feed never
-            # answers: 2.0.2's cost there), and not while the app is blocked (ReadBudget.long_try)
+            # (2.0.3) the normal budget cut the read: the screen may only be slow to read (a shopping app's home screen,
+            # about 1,000 elements: 3.5-7.3 s cold, every time). Asked once more, in this read, with the long budget,
+            # unless the picture changed across the read by more than STILL_BOX (a playing feed: 2.0.2's cost there),
+            # and not while the app is blocked (ReadBudget.long_try)
             tier, why, compact = self.last_tier, self.last_why, self.last_compact
             began_long = time.monotonic()
             longer, _ = await self._long_read(timeout - (time.monotonic() - began), app, normal)
@@ -1105,7 +1123,7 @@ class Session:
             self.budget_app = named or bundle
         return source
 
-    def _long_try_now(self, app: str | None, mark: object | None, bundle_long: bool, timeout: float, began: float,
+    def _long_try_now(self, app: str | None, bundle_long: bool, timeout: float, began: float,
                       long_wait: float) -> bool:
         """(2.0.3) May the normal read just cut be asked once more with the long budget, before the stillness across it
         is asked? With TAPWRIGHT_TRACE, why not, in one line with its numbers (re-check R203b M-b; the daemon's own
@@ -1119,8 +1137,8 @@ class Session:
         elif not bundle_long or timeout - (time.monotonic() - began) < long_wait:
             why = (f"{max(0.0, timeout - (time.monotonic() - began)):.1f} s left of the read's time, a long read needs "
                    f"{long_wait:.0f} s")
-        elif mark is None:
-            why = "not still before the read (see the line before)"
+        elif self.still_mark is None or self.still_across is None:
+            why = "no picture to judge by (a session without the daemon's stream)"
         if why and TRACE:
             getattr(self.device, "log", lambda *a: None)(f"trace no long try: {why}")
         return not why
@@ -1169,14 +1187,15 @@ class Session:
             f"tree read whole with the long budget ({self.budgets.long_ms} ms) in {took:.1f} s: "
             f"{_root_bundle(source) or self.budget_app} reads slowly")
 
-    async def _still_mark(self, prove: bool) -> object | None:
-        """(2.0.3) The daemon's still_mark: the newest frame, fresh, kept before the read (`prove`: stillness up to it
-        proven now), else None (and None without a stream: nothing is proven)."""
+    async def _still_mark(self, check: bool) -> tuple[object | None, bool]:
+        """(2.0.3) The daemon's still_mark: (the newest frame, fresh, kept before the read, or None; with `check`,
+        whether its two newest frames say something plays). Without the daemon: (None, False)."""
         mark = self.still_mark
-        return await mark(prove) if mark is not None else None
+        return await mark(check) if mark is not None else (None, False)
 
-    async def _still_across(self, mark: object) -> bool:
-        """(2.0.3) The daemon's still_across: does a fresh frame after the read show what `mark` showed before it?"""
+    async def _still_across(self, mark: object | None) -> bool:
+        """(2.0.3) The daemon's still_across: may the long try go out (the picture changed no more than STILL_BOX across
+        the read, or nothing could be compared)? Without the daemon: no."""
         across = self.still_across
         return across is not None and bool(await across(mark))
 

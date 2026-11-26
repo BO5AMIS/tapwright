@@ -494,13 +494,9 @@ def alike_on_glass(a: Frame | None, b: Frame | None, screen: tuple[float, float]
 @dataclasses.dataclass(frozen=True)
 class StillMark:
     """(2.0.3) What a read that could lead to a long one kept before it went out (Daemon._still_mark): the newest
-    frame, fresh then, and whether stillness up to it was proven then (else it is proven after a cut answer)."""
+    frame, fresh then, which the frame after the read is compared with (kept here, so frames the video source sends
+    during the read can't push it out of the hub: CodeRabbit, PR #30)."""
     frame: Frame
-    proven: bool
-    # (CodeRabbit, PR #30) the frames and their pace as the read began, for a proof made after it: the video source
-    # sends frames during a read, and a 3 s read outlasts the hub's 64 (the mark's own frame was gone)
-    frames: "tuple[tuple[float, Frame], ...]" = ()
-    gap: float | None = None
 
 
 def _unlike_box(x: "Image.Image", y: "Image.Image") -> tuple[int, int, int, int] | None:
@@ -556,18 +552,20 @@ STREAM_WAIT = 1.5  # (2.0.3, re-check R203b N2) seconds a read that could lead t
 
 
 def _still_box_of(raw: str) -> float:
-    """TAPWRIGHT_STILL_BOX: a share from 0 to 1 (else the default, 0.35)."""
+    """TAPWRIGHT_STILL_BOX: a share from 0 to 1 (else the default, 0.6)."""
     try:
-        value = float(raw) if raw.strip() else 0.35
+        value = float(raw) if raw.strip() else 0.6
     except ValueError:
-        return 0.35
-    return value if math.isfinite(value) and 0.0 <= value <= 1.0 else 0.35
+        return 0.6
+    return value if math.isfinite(value) and 0.0 <= value <= 1.0 else 0.6
 
 
-# (2.0.3, the lead's decision) the frames before and after a read also count as one still screen when they differ only
-# inside a box of at most this share of the compared picture: an auto-advancing banner changes a band of a heavy home
-# screen, a playing feed changes all of it. 0: the two frames must match (alike_on_glass). Only for the comparison
-# across the read; stillness before it is the stream's own strict check. For measuring.
+# (2.0.3, the lead's decision after the phone test) the long try goes out after a cut normal read unless the picture
+# changed across the read inside a box of more than this share of the compared picture (unlike_share): a playing feed
+# changes all of it, while a heavy home screen's banner moved on over 36 % of it during a read (phone, 2026-11-26), and a
+# spinner of 21 x 5 thumb pixels changed before it. The same share between the two newest frames before a slow app's
+# planned long read gives that read 2.0.2's rules. 0: any change (above the stream's tolerance, outside the left-out
+# strips) stops the try; 1: nothing does. For measuring.
 STILL_BOX = _still_box_of(os.environ.get("TAPWRIGHT_STILL_BOX", ""))
 WAIT_FOR_LONG_MARGIN = 0.5  # (2.0.3) seconds of `wait_for`'s deadline a long read leaves unused (its clock is not ours)
 WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up instead of reading again
@@ -9594,81 +9592,76 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             seq, got = frame.seq, got + 1
         return ""
 
-    async def _still_mark(self, prove: bool = True) -> "StillMark | None":
-        """(2.0.3) Session.still_mark, before a read that could lead to a long one: the newest frame, fresh, kept to be
-        compared after the read (_still_across); None (and a trace line why) when there is none. `prove`: stillness up
-        to it is proven now (a slow app's planned long read needs that before the read); else only after a cut answer,
-        from the frames kept from before the read (none come during it): on most reads nothing is decoded (re-check
-        R203b L-e: up to 2.7 ms a read with phone-sized frames)."""
+    def _change(self, a: Frame, b: Frame) -> tuple[float, str]:
+        """(the share of the compared picture inside the box where two frames differ, how the trace says it): 0 when
+        alike; 1 (all of it) when they can't be compared (another size: the phone turned, or no picture)."""
+        if self._alike(a, b):
+            return 0.0, "alike"
+        share = unlike_share(a, b, getattr(self.session, "screen", None), getattr(self.session, "turn", 0) or 0)
+        if share is None:
+            return 1.0, "can't be compared (counted as all of it)"
+        return share[0], f"differs in {share[1]} = {share[0] * 100:.0f} % of the picture"
+
+    async def _still_mark(self, check: bool = False) -> "tuple[StillMark | None, bool]":
+        """(2.0.3) Session.still_mark, before a read that could lead to a long one: (the newest frame, when fresh, kept to
+        be compared with the frame after the read (_still_across), else None; whether the screen plays: `check` (a slow
+        app's planned long read) and its two newest frames differ inside a box of more than STILL_BOX). Too few frames
+        to tell: it doesn't. No stillness is asked of the screen before the read any more (the lead, after the phone
+        test: a 21 x 5 thumb-pixel spinner stopped the try on the screen it was made for)."""
         try:
             waited = await self._stream_ready()
             latest = self.hub.latest
             if latest is None or not self._frame_fresh():
-                self._trace_not_still_before(f"no fresh frame{'; ' + waited if waited else ''}")
-                return None
-            if prove and not self._still_upto(latest.seq):
-                self._trace_not_still_before("frames differ", latest.seq)
-                return None
-            return StillMark(latest, prove, tuple(self.hub.recent()), self.hub.gap())
-        except Exception as e:  # noqa: BLE001 - a picture that can't be compared proves nothing
-            self._trace_not_still_before(f"{type(e).__name__}")
-            return None
-
-    def _trace_not_still_before(self, said: str, upto: int | None = None) -> None:
-        if session_module.TRACE:
-            self.log(f"trace still before the read: no ({said}){self._why_not_still(upto)}")
+                if session_module.TRACE:
+                    self.log(f"trace no frame kept before the read (no fresh frame{'; ' + waited if waited else ''})"
+                             f"{self._why_not_still()}")
+                return None, False
+            plays = False
+            if check:
+                frames = self.hub.recent()
+                if len(frames) >= 2:
+                    share, said = self._change(frames[-2][1], frames[-1][1])
+                    plays = share > STILL_BOX
+                    if plays and session_module.TRACE:
+                        self.log(f"trace no long budget planned: the two newest frames before the read: {said}, "
+                                 f"allowed {STILL_BOX * 100:.0f} %")
+            return StillMark(latest), plays
+        except Exception as e:  # noqa: BLE001 - a picture that can't be compared says nothing: no mark, nothing plays
+            if session_module.TRACE:
+                self.log(f"trace no frame kept before the read ({type(e).__name__})")
+            return None, False
 
     async def _still_across(self, mark: object) -> bool:
-        """(2.0.3, review R203 H1) Session.still_across: did the screen stand still before and across a read that began on
-        `mark` (_still_mark)? Before: the frames up to the mark (unless proven then). Across: the runner sends no frames
-        while it reads, so one fresh frame is waited for (STILL_AFTER_READ at most) and must show what the mark showed,
-        or differ only inside a box of at most STILL_BOX of the picture (a banner). None in time: not still.
-        (Re-check R203b L-a, left as decided: the first fresh frame is trusted. One the runner captured as the read
-        began and sent only after it would be alike with the mark, and a moving screen would get one long read and its
-        block.)"""
+        """(2.0.3) Session.still_across, after a cut normal read: may the long try go out? Yes unless the picture changed
+        across the read inside a box of more than STILL_BOX: the runner sends no frames while it reads, so one fresh
+        frame is waited for (STILL_AFTER_READ at most) and compared with the frame kept before the read (`mark`). No
+        frame kept, or none fresh in time: yes (the lead, after the phone test: the try is the default; a feed that
+        slips past costs one 8 s read and a block that grows each time: ReadBudget).
+        (Re-check R203b L-a, left as decided: the first fresh frame is trusted.)"""
         if not isinstance(mark, StillMark):
-            return False
-        if not mark.proven:
-            try:
-                before = bool(mark.gap) and bool(mark.frames) and \
-                    self._still_window(list(mark.frames), mark.gap)  # type: ignore[arg-type]
-            except Exception:  # noqa: BLE001 - as above
-                before = False
-            if not before:
-                self._trace_not_still_before("frames differ", mark.frame.seq)
-                return False
+            if session_module.TRACE:
+                self.log("trace long try: yes (no frame kept before the read)")
+            return True
         loop = asyncio.get_running_loop()
         called = loop.time()
-        detail = ""
         try:
             latest = self.hub.latest
             fresh = await self.hub.next_after(latest.seq if latest is not None else mark.frame.seq, STILL_AFTER_READ)
             if fresh is None:
-                still = False
                 age = self.hub.age()
-                detail = (f"no fresh frame within {round(STILL_AFTER_READ * 1000)} ms; the newest is "
-                          f"{age and round(age * 1000)} ms old")
-            elif self._alike(fresh, mark.frame):
-                still, detail = True, f"fresh frame after {round((loop.time() - called) * 1000)} ms, alike"
+                go, detail = True, (f"no fresh frame within {round(STILL_AFTER_READ * 1000)} ms; the newest is "
+                                    f"{age and round(age * 1000)} ms old")
             else:
-                share = unlike_share(fresh, mark.frame, getattr(self.session, "screen", None),
-                                     getattr(self.session, "turn", 0) or 0)
-                still = share is not None and share[0] <= STILL_BOX
-                where = "can't be compared" if share is None else \
-                    f"differs in {share[1]} = {share[0] * 100:.0f} % of the picture"
-                detail = (f"fresh frame after {round((loop.time() - called) * 1000)} ms, {where}, "
+                share, said = self._change(fresh, mark.frame)
+                go = share <= STILL_BOX
+                detail = (f"fresh frame after {round((loop.time() - called) * 1000)} ms, {said}, "
                           f"allowed {STILL_BOX * 100:.0f} %")
-        except Exception as e:  # noqa: BLE001 - as above
-            still, detail = False, type(e).__name__
+        except Exception as e:  # noqa: BLE001 - nothing could be compared: the try is the default
+            go, detail = True, type(e).__name__
         if session_module.TRACE:
-            self.log(f"trace still across the read: {'yes' if still else 'no'} ({detail})")
-        return still
-
-    def _still_upto(self, seq: int) -> bool:
-        """Is the screen proven still by the frames up to `seq` (as _proven_still, its newest fresh when it was kept)?"""
-        gap = self.hub.gap()
-        frames = [(t, f) for t, f in self.hub.recent() if f.seq <= seq]
-        return bool(gap) and bool(frames) and self._still_window(frames, gap)  # type: ignore[arg-type]
+            self.log(f"trace long try: yes ({detail})" if go else
+                     f"trace no long try: the picture changed across the read ({detail})")
+        return go
 
     def _proven_still(self, noted: bool = True) -> bool:
         """Do the stream's recent frames already show what _settle waits for, so a read needn't wait? A read for
