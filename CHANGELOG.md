@@ -43,8 +43,9 @@
   `TAPWRIGHT_OCR_LANGUAGES` (e.g. `en-US,ar-SA`) sets the languages the phone reads.
 - Actions on such a screen work: a tap or long press at `{x, y}`, an `o` ref or a `{text}`, `swipe`, `scroll` (by
   direction, or at a point), `press_button`, and `type_text` without a target (into whatever has the keyboard's focus; it
-  isn't cleared first, and a saved account's value isn't typed there). The answer says what was done and `Elements:
-  none…`, with the picture after it unless `screenshot: false`.
+  isn't cleared first, a saved account's value isn't typed there, and a recording keeps no text typed there, as for a
+  password field). The answer says what was done and `Elements: none…`, with the picture after it unless
+  `screenshot: false`.
 - A tap or long press aimed by `{text}` on a screen whose elements weren't read looks for the text in the text read from
   the picture and touches the centre of the line that shows it, as `wait_for` does. Several lines show it: `ambiguous`,
   listing them as `o` refs of a new reading, or pick one with `index`. When the phone was used between the reading

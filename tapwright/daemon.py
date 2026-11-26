@@ -3491,8 +3491,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             kept = {name: data for name, data in rec.get("pictures", {}).items() if name in wanted}
             folder = compare.script_references(pathlib.Path(path))
             secure = rec.get("secure_steps") or []
-            note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: "
-                     "the text isn't saved. Put a test password in the file's \"text\" before replaying."]
+            note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field (or one "
+                     "that couldn't be read): the text isn't saved. Put a test password in the file's \"text\" before "
+                     "replaying."]
                     if secure else [])
             try:  # the script is saved already: a copy that fails is said, not an error that loses the answer
                 copied = compare.export_to_script(kept, pathlib.Path(path))[1]
@@ -3616,8 +3617,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self.maps.edit(root, bundle, lambda d: d["routes"].__setitem__(rec["route"], f"routes/{rec['route']}.json"))
         del self._recording[client_id]
         secure = rec.get("secure_steps") or []
-        note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: the text isn't "
-                 "saved. Use ${account.password} there with a test account (drive's account), or put a test password in the "
+        note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field (or one that "
+                 "couldn't be read): the text isn't saved. Use ${account.password} there with a test account (drive's account), or put a test password in the "
                  "file by hand."] if secure else [])
         n = len(rec["steps"])
         return _answer([f"Saved route {rec['route']} ({n} step{'' if n == 1 else 's'}, {rec['start']} > {end}) to {path}."], note)
@@ -7441,6 +7442,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         await self._last_checks("type_text", a, None, hit=False, police=False)
         self._dry(a, f"Would type {len(text)} character{'s' if len(text) != 1 else ''} into whatever has the "
                      "keyboard's focus (this screen's elements weren't read).")
+        if (typed_secure := _TYPED_SECURE.get()) is not None:
+            # (CodeRabbit, PR #26) nothing tells whether the focused field is a password's: a recording keeps no text
+            typed_secure.append(True)
         await self.session.type_text(text, replace=False, submit=submit)
         done = Noted(f"Typed {len(text)} character{'s' if len(text) != 1 else ''}"
                      + (" and pressed return" if submit else "") + " into whatever has the keyboard's focus (this "

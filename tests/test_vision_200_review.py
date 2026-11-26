@@ -321,6 +321,28 @@ def test_a_cut_short_look_aims_typing_at_the_app_it_shows(no_pc_ocr):
     run(go)
 
 
+def test_a_recording_keeps_no_text_typed_into_a_field_that_wasnt_read(no_pc_ocr, tmp_path):
+    # (CodeRabbit, PR #26) on a cut-short screen the keys go to whatever has the focus: nothing tells whether it is a
+    # password's field, so the script keeps no text, as for a secure field
+    import json
+
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "record", {"start": True, "name": "sign in"})
+        await d.run_tool("a", "tap", {"target": {"x": 200, "y": 300}, "look": False})
+        await d.run_tool("a", "type_text", {"text": "hunter2", "look": False})
+        path = tmp_path / "s.json"
+        r = await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        saved = path.read_text("utf-8")
+        assert "hunter2" not in saved and "Step 2 typed into a secure field" in r["text"]
+        assert json.loads(saved)["steps"][1] == {"tool": "type_text", "text": "", "secure": True}
+        await finish(stop, task)
+    run(go)
+
+
 # ---- M1: nothing presented or saved as a whole screen from a cut-short tree ----
 
 def test_audit_and_ux_check_refuse_a_screen_read_in_part(no_pc_ocr, monkeypatch):
