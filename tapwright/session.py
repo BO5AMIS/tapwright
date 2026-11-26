@@ -317,6 +317,9 @@ class ReadBudget:
         # bundle id -> long reads of it in a row that didn't come back whole (its block doubles with each: LONG_MEMORY,
         # 2x, 4x... up to LONG_MEMORY_MAX, for an app that never read whole with the long budget)
         self._long_misses: dict[str, int] = {}
+        # bundle id -> (its block, its count) as they were before the long read of it now out: put back when the answer
+        # is another app's (the phone, 2026-11-26: a notification banner's SpringBoard tree answered a planned read)
+        self._long_before: dict[str, tuple[float | None, int | None]] = {}
 
     @property
     def long_on(self) -> bool:
@@ -361,8 +364,25 @@ class ReadBudget:
     def long_sent(self, bundle: str | None) -> None:
         """A long read of `bundle` goes out now: blocked until a whole answer to it (answered) lifts that."""
         if bundle is not None:
+            self._long_before[bundle] = (self._long_cut.get(bundle), self._long_misses.get(bundle))
             self._long_cut[bundle] = self.clock()
             self._long_misses[bundle] = self._long_misses.get(bundle, 0) + 1  # (a whole answer takes it back to 0)
+
+    def long_elsewhere(self, bundle: str) -> None:
+        """A long read of `bundle` was answered by another app's tree: it says nothing about `bundle`, whose block and
+        count go back to what they were before it (not set, not counted, its mark kept)."""
+        before = self._long_before.pop(bundle, None)
+        if before is None:
+            return
+        cut, misses = before
+        if cut is None:
+            self._long_cut.pop(bundle, None)
+        else:
+            self._long_cut[bundle] = cut
+        if misses is None:
+            self._long_misses.pop(bundle, None)
+        else:
+            self._long_misses[bundle] = misses
 
     def plan(self, bundle: str | None, still: Callable[[], bool] | None = None,
              long_ok: bool = True) -> tuple[int, bool]:
@@ -415,19 +435,28 @@ class ReadBudget:
     def short(self, bundle: str | None) -> bool:
         return self.budget(bundle) < self.normal_ms
 
-    def answered(self, bundle: str | None, truncated: bool, budget_ms: int, took_ms: float | None = None) -> None:
-        """A read of `bundle` with `budget_ms` came back truncated or full, after `took_ms` (None: not timed)."""
+    def answered(self, bundle: str | None, truncated: bool, budget_ms: int, took_ms: float | None = None,
+                 sent_for: str | None = None) -> None:
+        """A read of `bundle` with `budget_ms` came back truncated or full, after `took_ms` (None: not timed). `sent_for`:
+        the app a long read was sent for; an answer naming another app is no long read of either (long_elsewhere)."""
         held, self._by_still = self._by_still, None
         # (review K, question 4) a read that raised never came here: what its stillness gave is not the next read's
         by_still = held[0] if held is not None and self.clock() - held[1] < BY_STILL_FOR else None
         if bundle is None:
             return
         long = self.long_on and budget_ms >= self.long_ms
+        if long and sent_for is not None and bundle != sent_for:
+            # (the phone, 2026-11-26) a banner's SpringBoard tree answered a slow app's planned read in 0.1 s: the app was
+            # blocked by its own read, every look for a minute answered "0 elements", and SpringBoard was marked slow.
+            # Only a cut or silent long read of the app itself blocks it or makes its block grow
+            self.long_elsewhere(sent_for)
+            long = False
+        elif long and bundle is not None:
+            self._long_before.pop(bundle, None)
         if long and truncated:
             self._long_cut[bundle] = self.clock()  # (2.0.3) not even the long budget did: 2.0.2's rules, and the block
         elif long:
-            # the app the answer names (review R203 L2: a long read sent for one app and answered by another blocks the
-            # first, by long_sent, and marks only the one that read whole)
+            # the app the long read was sent for, which the answer names (or names none)
             self._readable.add(bundle)
             self._long_cut.pop(bundle, None)
             self._long_misses.pop(bundle, None)
@@ -1066,11 +1095,15 @@ class Session:
         bundle_long = self.budgets.long_on and timeout >= long_wait and (
             bundle is None or slow or self.budgets.long_try(bundle))
         # (the lead, after the phone test) the newest frame is kept, to compare with the frame after a cut read; a slow
-        # app's planned long read is given up only when something plays (Daemon._plays: the picture a second ago)
-        mark, plays = await self._still_mark(check=slow) if bundle_long else (None, False)
+        # app's planned long read is given up only when something plays (Daemon._plays: the picture a second ago).
+        # (The phone, 2026-11-26) nothing of the stream is asked, and nothing waited for, on a read that can't lead to
+        # a long one (the short budget, a read left unasked, a blocked app): on a playing feed those are nearly all
+        mark, plays = await self._still_mark(check=True) if bundle_long and slow else (None, False)
         long_ok = slow and not plays and self.still_mark is not None and \
             timeout - (time.monotonic() - began) >= long_wait
         budget, unasked = self.budgets.plan(bundle, still=self.screen_still, long_ok=long_ok)
+        if bundle_long and not slow and budget == normal and not unasked:
+            mark, _ = await self._still_mark(check=False)
         if unasked and self.tw_version >= FRONT_VERSION and bundle is not None:
             source = await self._unasked_root(bundle)
             if source is not None:
@@ -1079,7 +1112,8 @@ class Session:
             # a slow but readable app, nothing playing on its screen: the long budget is this read's own
             source, silent = await self._long_read(timeout, bundle, normal)
             if source is not None:
-                self._note_long(source, began, tell=False)  # (the agent was told when the try made the first answer)
+                if _root_bundle(source) in (None, bundle):  # (not a banner's SpringBoard tree)
+                    self._note_long(source, began, tell=False)  # (the agent was told when the try made the first answer)
                 self.budget_app = _root_bundle(source) or bundle
                 return source
             if silent and bundle is not None:
@@ -1098,6 +1132,8 @@ class Session:
         named = _root_bundle(source)
         if (source is not None and self.last_tier != "full" and budget < normal
                 and named is not None and named != bundle):
+            if self.budgets.long_on and self.budgets.long_try(named) and timeout >= long_wait:
+                mark, _ = await self._still_mark(check=False)  # (this read has the normal budget: a long one may follow)
             self.budgets.tried(named)
             source = await self._compact_tree(timeout, budget_ms=normal, budget_for=named,
                                               read_path=tree_path(normal, normal))
@@ -1117,7 +1153,8 @@ class Session:
             longer, _ = await self._long_read(timeout - (time.monotonic() - began), app, normal)
             if longer is not None and _TIER_RANK.get(self.last_tier, 0) > _TIER_RANK.get(tier, 0):
                 source, named = longer, _root_bundle(longer)
-                self._note_long(source, began_long)
+                if named in (None, app):  # (another app's tree, a banner's: no note, nothing slow about it)
+                    self._note_long(source, began_long)
             else:
                 # no answer in its time, refused, unreadable, or no more than the normal read gave (CodeRabbit, PR #30:
                 # a long root after a shallow normal read lost the elements a wait_for had found): the normal read's
@@ -1330,13 +1367,14 @@ class Session:
         if value.get("unchanged") is True:
             if last is not None and last[0] == token:
                 if long and remember:
+                    named = _root_bundle(last[1]) or budget_for
                     # (2.0.3, re-check R203b N1) an unchanged answer to a long read is a whole one: it lifts the block
                     # long_sent set and keeps the app's mark. Left set, every second look at a readable app's still
                     # screen blocked it for 60 s, and its next cold screen read "0 elements". (Only for a long read:
                     # 2.0.2's reads answered unchanged leave the budget memory as they did.)
                     self.last_tier, self.last_why = "full", ""
-                    self.budgets.answered(_root_bundle(last[1]) or budget_for, False, budget_asked or budget_ms,
-                                          (time.monotonic() - began) * 1000)
+                    self.budgets.answered(named, False, budget_asked or budget_ms, (time.monotonic() - began) * 1000,
+                                          sent_for=budget_for)
                 return last[1]  # (only a whole tree is kept as the token's: unchanged is a full read)
             # an "unchanged" this read can't use (it sent no such token): read the whole tree
             return await self._compact_tree(timeout, since=False, budget_ms=budget_ms, budget_for=budget_for,
@@ -1372,7 +1410,7 @@ class Session:
                                                 budget_asked=budget_asked or budget_ms)
             if remember:
                 self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_asked or budget_ms,
-                                      took_ms)
+                                      took_ms, sent_for=budget_for if long else None)
             if tier != "full":
                 getattr(self.device, "log", lambda *a: None)(
                     f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")

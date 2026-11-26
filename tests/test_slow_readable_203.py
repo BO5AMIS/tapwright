@@ -450,13 +450,17 @@ def test_a_reconnect_keeps_the_block_and_the_mark(state):
     run(go)
 
 
-def test_a_long_read_answered_by_another_app_marks_that_one_and_blocks_the_first(state):
+def test_a_long_read_answered_by_another_app_says_nothing_about_either(state):
+    # (the phone, 2026-11-26: the rule was "the app the answer names is marked, the one it was sent for keeps its
+    # block"; a banner's SpringBoard tree then blocked the app for a minute and made SpringBoard "slow")
     async def go():
         stream = Stream()
         s, runner = shop(stream, ShopRunner(stream, answers={3000: CUT, 8000: {**WHOLE, "tree": _app(OTHER, "Other",
                                                                                                     [ITEM])}}))
         await look(s, stream)
-        assert s.budgets.slow(OTHER) and not s.budgets.slow(SHOP) and s.budgets.blocked(SHOP)
+        assert runner.budgets() == [3000, 8000]
+        assert not s.budgets.slow(OTHER) and not s.budgets.blocked(OTHER)
+        assert not s.budgets.slow(SHOP) and not s.budgets.blocked(SHOP) and s.budgets.misses(SHOP) == 1
     run(go)
 
 
@@ -890,7 +894,7 @@ def test_why_the_long_try_went_out_is_in_the_trace(state, monkeypatch, case, wan
             stream.idle(0.5)
             stream.now[0] += 40.0
             await s.refresh(timeout=60)
-            assert any("trace no frame kept before the read (no fresh frame; waited" in line for line in lines), lines
+            assert any("trace no frame kept before the read (no recent frame; waited" in line for line in lines), lines
         else:
             await look(s, stream)
         assert runner.budgets() == [3000, 8000]
@@ -913,7 +917,7 @@ def test_a_spinner_before_the_read_doesnt_stop_the_long_try(state):
 @pytest.mark.parametrize("before, planned", [
     ((WHITE, WHITE_SPOT), 8000),  # a spinner: the long budget
     ((WHITE_TOP, WHITE), 8000),  # a banner moving on (36 %): the long budget
-    ((WHITE, BLACK), 1500),  # something plays (100 %): 2.0.2's rules (its cut history: the short budget)
+    ("video", 1500),  # something plays (another picture every frame): 2.0.2's rules (its cut history: the short budget)
     (None, 8000),  # one frame only: too few to tell, the long budget
 ])
 def test_a_slow_apps_planned_read_is_given_up_only_when_its_two_newest_frames_say_something_plays(state, before,
@@ -928,8 +932,10 @@ def test_a_slow_apps_planned_read_is_given_up_only_when_its_two_newest_frames_sa
             stream.d.hub._recent.clear()  # (the history: one frame)
             stream.d.hub.publish(WHITE)
             stream.read_last = False
+        elif before == "video":
+            stream.video(1.5)  # (the check looks a second back)
         else:
-            stream.idle(0.5, before)
+            stream.idle(1.5, before)
         await s.refresh(timeout=60)
         assert runner.budgets()[2] == planned and s.budgets.slow(SHOP)
     run(go)
@@ -1241,3 +1247,108 @@ def test_with_the_wait_on_the_clock_the_reads_are_2_0_2s_given_the_same_wait(sta
         return run(go)
     with_wait = requests(8000)
     assert with_wait == requests(0) and not any("budget=8000" in p for _, p in with_wait)
+
+
+# ---- the phone, 2026-11-26 (build 08a2f5b) ----
+
+SPRINGBOARD = "com.apple.springboard"
+BANNER = {"token": "sb", "tree": _app(SPRINGBOARD, "SpringBoard", [{"t": "Other", "n": "NotificationShortLookView",
+                                                                     "l": "A message", "r": [8, 50, 414, 90]}]),
+          "tier": "full", "truncated": False}
+
+
+class QueueRunner(ShopRunner):
+    """A ShopRunner whose next tree answers are `queue`'s, in turn, before its budget's own."""
+
+    def __init__(self, stream: Stream, **kw):
+        super().__init__(stream, **kw)
+        self.queue: list[dict] = []
+
+    async def http(self, method, path, payload=None, timeout=30.0):
+        if self.queue and path.replace("/session/S", "").startswith("/wda/tw/tree"):
+            self.requests.append((method, path, payload))
+            self.long_at.append(self.stream.clock()) if "budget=8000" in path else None
+            self.stream.reading(0.13)
+            return {"value": dict(self.queue.pop(0))}
+        return await super().http(method, path, payload, timeout)
+
+
+def test_a_banner_that_answers_a_slow_apps_long_read_changes_nothing_about_the_app(state, monkeypatch):
+    # (the phone's log: "tree read whole with the long budget (8000 ms) in 0.1 s: com.apple.springboard reads slowly",
+    # six rereads while the banner showed, then "tree read cut short (root, budget 3000 ms)" and "no long try: <the app>
+    # is blocked for 49 s more", and every look for a minute answered "0 elements")
+    monkeypatch.setattr(session_module, "BANNER_POLL", 0.01)
+
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream, QueueRunner(stream))
+        await look(s, stream)  # 3000 cut, 8000 whole: the app reads slowly but whole
+        assert s.budgets.slow(SHOP)
+
+        async def banner(source):
+            return isinstance(source, str) and SPRINGBOARD in source[:600]
+        s._banner_over_an_app = banner
+        runner.queue = [dict(BANNER)] * 4  # the planned read and three rereads answered by the banner's SpringBoard tree
+        stream.now[0] += 2.0
+        stream.pending = None
+        stream.idle(1.5)
+        tree = await s.refresh(timeout=60)
+        assert runner.budgets()[2:] == [8000] * 5  # (each reread planned for the app, the last one answered by it)
+        assert tree.tier == "full" and [e.label for e in tree.items] == ["Deal of the day"]
+        assert s.budgets.slow(SHOP) and not s.budgets.blocked(SHOP) and s.budgets.misses(SHOP) == 1
+        assert not s.budgets.slow(SPRINGBOARD) and not s.budgets.blocked(SPRINGBOARD)
+    run(go)
+
+
+class LiveFeed(Stream):
+    """A playing feed on a stream that delivers: every BURST seconds three new pictures with one arrival time (MJPEG
+    chunks, as the phone's log shows: "gap 0 ms ... last frames at [-11, -11, -11, -10] ms"). Waiting for a frame costs
+    the clock the time to the next burst."""
+    BURST = 0.1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waited = 0.0  # the clock time spent waiting for frames
+
+        async def next_after(seq: int, timeout: float | None = None):
+            self.now[0] += self.BURST
+            self.waited += self.BURST
+            self.burst()
+            return self.d.hub.latest
+        self.d.hub.next_after = next_after
+
+    def burst(self) -> None:
+        for _ in range(3):
+            self.shown += 1
+            self.d.hub.publish(b"feed frame %d" % self.shown)
+
+    def play(self, seconds: float) -> None:
+        for _ in range(round(seconds / self.BURST)):
+            self.now[0] += self.BURST
+            self.burst()
+
+
+def _feed_minute(long_ms: int) -> tuple[float, list[int], float]:
+    """A minute of looks 3 s apart at a playing feed that never answers: (the clock's total, the budgets asked, the
+    clock time spent waiting for frames)."""
+    async def go():
+        stream = LiveFeed()
+        s, runner = shop(stream, ShopRunner(stream, answers={}, version=11), long_ms=long_ms)
+        began = stream.clock()
+        while stream.clock() < began + 60.0:
+            stream.play(3.0)
+            await s.refresh(timeout=60)
+        return stream.clock() - began, runner.budgets(), stream.waited
+    return run(go)
+
+
+def test_a_playing_feed_costs_2_0_2s_time_plus_one_frame_after_each_cut_normal_read(state):
+    # (the phone: on 08a2f5b seven looks at a playing feed took 1.6 to 8.2 s, against 0.1 to 0.8 s on 2.0.2; before every
+    # real read "waited 1539 ms for the stream: 12 new frame(s), none fresh enough to judge by")
+    total, budgets, waited = _feed_minute(8000)
+    total_202, budgets_202, waited_202 = _feed_minute(0)
+    assert budgets == budgets_202 and 8000 not in budgets and waited_202 == 0.0
+    normal = budgets.count(3000)  # (cut normal reads of an app that isn't blocked: one fresh frame each)
+    assert 1 <= normal <= 3
+    assert waited == pytest.approx(normal * LiveFeed.BURST)
+    assert total - total_202 == pytest.approx(normal * LiveFeed.BURST)

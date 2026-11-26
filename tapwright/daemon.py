@@ -549,6 +549,9 @@ SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off t
 WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take (2.0.3: unless a long read fits, below)
 STILL_AFTER_READ = 1.0  # (2.0.3) seconds a fresh frame is waited for after a cut read, to compare with the one before it
 PLAYS_SPAN = 1.0  # (2.0.3, review R203c H1) seconds apart the two pictures are that say whether a slow app's screen plays
+FRAME_RECENT = 0.5  # (2.0.3, the phone) seconds within which the newest frame arrived on a stream that is delivering
+#                     (its frames come in bursts with one arrival time: a gap of 0 ms, so a "fresh" test by the gap
+#                     made a live feed wait 1.5 s before every read)
 STREAM_WAIT = 1.5  # (2.0.3, re-check R203b N2) seconds a read that could lead to a long one waits for a stream that is
 #                    open but has sent no fresh frame (it closes 30 s after the last call, and opens again with it)
 
@@ -9567,13 +9570,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         gap, age = self.hub.gap(), self.hub.age()
         return bool(gap) and age is not None and age <= min(1.5 * gap, self.shot_fresh)  # type: ignore[operator]
 
+    def _frame_recent(self) -> bool:
+        """Did the newest frame arrive within FRAME_RECENT (the stream is delivering)?"""
+        age = self.hub.age()
+        return age is not None and age <= FRAME_RECENT
+
     async def _stream_ready(self) -> str:
         """(2.0.3, re-check R203b N2) Before a read that could lead to a long one: when the stream is open (an agent's
-        call or a viewer holds it, or the video feeds the hub) but its newest frame isn't fresh (it closes 30 s after
-        the last call and is opening again), wait up to STREAM_WAIT for frames to judge stillness by. "" when the newest
-        frame is fresh or became so; else what was found, for the trace. A wait that got nothing isn't made again until
-        a frame comes (a stream that can't open costs it once)."""
-        if self._frame_fresh():
+        call or a viewer holds it, or the video feeds the hub) but has delivered no frame within FRAME_RECENT (it closes
+        30 s after the last call and is opening again), wait up to STREAM_WAIT for one. Never while frames arrive (the
+        phone, 2026-11-26: a feed's looks took 1.6-8.2 s). "" when a frame is there; else what was found, for the trace.
+        A wait that got nothing isn't made again until a frame comes (a stream that can't open costs it once)."""
+        if self._frame_recent():
             return ""
         latest = self.hub.latest
         feeding = getattr(getattr(self, "_feeder", None), "feeding", False)
@@ -9583,15 +9591,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if seq == self._stream_wait_failed:
             return "the stream has sent nothing since the last wait for it"
         loop = asyncio.get_running_loop()
-        began, got = loop.time(), 0
-        while not (got >= 2 and self._frame_fresh()):
-            left = STREAM_WAIT - (loop.time() - began)
-            frame = await self.hub.next_after(seq, left) if left > 0 else None
-            if frame is None:
-                self._stream_wait_failed = seq
-                return (f"waited {round((loop.time() - began) * 1000)} ms for the stream: {got} new frame(s), "
-                        f"none fresh enough to judge by")
-            seq, got = frame.seq, got + 1
+        began = loop.time()
+        frame = await self.hub.next_after(seq, STREAM_WAIT)
+        if frame is None:
+            self._stream_wait_failed = seq
+            return f"waited {round((loop.time() - began) * 1000)} ms for the stream: no frame"
         return ""
 
     def _change(self, a: Frame, b: Frame) -> tuple[float, str]:
@@ -9613,9 +9617,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             waited = await self._stream_ready()
             latest = self.hub.latest
-            if latest is None or not self._frame_fresh():
+            if latest is None or not self._frame_recent():
                 if session_module.TRACE:
-                    self.log(f"trace no frame kept before the read (no fresh frame{'; ' + waited if waited else ''})"
+                    self.log(f"trace no frame kept before the read (no recent frame{'; ' + waited if waited else ''})"
                              f"{self._why_not_still()}")
                 return None, False
             return StillMark(latest), self._plays() if check else False
@@ -9635,8 +9639,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return False
         at, newest = frames[-1]
         picture = getattr(newest, "picture", None)
-        older = next((f for t, f in reversed(frames) if t <= at - PLAYS_SPAN and
-                      (picture is None or getattr(f, "picture", None) is not picture)), None)
+        older = next((f for t, f in reversed(frames) if at - PLAYS_SPAN - 2.0 <= t <= at - PLAYS_SPAN and
+                      (picture is None or getattr(f, "picture", None) is not picture)), None)  # (not from a stream gone
+        #                                                                                       quiet: a stale picture)
         if older is None:
             return False
         share, said = self._change(older, newest)
