@@ -548,6 +548,7 @@ SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the direction
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
 WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take (2.0.3: unless a long read fits, below)
 STILL_AFTER_READ = 1.0  # (2.0.3) seconds a fresh frame is waited for after a cut read, to compare with the one before it
+PLAYS_NOW = 0.3  # (2.0.3, review R203d M1) seconds of the newest frames that must show a change for a screen to play now
 PLAYS_SPAN = 1.0  # (2.0.3, review R203c H1) seconds apart the two pictures are that say whether a slow app's screen plays
 FRAME_RECENT = 0.5  # (2.0.3, the phone) seconds within which the newest frame arrived on a stream that is delivering
 #                     (its frames come in bursts with one arrival time: a gap of 0 ms, so a "fresh" test by the gap
@@ -9629,15 +9630,22 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return StillMark(None), True
 
     def _plays(self) -> bool:
-        """(2.0.3) Does a slow app's screen play, before its planned long read? The newest frame against the newest one
-        at least PLAYS_SPAN older that is another picture (the video feeder publishes one picture again when the
-        source has no new one: review R203c H1, 20 % of ticks at 24 fps), changed inside a box of more than STILL_BOX.
-        Two neighbouring frames of a video differ far less than frames a second apart. No such older frame: it doesn't
-        (the long budget; the growing block bounds a mistake)."""
+        """(2.0.3) Does a slow app's screen play, before its planned long read? Both: the newest frame against the newest
+        one at least PLAYS_SPAN older that is another picture (the video feeder publishes one picture again when the
+        source has no new one: review R203c H1, 20 % of ticks at 24 fps) changed inside a box of more than STILL_BOX
+        (two neighbouring frames of a video differ far less than frames a second apart); and the picture is still
+        changing now: the newest frame isn't alike the oldest of the last PLAYS_NOW seconds (review R203d M1: a screen
+        an action changed a second ago and that stands now, as the action's settle saw, is no video). The frames of
+        that window are picked by their arrival on the hub's clock and ordered by their sequence numbers, so a burst
+        of frames with one arrival time (MJPEG) counts as that many frames, in order. Fewer than two frames in it, or
+        no such older frame: it doesn't play (the long budget; the growing block bounds a mistake)."""
         frames = self.hub.recent()
         if not frames:
             return False
         at, newest = frames[-1]
+        now = [f for t, f in frames if t >= at - PLAYS_NOW]  # (in sequence order: the hub keeps them so)
+        if len(now) < 2 or self._alike(now[0], newest):
+            return False
         picture = getattr(newest, "picture", None)
         older = next((f for t, f in reversed(frames) if at - PLAYS_SPAN - 2.0 <= t <= at - PLAYS_SPAN and
                       (picture is None or getattr(f, "picture", None) is not picture)), None)  # (not from a stream gone

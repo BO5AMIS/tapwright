@@ -1151,10 +1151,11 @@ class Session:
             tier, why, compact = self.last_tier, self.last_why, self.last_compact
             began_long = time.monotonic()
             longer, _ = await self._long_read(timeout - (time.monotonic() - began), app, normal)
-            if longer is not None and _TIER_RANK.get(self.last_tier, 0) > _TIER_RANK.get(tier, 0):
+            # (review R203d L1) another app's tree (a banner's) is no answer for this app's read: its own cut one stands
+            if (longer is not None and _root_bundle(longer) in (None, app)
+                    and _TIER_RANK.get(self.last_tier, 0) > _TIER_RANK.get(tier, 0)):
                 source, named = longer, _root_bundle(longer)
-                if named in (None, app):  # (another app's tree, a banner's: no note, nothing slow about it)
-                    self._note_long(source, began_long)
+                self._note_long(source, began_long)
             else:
                 # no answer in its time, refused, unreadable, or no more than the normal read gave (CodeRabbit, PR #30:
                 # a long root after a shallow normal read lost the elements a wait_for had found): the normal read's

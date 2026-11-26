@@ -1352,3 +1352,74 @@ def test_a_playing_feed_costs_2_0_2s_time_plus_one_frame_after_each_cut_normal_r
     assert 1 <= normal <= 3
     assert waited == pytest.approx(normal * LiveFeed.BURST)
     assert total - total_202 == pytest.approx(normal * LiveFeed.BURST)
+
+
+# ---- the last review (R203d) ----
+
+def _screen_change(stream: Stream, still_after: float) -> None:
+    """1 s of the old screen (a band at the top), a push of 0.4 s, then `still_after` seconds of the new screen (a band
+    at the bottom): the picture changes all over, then stands, as an action's settle sees it end."""
+    stream.picture = stream.after = _jpeg_of(_band(0))
+    stream.idle(1.0)
+    stream.idle(0.4, pictures=tuple(_jpeg_of(_band(y)) for y in (100, 200, 300, 400)))
+    stream.picture = stream.after = _jpeg_of(_band(500))
+    stream.idle(still_after)
+    stream.pending = None
+
+
+@pytest.mark.parametrize("still_after, planned", [
+    (0.3, 8000),  # (the reviewer's probe: [3000, 8000, 3000, 8000] on 3866aa1)
+    (2.0, 8000),  # it stands for 2 s
+    (0.2, 3000),  # it moved 0.2 s ago: still changing within PLAYS_NOW (0.3 s), so 2.0.2's rules for this read
+])
+def test_a_slow_apps_screen_that_changed_and_stands_gets_its_long_budget(state, still_after, planned):
+    # (M1: _plays compared only with a picture a second older, so every screen an action had just changed in a slow
+    # app was taken for a video: 3 s cut, a fresh-frame wait, then 8 s, instead of one planned 8 s read)
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream)
+        stream.picture = stream.after = _jpeg_of(_band(0))
+        await look(s, stream)  # 3000 cut, 8000 whole: readable
+        stream.now[0] += 3.0
+        _screen_change(stream, still_after)
+        await s.refresh(timeout=60)
+        assert runner.budgets()[2] == planned and s.budgets.slow(SHOP)
+    run(go)
+
+
+def test_a_playing_video_in_a_slow_app_gets_no_long_budget_planned(state, monkeypatch):
+    # (both hold: the picture a second ago differs by more than the box, as on the phone (83 %), and it is still
+    # changing now)
+    monkeypatch.setattr(session_module, "TRACE", True)
+
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream)
+        lines: list[str] = []
+        stream.d.log = lines.append
+        await look(s, stream)
+        stream.now[0] += 3.0
+        for k in range(36):  # 1.5 s of a 24 fps video: a 300 px band moving 15 px a frame
+            stream.now[0] += 1 / 24
+            stream.d.hub.publish(_jpeg_of(_band(15 * k)))
+        stream.read_last, stream.pending = False, None
+        await s.refresh(timeout=60)
+        assert runner.budgets()[2] != 8000 and s.budgets.slow(SHOP)
+        assert any("trace no long budget planned: the picture changed in the 1 s before the read" in line
+                   for line in lines), lines
+    run(go)
+
+
+def test_a_long_try_answered_by_a_banner_leaves_the_apps_own_cut_answer(state):
+    # (L1: the banner's whole SpringBoard tree ranked above the app's partial one and replaced it in the look)
+    shallow = {**SHALLOW, "token": "c"}
+
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream, ShopRunner(stream, answers={3000: shallow, 8000: BANNER}))
+        tree = await look(s, stream)
+        assert runner.budgets() == [3000, 8000]
+        assert tree.tier == "shallow" and [e.label for e in tree.items] == ["Deal of the day"]
+        assert s.budget_app == SHOP and s.last_tier == "shallow"
+        assert not s.budgets.blocked(SHOP) and s.budgets.misses(SHOP) == 1 and not s.budgets.slow(SPRINGBOARD)
+    run(go)
