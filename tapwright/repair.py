@@ -126,7 +126,8 @@ def decide_wda(f: WdaFacts, now: datetime) -> WdaDecision:
         return WdaDecision("reinstall", "WebDriverAgent isn't on the phone")
     if f.wanted_build and f.installed_build != f.wanted_build:
         was = f"build {f.installed_build}" if f.installed_build else "the build an older Tapwright installed"
-        return WdaDecision("reinstall", f"the phone has {was}; this Tapwright uses {f.wanted_build} (a newer runner build)")
+        # (CodeRabbit, PR #26) only that the builds differ is known: a later Tapwright's runner is not older than this one's
+        return WdaDecision("reinstall", f"the phone has {was}; this Tapwright uses build {f.wanted_build}")
     signed = _aware(f.installed_expiry) if f.installed_expiry else f.profile.when  # setup signs with the profile it holds
     if signed - now > timedelta(days=REINSTALL_DAYS):
         return WdaDecision("ok", f"signed until {signed:%Y-%m-%d}")

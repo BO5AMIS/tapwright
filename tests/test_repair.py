@@ -166,3 +166,6 @@ def test_a_runner_from_an_older_tapwright_is_installed_again():
     assert repair.decide_wda(facts(installed_build="16.15.3", wanted_build="fork-tw-16.15.3.1"), NOW).verdict == "reinstall"
     same = repair.decide_wda(facts(installed_build="fork-tw-16.15.3.1", wanted_build="fork-tw-16.15.3.1"), NOW)
     assert same.verdict == "ok"
+    # (CodeRabbit, PR #26) a phone with a later Tapwright's runner is told of another build, not a newer one
+    later = repair.decide_wda(facts(installed_build="fork-tw-16.15.3.15", wanted_build="fork-tw-16.15.3.14"), NOW)
+    assert later.verdict == "reinstall" and "newer" not in later.reason and "fork-tw-16.15.3.14" in later.reason
