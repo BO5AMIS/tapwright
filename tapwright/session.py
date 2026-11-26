@@ -184,7 +184,7 @@ def _env_ms_or_off(name: str, default: int) -> int:
     return _env_ms(name, default)
 
 
-# (2.0.3) ms a read is given once more when the normal budget cut it on a screen that stands still. A shopping app's home
+# (2.0.3) ms a read is given once more when the normal budget cut it, unless the picture plays. A shopping app's home
 # screen (900-1,000 elements, phone 2026-11-26) reads whole every time in 3.5-7.3 s cold by XCTest's snapshot (0.4-0.7 s
 # warm), and never within 3 s: on the budgets alone it answered "0 elements" for as long as the agent stayed. 0 (or a
 # value not above the normal budget) turns it off.
@@ -287,13 +287,14 @@ class ReadBudget:
     that reads whole (review R200v H1). When such a read is cut short too (the feed showing a photo, a paused video:
     still, and it doesn't answer), stillness gives the normal budget again only after BUDGET_MEMORY seconds: on the phone
     every read of that screen cost the normal budget, and none was left unasked (lead, 2026-11-26).
-    (2.0.3) The long budget, for a screen that is only slow: a normal-budget read cut short on a still screen is asked
-    once more in the same read with `long_ms` (the caller's long_try). An app whose long read came back whole is slow but
-    readable: its reads of a still screen are planned with the long budget (never the short one, never unasked; the
-    caller's `long_ok` says the screen is still and its time covers the read). Each long read blocks the app's next one
+    (2.0.3) The long budget, for a screen that is only slow: a normal-budget read cut short is asked once more in the
+    same read with `long_ms` (the caller's long_try; the daemon stops it only when the picture changed across the read
+    by more than STILL_BOX). An app whose long read came back whole is slow but readable: its reads are planned with the
+    long budget (never the short one, never unasked; the caller's `long_ok` says nothing plays on the screen and its
+    time covers the read). Each long read blocks the app's next one
     from the moment it is sent (long_sent): only a whole answer lifts the block, so a long read that is cut, raises, is
-    refused, cancelled or never answered keeps it, for `long_memory` seconds (`long_retry` for an app that read whole
-    with the long budget before: review R203 M2). Neither the block nor the slow-but-readable mark is a fact about a
+    refused, cancelled or never answered keeps it, for `long_memory` seconds, doubled for each such read in a row up to
+    `long_memory_max` (`long_retry` for an app that read whole with the long budget before: review R203 M2). Neither the block nor the slow-but-readable mark is a fact about a
     runner session: forget() keeps both (review R203 H2)."""
 
     def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
@@ -339,12 +340,12 @@ class ReadBudget:
         return self.clock() - at < self.block_span(bundle)
 
     def slow(self, bundle: str | None) -> bool:
-        """Is `bundle` slow but readable now: its still screens' reads are planned with the long budget?"""
+        """Is `bundle` slow but readable now: its reads are planned with the long budget (unless something plays)?"""
         return self.long_on and bundle is not None and bundle in self._readable and not self.blocked(bundle)
 
     def long_try(self, bundle: str | None) -> bool:
         """May a read of `bundle` that the normal budget cut short be asked once more with the long budget (the caller
-        asks only for a screen that stood still across that read)? Not while it is blocked."""
+        then asks the picture across that read: Daemon._still_across)? Not while it is blocked."""
         return bundle is not None and self.long_on and not self.blocked(bundle)
 
     def blocked_for(self, bundle: str | None) -> float:
@@ -387,7 +388,7 @@ class ReadBudget:
     def budget(self, bundle: str | None, still: Callable[[], bool] | None = None, long_ok: bool = True) -> int:
         """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget). `still` is asked only
         when the short budget would apply: True gives the normal one. A slow but readable app gets the long one when
-        `long_ok` (a still screen, and time for it)."""
+        `long_ok` (nothing plays on the screen, and time for it)."""
         if still is not None:
             # (CodeRabbit, PR #26) a read's own plan: a mark a read that raised left (answered() never took it) isn't
             # this read's. (`short()` asks without `still` and leaves the planned read's mark alone)
@@ -1072,7 +1073,7 @@ class Session:
             if source is not None:
                 return source
         if budget == long_ms and budget > normal:
-            # a slow but readable app on a still screen: the long budget is this read's own
+            # a slow but readable app, nothing playing on its screen: the long budget is this read's own
             source, silent = await self._long_read(timeout, bundle, normal)
             if source is not None:
                 self._note_long(source, began, tell=False)  # (the agent was told when the try made the first answer)

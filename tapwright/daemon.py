@@ -546,7 +546,7 @@ SCROLL_CAP = 12.0  # ... or after this many seconds (a spinner or a bounce can k
 SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the directions each `to` can mean; the first is the default
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
 WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take (2.0.3: unless a long read fits, below)
-STILL_AFTER_READ = 1.0  # (2.0.3) seconds a fresh frame is waited for after a read, to say the screen stood still across it
+STILL_AFTER_READ = 1.0  # (2.0.3) seconds a fresh frame is waited for after a cut read, to compare with the one before it
 STREAM_WAIT = 1.5  # (2.0.3, re-check R203b N2) seconds a read that could lead to a long one waits for a stream that is
 #                    open but has sent no fresh frame (it closes 30 s after the last call, and opens again with it)
 
