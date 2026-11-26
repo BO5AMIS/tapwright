@@ -655,3 +655,25 @@ def test_an_arrival_that_couldnt_be_read_is_no_failed_road():
     assert failed == []
     asyncio.run(t.judge(hop, trip.Seen(None, False, ui.Tree([], tier="full")), 0.0))
     assert len(failed) == 1  # (a whole screen that isn't the road's end: counted, as before)
+
+
+# ---- runner version 10: the lean direct read (lead, phone 2026-11-26) ----
+
+def test_a_version_10_runner_is_always_read_the_lean_direct_way(state, monkeypatch):
+    runner = V9Runner(version=10)
+    runner.trees = [{"token": "r1", "tree": _app(), "tier": "root", "truncated": True}]
+    s = Session(runner)
+    s.read_app = ("TikTok", TIKTOK)
+    asyncio.run(s.refresh())  # the normal budget
+    s.screen_still = lambda: False
+    asyncio.run(s.refresh())  # the short one
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=direct&attrs=lean",
+                                            "/wda/tw/tree?budget=1500&path=direct&attrs=lean"]
+
+
+def test_the_lean_read_can_be_turned_off(state, monkeypatch):
+    monkeypatch.setattr(session_module, "TREE_ATTRS", "std")
+    runner = V9Runner(version=10)
+    s = Session(runner)
+    asyncio.run(s.refresh())
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=xctest"]

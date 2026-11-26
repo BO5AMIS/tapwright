@@ -161,6 +161,7 @@ BUDGET_MEMORY = 20.0  # seconds a cut-short read keeps its app on the short budg
 # by `direct`: a screen that never answers costs 3-4 s once, then stays bounded. TAPWRIGHT_TREE_PATH=direct|xctest
 # forces one (for measuring).
 TREE_PATH_FORCED = os.environ.get("TAPWRIGHT_TREE_PATH", "").strip().lower()
+TREE_ATTRS = os.environ.get("TAPWRIGHT_TREE_ATTRS", "lean").strip().lower()  # `std` turns the lean read off (version 10)
 
 
 def tree_path(budget_ms: int, normal_ms: int, forced: str | None = None) -> str:
@@ -764,8 +765,17 @@ class Session:
         `remember` False: the answer feeds no budget memory (Notification Center's read). `read_path`: the runner's way
         of reading (`direct` or `xctest`, tree_path), sent with a budget."""
         last = self.last_compact if since else None
+        # (route version 10) the direct read asking only for the attributes the list uses is the fastest way on every
+        # screen measured (lead, phone, 2026-11-26: Settings > General 543 ms against 942 by xctest and 1269 by direct
+        # with the standard set; Settings root 168 / 315 / 184; home screen 206 / 416 / 273), gives the same nodes (the
+        # same token) and keeps to its budget. So with a version 10 runner every budgeted read goes that way.
+        lean = (budget_ms is not None and self.tw_version >= 10 and TREE_ATTRS != "std"
+                and TREE_PATH_FORCED not in ("direct", "xctest"))
+        if lean:
+            read_path = "direct"
         query = [*([f"budget={budget_ms}"] if budget_ms is not None else []),
                  *([f"path={read_path}"] if budget_ms is not None and read_path else []),
+                 *(["attrs=lean"] if lean else []),
                  *([f"since={last[0]}"] if last else [])]
         path = TREE_PATH + ("?" + "&".join(query) if query else "")
         try:
