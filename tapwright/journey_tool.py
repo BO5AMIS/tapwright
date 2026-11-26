@@ -64,7 +64,8 @@ class JourneyTools:
             entered = jr.see(text)  # (its steps counted themselves)
         else:
             entered = jr.note_call(name, args, text, seconds, None)
-        if entered and await self._journey_front_ok(jr, scope, text):  # for naming drift across the journey's screens (§17.3)
+        if entered and self._tier_now() == "full" and await self._journey_front_ok(jr, scope, text):
+            # for naming drift across the journey's screens (§17.3); never a list the runner cut short (R200v M1)
             uxcheck.note_screen(client_id, self.control.client(client_id).items)
         if outer and name in _d().JOURNEY_FRAMES and jr.current is not None and (entered or name != "wait"):
             await self._journey_frame(jr, name, text, scope)
@@ -156,9 +157,8 @@ class JourneyTools:
                         source = await d.jpeg_of(frame)
                     except d.PictureGone:
                         source = None
-                    turn = getattr(self.session, "turn", 0)
-                    if source is not None and turn and getattr(frame, "picture", None) is None:
-                        source = await self.turned(frame.seq, source, turn)
+                    if source is not None and getattr(frame, "picture", None) is None:
+                        source = await self._upright(frame.seq, source)  # (None while the side is unknown: the phone's)
                 if source is None:
                     source = await self._read(self.session.screenshot_png)
                 # Dedicated: the frame can be the next one the stream sends; the app is read again after it, and the
@@ -461,16 +461,21 @@ class JourneyTools:
         line = f"Stress: {label}"
         if survives:
             ok, said = self._survives(client_id, jr, survives, looked["text"])
-            line += f"; it {'survived' if ok else 'didn' + chr(39) + 't survive'}: {said}"
+            if ok is None:  # (R200v M1) the look after the stress was cut short: neither is known
+                line += f"; whether it survived couldn't be checked: {said}"
+            else:
+                line += f"; it {'survived' if ok else 'didn' + chr(39) + 't survive'}: {said}"
         else:
             line += "."
         jr.stress.append(line)
         await self._journey_frame(jr, "look", looked["text"], scope)
         return {**looked, "text": "\n".join([line, looked["text"]])}
 
-    def _survives(self, client_id: str, jr: journey.Journey, survives: dict, text: str) -> tuple[bool, str]:
+    def _survives(self, client_id: str, jr: journey.Journey, survives: dict, text: str) -> tuple[bool | None, str]:
         """Is what had to survive still there? `text`: on the glass (the field's value counts); `goal_step`: the screen
-        now is that screen of the journey."""
+        now is that screen of the journey. None: the look's tree was cut short, so what it lacks proves nothing (R200v
+        M1)."""
+        cut = self._tier_now() != "full"
         if "text" in survives:
             want = survives["text"]
             items = self.control.client(client_id).items
@@ -480,11 +485,17 @@ class JourneyTools:
             except Refused as e:
                 hit = None if e.code == "not_found" else True  # (several matches: it is there)
             quoted = json.dumps(want, ensure_ascii=False)
+            if hit is None and cut:
+                return None, (f"the screen's elements weren't read within the time given, so text {quoted} couldn't "
+                              "be looked for.")
             if hit is None:
                 return False, f"text {quoted} is no longer on screen."
             where = "in the field" if isinstance(hit, ui.Element) and hit.role == "input" else "on screen"
             return True, f"text {quoted} is still {where}."
         step = next(s for s in jr.screens if s.index == survives["goal_step"])
+        if cut:
+            return None, ("the screen's elements weren't read within the time given, so it couldn't be told from "
+                          f'screen {step.index} ("{step.title}").')
         if journey.alike(step.signature, journey.signature(text)) >= journey.NEW_SCREEN:
             return True, f'screen {step.index} ("{step.title}") is showing again.'
         return False, f'the screen isn\'t screen {step.index} ("{step.title}") any more.'

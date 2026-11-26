@@ -29,19 +29,57 @@ Legacy --apps, --dedicated, --policy and --no-policy options do not restrict dev
 Do not claim that software can bypass a genuine XCTest passcode, trust, signing or biometric requirement. Report the actual platform gate.
 
 
+## Tapwright 2.0: touches, reads and screens that don't answer
+
+Tapwright only. Everything here is Tapwright 2.0; `--no-hints` and `--lazy-tools` still list 1.8.5's tools (no `pinch`, no `press_button lock`), and the daemon takes both from any caller.
+
+### Touches from the computer
+
+Taps, long presses, swipes, scrolls, drags, `pinch` and the buttons go from the computer to the phone's touchscreen through CoreDevice HID ("hands"), not through the runner. A tap takes about 50 ms, works while an app plays video, and works in landscape. Free swipes move as a finger does (a short rest, an eased start and end, a slight curve); a scroll keeps its shape, so a list stops where the finger does.
+
+- It needs iOS 18 or later (proven on iOS 26) and pymobiledevice3 11.63 or later. On older iOS, and on iOS 27 until the display stream lands, touches go through the runner as before. `pinch` and `press_button lock` have no runner path: they answer `unsupported`, with nothing touched.
+- `TAPWRIGHT_HANDS=runner` sends every touch through the runner. `TAPWRIGHT_HANDS_LANDSCAPE=0` leaves landscape to the runner. `TAPWRIGHT_HUMAN=0` keeps swipes straight.
+- A touch that may have been sent is never sent again another way. If the link drops in the middle of a gesture the call answers `timeout` ("the action may have happened: look before you retry"); look first. For 5 s after a release that could not be sent, nothing is touched through the runner either.
+- `back`, `swipe`, taps and scrolls are quick and their answers wait for the screen to settle, so no `wait` after them. After a touch from the computer `No visible change.` is only said once the screen has stayed as it was for 0.8 s.
+
+### Reads that are bounded
+
+Every accessibility read is bounded (runner route version 9 or later; `tapwright doctor --fix` installs the current runner, route version 15). A tree read answers within a budget: 3 s (`TAPWRIGHT_TREE_BUDGET`, in ms), with what it could read. Any other accessibility read stops after 3 s (`TAPWRIGHT_AX_TIMEOUT`, in seconds). An app whose read was cut short gets a 1.5 s budget for the next 60 s; a screen that stands still (a profile, a photo post) gets the normal budget again, once for each 60 s; a read that comes back whole after more than 1.5 s gives the normal budget back at once. On a screen that doesn't answer and keeps moving, the tree is not asked again within 8 s of a real read: the app in front is checked instead. `TAPWRIGHT_TREE_PATH=direct|xctest` forces the runner's way of reading, `TAPWRIGHT_TREE_ATTRS=std` turns off its lean attribute set (both for measuring). With a runner older than 9 nothing is bounded, as in 1.10.0.
+
+### A screen whose elements weren't read
+
+A video feed (TikTok's For You), a game, a canvas or some web views may not answer in time. The look header then says `Elements: none (the screen's elements weren't read within the time given)` or `Elements: partly read (…)`, lists the elements it did get, and adds the text in the picture as `o1`, `o2`… refs (`ocr: false` leaves them out), with the picture. An `o` ref lasts until your next action, or until someone else (a person, another agent) uses the phone (then it answers `stale`: look again): look again for fresh ones.
+
+What to do there:
+- Touch an `o` ref, a point `{x, y}` or a `{text}`. `tap` and `long_press` aimed by `{text}` find it in the picture's text and touch the centre of the line that shows it. Several lines show it: `ambiguous`, listing them as `o` refs, or pick one with `index`. The answer says where the text was found.
+- `swipe`, `scroll` (by direction, or at a point), `press_button` and `pinch` work as on any screen. `type_text` without a target types into whatever has the keyboard's focus: tap the field at its point first. It does not clear the field first, and a saved account's value is not typed there.
+- `wait_for` a text also looks for it in the picture's text. Every action answers with what it did, `Elements: none…`, and the picture after it unless `screenshot: false`.
+- Don't `audit` or `ux_check` there: both answer `unsupported`, because a report from part of a screen would be false. Pause what plays, or go to a still screen, then run them. `compare_screen` won't ignore elements it couldn't read.
+- A target by id, label or `e` ref (and a `{text}` target of any call but `tap` and `long_press`) answers `not_found` with the way to go on. A condition that no read can decide (`wait_for` an id or label, an `expect`, a step's `if`) answers `timeout` saying `this screen's elements couldn't be read`: never `Done` and never a failed check. Look at the picture and decide yourself.
+- Nothing is saved from such a screen: no place, road or route, no "no way back" in `explore`, no failed route or repair after a replay stops there.
+- `not_answering` is now only for an app that blocks even these bounded reads: `close_app` it, then `open_app` it.
+- Actions on such a screen settle within 0.5 s (1 s while that app's tree reads whole, 2 s after a launch) instead of waiting for a screen that never stands still.
+
+### Other 2.0 changes in an answer
+
+- USB requests to the runner go through usbmuxd directly, not the tunnel (`TAPWRIGHT_DIRECT=0` uses the tunnel).
+- Text in the picture is read on the phone by Apple's Vision (faster than this computer); RapidOCR here (`pip install "tapwright[ocr]"`) is the fallback. `TAPWRIGHT_RUNNER_OCR=0` reads only here; `TAPWRIGHT_OCR_LANGUAGES` (for example `en-US,ar-SA`) sets the languages the phone reads.
+- `apps` keeps its list of the installed apps (it is given at once, and read again behind the call when it is old); `close_app` answers without waiting for the runner to stop the app. `TAPWRIGHT_TRACE=1` (for `tapwright serve`) times the calls to the phone's services.
+
+
 ## Tools
 
 ### look
 
 Read the current screen: one line per element (ref, role, text, id, position and size in points, actions), plus a screenshot. `screenshot` (default true), `width` (160-1320 px, default 600) and `labels` (draw each actionable element's box and ref) shape the picture. Answers the full list, starting with a header. Long text is cut; `wait_for` with the text checks all of it.
-Tapwright: reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note.
+Tapwright: reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note. A screen that doesn't answer accessibility reads in time (a video feed, a game) says `Elements: none` or `Elements: partly read` in the header and lists the text in its picture that way by itself (`ocr: false` leaves it out); touch an `o` ref, a point or a `{text}` there, and actions on it answer with the picture after them. An `o` ref ends with your next action, or with anyone else's (`stale`). An id, label or `e` ref is `not_found` there, and `audit` and `ux_check` are `unsupported`: see "A screen whose elements weren't read" above.
 
 Arguments: `screenshot`, `width`, `labels`, `ocr`.
 
 ### tap
 
 Tap an element, as a finger would. `target` is one of `ref`, `id`, `label`, `text` (with `index` to pick among several) or `x` and `y`. `force: true` skips the off-screen, covered, under-the-tab-bar and behind-an-alert checks (never disabled). `look: false` answers only the first line. `screenshot: true` adds a picture. Answers what was tapped and what changed.
-Tapwright: makes a real touch at the element's centre, or at the centre of its visible part when a bar covers the centre.
+Tapwright: makes a real touch at the element's centre, or at the centre of its visible part when a bar covers the centre. Where the screen's elements weren't read, a `{text}` target is found in the text read from the picture and the touch goes to the centre of that line (`ambiguous` with `o` refs when several lines show it, or give `index`); the answer says so. The same holds for `long_press`.
 
 Arguments: `target`, `index`, `force`, `look`, `screenshot`, `dry_run`, `brief`.
 
@@ -55,7 +93,7 @@ Arguments: `target`, `index`, `seconds`, `force`, `look`, `screenshot`, `dry_run
 ### type_text
 
 Type `text` into an input. `target` picks the input; without it, the focused input, else the only one, else `ambiguous`; with no input at all, `not_found`. `replace` (default true) clears the field first; false appends. An empty `text` with `replace` only clears the field (with `submit: true` it clears the field, then presses the submit key; with `replace: false` and `submit: true`, the submit key alone; empty with `replace: false` and no `submit` is `bad_params`). `submit: true` then presses the keyboard's submit key. `force` is as for `tap`. Answers `Typed into <element>. Value is now "…"` and what changed.
-Tapwright: taps the field and waits until it has focus and the keyboard is up, then types on the keyboard. It can't see which field is focused, so without a target it uses the only input on screen. A secure field's value is reported as hidden.
+Tapwright: taps the field and waits until it has focus and the keyboard is up, then types on the keyboard. It can't see which field is focused, so without a target it uses the only input on screen. A secure field's value is reported as hidden. Where the screen's elements weren't read (2.0), without a target it types into whatever has the keyboard's focus (tap the field's point first), does not clear it, and types no saved account's value.
 
 Arguments: `text`, `target`, `index`, `replace`, `submit`, `force`, `as`, `look`, `screenshot`, `dry_run`, `brief`.
 
@@ -96,7 +134,7 @@ Arguments: `seconds`, `look`, `screenshot`, `brief`.
 ### wait_for
 
 Wait until something shows on screen: one of `text`, `id` or `label`; with `gone: true`, until it's gone (a spinner). `timeout` is 0.5-30 s (default 10). Returns as soon as it's true, with `Done after 1.2 s.` and what changed, or `timeout`.
-Tapwright: polls the screen, so it is slower; `network_idle` is `unsupported`.
+Tapwright: polls the screen, so it is slower; `network_idle` is `unsupported`. Where the screen's elements weren't read (2.0), a `text` is also looked for in the text read from the picture; an `id` or `label` can't be checked there, so the call ends `timeout` ("this screen's elements couldn't be read"), never `Done`.
 
 Arguments: `text`, `id`, `label`, `gone`, `timeout`, `network_idle`, `look`, `screenshot`, `brief`.
 
@@ -130,13 +168,14 @@ Tapwright 1.8: `repair: "suggest"` runs the script as a replay does and answers 
 ### audit
 
 Checks the screen in front for accessibility problems: `contrast`, `hit_region`, `description`, `dynamic_type`, `clipped_text`, `trait`, `element_detection`, `overlap`, `duplicate_id`; `types` narrows it. Answers one numbered issue per line with its fix, then which types were checked. It costs no image: run it on each new screen.
-Tapwright: runs XCTest's own audit and adds `duplicate_id`.
+Tapwright: runs XCTest's own audit and adds `duplicate_id`. Where the screen's elements weren't read in time (2.0), it answers `unsupported`: pause what plays or go to a still screen, then audit again.
 
 Arguments: `types`.
 
 ### ux_check
 
 Check the screen against usability basics: competing choices, one clear main action, thumb reach, icon-only buttons, cut-off text, contrast and target sizes, naming that changes between screens, and error or empty states that don't say what to do. Facts come first, each naming its element and basis; add your own judgment from the screenshot and say it is judgment. The user's house rules, when given, are checked too.
+Tapwright 2.0: on a screen whose elements weren't read in time it answers `unsupported`, as `audit` does.
 
 Arguments: .
 
@@ -221,6 +260,7 @@ Arguments: `mode`.
 ### close_app
 
 Quit an app, so it starts fresh next time. `app` is a bundle id or name. Use it with `open_app` to start a clean run.
+Tapwright 2.0: answers without waiting for the runner to stop the app (an `open_app` waits for it), and the next call looks for no crash of the app you closed.
 
 Arguments: `app`.
 
@@ -232,7 +272,8 @@ Arguments: `action`, `name`, `dry_run`, `look`, `screenshot`, `brief`.
 
 ### press_button
 
-Press a hardware button: `home`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps running; `open_app` brings it back.
+Press a hardware button: `home`, `lock`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps running; `open_app` brings it back. `lock` locks the phone (CoreDevice HID only: `unsupported` without it); `unlock` opens it again.
+Tapwright 2.0: with CoreDevice HID (iOS 18 to 26) every button is pressed from the computer, in about 50 ms; without it `home`, `volumeUp` and `volumeDown` go through the runner as before. `--no-hints` and `--lazy-tools` list 1.8.5's names (no `lock`); the daemon takes it from any caller.
 Tapwright: iOS reports the phone as locked while Notification Center is pulled down over an unlocked phone; `home` then closes it, only when a fresh read proves that sheet (its header and its Clear button on the screen, on one row, the header not a notification's text, and an enabled flashlight). Otherwise nothing is pressed (`locked`: "the phone reads as locked (or Notification Center is open where Tapwright can't prove it)"). A lit lock screen showing the same sheet may pass the proof, and Home there may wake Face ID: Pause in the live view is the owner's stop.
 
 Arguments: `name`, `look`, `screenshot`, `brief`.
@@ -251,6 +292,12 @@ Drag from `x0, y0` to `x1, y1`, in points, over `seconds` (default 0.35). For sl
 Tapwright: makes a real drag along the line, ending slowly so a list stops where the finger does.
 
 Arguments: `x0`, `y0`, `x1`, `y1`, `seconds`, `look`, `screenshot`, `dry_run`, `brief`.
+
+### pinch
+
+Tapwright 2.0 only. Pinch or spread two fingers about a point (`x`, `y`, in points), as on a photo or a map: `scale` above 1 spreads them to zoom in (2 = twice as far apart), below 1 pinches them to zoom out (0.2 to 5, not 1); `seconds` is how long the fingers move (0.1 to 3, default 0.5). The fingers lie on the horizontal line through the point, 60 points apart at the narrow end, and stay 10 points inside the screen's edges, so near an edge they are closer together and move less than asked; at a point so near an edge that they could not move at all, the call answers `bad_params` and nothing is touched. Needs touches through CoreDevice HID (iOS 18 to 26 today): `unsupported` otherwise, with nothing touched. Not listed with `--no-hints` or `--lazy-tools` (1.8.5's tools); the daemon takes it from any caller.
+
+Arguments: `x`, `y`, `scale`, `seconds`, `look`, `screenshot`, `brief`.
 
 ### rotate
 

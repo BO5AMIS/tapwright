@@ -5,7 +5,7 @@ account. The full guide is `docs/setup.md` in the Tapwright repository; this is 
 
 ## What is needed
 
-- An iPhone on iOS 17 or later, and a USB cable for the first setup.
+- An iPhone on iOS 17 or later (iOS 18 or later for touches from the computer; on older iOS they go through the runner), and a USB cable for the first setup.
 - A computer with Python 3.10 or later. On Windows: the **Apple Devices** app from the
   Microsoft Store. On Linux: `usbmuxd`.
 - An Apple Developer Program membership, for an App Store Connect API key (Key ID, Issuer
@@ -52,7 +52,7 @@ The signing lasts a year. `tapwright doctor` warns 30 days before it ends, and t
 answer of a session carries the same warning: tell the user. `tapwright doctor --fix`
 (phone on USB) mounts the developer disk image, installs or re-signs WebDriverAgent with the
 stored profile, and refreshes the network pairing. It never makes a new profile: when it says
-so, ask the user for the App Store Connect key and run `tapwright setup` again.
+so, ask the user for the App Store Connect key and run `tapwright setup` again. A new Tapwright may need a newer runner on the phone (2.0 uses route version 14, build `tw-16.15.3.14`): `doctor --fix` installs it too, with `tapwright serve` stopped.
 
 ## The MCP server, by hand, per host
 

@@ -2,17 +2,22 @@
 holds the connection and WebDriverAgent's session, connecting on first use."""
 import asyncio
 import base64
+import binascii
 import contextvars
 import io
+import math
 import os
+import random
 import re
 import secrets
 import time
+import urllib.parse
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from . import device as device_module
-from . import media, store, trace, ui
+from . import hands as hands_module
+from . import media, motion, ocr, store, trace, ui
 from .control import TAP_MS, Refused
 from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered
 from .stream import NO_IDLE_WAIT
@@ -30,6 +35,9 @@ BANNER_ID = "NotificationShortLookView"  # the identifier of a notification bann
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
 # TAPWRIGHT_TRACE=1: every request to WebDriverAgent is logged with how long it took (for profiling, e.g. over Wi-Fi)
 TRACE = os.environ.get("TAPWRIGHT_TRACE") == "1"
+APPS_STALE = 30.0  # seconds after which the kept list of installed apps is read again, behind the call that used it
+APPLE_APPS = "com.apple."  # Apple's own bundle ids: built-in apps, which no list of installed apps holds, and a few
+#                            from the App Store (Pages, TestFlight), which it does
 # The passcode unlock's keypad (unlock.PhoneLockScreen.press_keys): its requests write no trace line, neither the TRACE
 # log line nor trace.py's request count, so nothing gives the passcode's length (last Opus review of 1.7.8, L4)
 QUIET: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_quiet_trace", default=False)
@@ -41,6 +49,7 @@ ROOT_SIZE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bwidth="([\d.]+)" hei
 # How far to turn a captured frame clockwise for each WebDriverAgent rotation z (checked on the phone 2026-11-11 with
 # Calculator in each landscape side: the frame turned this way reads upright)
 TURN_FOR_Z = {90: 90, 270: 270}
+TURN_UNKNOWN = -1  # landscape, but which side is up isn't known: every touch goes through the runner until it is
 TURN_RECHECK = 1.0  # seconds: in landscape, how often which side is asked again (the tree can't tell the sides apart)
 # Tapwright's own WebDriverAgent build (TAPWRIGHT_WDA=fork) has a fast tap route: one touch, with no element lookup and
 # no idle wait (WebDriverAgentLib/Commands/TWFastTapCommands.m in the fork). Asked for once per session; Appium's
@@ -100,8 +109,303 @@ HIT_CHECK = os.environ.get("TAPWRIGHT_HIT_CHECK", "1")
 HIT_PATH = "/wda/tw/hit"  # (without a session: it asks XCTest's daemon, not the session's app)
 HIT_IDENTITY_REFUSED = "tapwright hit: identity_unproven"  # terminal: the snapshot couldn't be bound to the AX hit
 HIT_WAIT = 5.0  # point lookup (0.3 s), direct attributes (2 s), then exact-identity app fallback (2 s)
+# Tapwright 2.0 hands (SPEC-2.0 D1): touches and buttons sent from the computer through CoreDevice HID (hands.py) when
+# the session has Hands and they can be used; the runner's synthesis otherwise, as before. TAPWRIGHT_HANDS=runner keeps
+# everything on the runner. The trace counts a hands gesture as a touch (trace.TOUCH_SUFFIXES).
+HANDS = os.environ.get("TAPWRIGHT_HANDS", "auto")
+HANDS_PATH = "/hands"
+# press_button's names -> hands.BUTTONS' (lock is hands-only: XCTest can't press it)
+HAND_BUTTONS = {"home": "home", "lock": "lock", "volumeUp": "volume_up", "volumeDown": "volume_down"}
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
+# (2.0, runner route version 9) Every accessibility read is bounded on the runner: the tree route answers within a
+# budget with what it could read (`tier`: full, shallow, or root = the application node alone), the setting below caps
+# every other read, a screen-size route answers without reading the app, and an OCR route reads the screen's text with
+# Apple's Vision. A runner older than 9 works as in 1.10.0.
+BOUNDED_VERSION = 9
+VERSION_PATH = "/wda/tw/version"  # (without a session: asked in ensure, before the session exists)
+SCREEN_PATH = "/wda/tw/screen"
+OCR_PATH = "/wda/tw/ocr"
+OCR_WAIT = 8.0  # seconds the runner's OCR may take (Vision's accurate level: about 0.5-1.5 s, and the shot first)
+# BCP 47 codes, comma-separated, in order of preference, for the runner's OCR (Vision's recognitionLanguages), e.g.
+# "en-US,ar-SA"; empty: Vision's default (English). Vision's fast level reads Latin script only; a language the level
+# doesn't support fails the read, and the picture is then read on this computer instead
+OCR_LANGUAGES = os.environ.get("TAPWRIGHT_OCR_LANGUAGES", "").strip()
+TIERS = ("full", "shallow", "root")
+# (review R200v M4) the languages Vision's fast level reads (Latin script; Apple's fast revision lists English, French,
+# Italian, German, Spanish and Portuguese), by their primary subtag. A fast read asked in any other language fails with
+# `unknown error` (RUNNER-V9-PROTOCOL §4), so wait_for's polls read at the accurate level then.
+FAST_LANGUAGES = frozenset({"en", "fr", "it", "de", "es", "pt"})
+
+
+def fast_reads(languages: str) -> bool:
+    """Can Vision's fast level read every one of these comma-separated BCP 47 codes ("" = its default, English)?"""
+    return all(code.strip().split("-")[0].lower() in FAST_LANGUAGES for code in languages.split(",") if code.strip())
+
+
+def _env_float(name: str, default: float) -> float:
+    """A positive, finite number from the environment, else `default` (CodeRabbit, PR #26: "inf" failed the import)."""
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
+def _env_ms(name: str, default: int) -> int:
+    """A whole number of milliseconds, at least 1, from the environment, else `default` (0.5 gave a 0 ms budget)."""
+    value = int(_env_float(name, default))
+    return value if value >= 1 else default
+
+
+AX_TIMEOUT = _env_float("TAPWRIGHT_AX_TIMEOUT", 3.0)  # seconds: the runner's ceiling for any one accessibility read
+TREE_BUDGET_MS = _env_ms("TAPWRIGHT_TREE_BUDGET", 3000)  # ms a tree read may take on the runner
+# ms for an app whose last read was cut short. (Review R200v H1) The runner gives `full` 60 % of the budget, after
+# finding the app and an idle wait of up to a quarter of it, and tries `shallow` only with 0.25 s left past a reserve
+# for `root`: at 600 ms nearly every read came back `root`, even of a screen that reads whole in 0.4 s (the home screen's
+# tree took 0.4 s in Phase 0). 1500 ms leaves `full` about 0.9 s and room for `shallow`.
+SHORT_BUDGET_MS = 1500
+QUICK_CUT = 0.25  # a read that comes back with no elements in under this part of its budget wasn't kept waiting by the
+#                   app: the app had nothing to answer with yet. It is asked again, RETRY_GAP seconds later, while at
+#                   least RETRY_MIN_MS of the budget is left
+BY_STILL_FOR = 30.0  # seconds a read may take to answer and still count as the one a still screen was given
+BUDGET_GRACE = 5.0  # seconds past its budget a budgeted read's answer is waited for (the runner answers within the
+#                     budget, plus up to 0.5 s for the turn of a root and the time to build and carry the answer)
+
+
+def read_wait(budget_ms: int | None) -> float:
+    """Seconds a tree read's answer is waited for before it is asked again: READ_CUT without a budget; with one, the
+    budget and BUDGET_GRACE, never more than READ_CUT (over Wi-Fi an answer that never came cost 10 s, 2026-11-26)."""
+    return READ_CUT if budget_ms is None else min(READ_CUT, budget_ms / 1000 + BUDGET_GRACE)
+RETRY_GAP = 0.25
+RETRY_MIN_MS = 300
+_AFTER_MS = re.compile(r"\(after (\d+) ms\)")
+
+
+def _gave_up_ms(why: str) -> float | None:
+    """How long the runner says it tried before it gave a read up: the sum of its `why`'s "(after N ms)" (one for each
+    tier it tried). None when it doesn't say: nothing is concluded then."""
+    found = _AFTER_MS.findall(why or "")
+    return float(sum(int(n) for n in found)) if found else None
+BUDGET_MEMORY = 60.0  # seconds a cut-short read keeps its app on the short budget (20 until the phone tests of 2026-11-26:
+#                       on a feed that never answers, the normal-budget read that asks again cost 2.7 s every 20 s)
+# (2.0) how the runner reads a tree (RUNNER-V9-PROTOCOL §1 `path`). Measured on the phone (lead, 2026-11-26): `direct`
+# keeps to its budget on TikTok's feed (1500 ms -> 1.43 s) where `xctest` takes 2.9-3.9 s whatever the budget, but on
+# a screen that reads (Settings > General, 264 nodes) `xctest` is about 30 % faster (0.97 s against 1.25-1.32 s). So
+# the normal budget reads by `xctest` and the short one (an app whose read was just cut, on a screen that isn't still)
+# by `direct`: a screen that never answers costs 3-4 s once, then stays bounded. TAPWRIGHT_TREE_PATH=direct|xctest
+# forces one (for measuring).
+TREE_PATH_FORCED = os.environ.get("TAPWRIGHT_TREE_PATH", "").strip().lower()
+TREE_ATTRS = os.environ.get("TAPWRIGHT_TREE_ATTRS", "lean").strip().lower()  # `std` turns the lean read off (version 10)
+# (2.0, runner route version 11: RUNNER-V11-PROTOCOL.md) the app in front without reading it (a few ms, where
+# /wda/activeAppInfo took 1.7-30 s on TikTok's feed), the screen as a JPEG in about 50 ms (the PNG /screenshot took
+# 250-640 ms), and the OCR read's picture in its own answer (`image=1`)
+FRONT_VERSION = 11
+FRONT_PATH = "/wda/tw/front"
+SHOT_PATH = "/wda/tw/shot"
+FRONT_WAIT = 3.0  # seconds: the runner's own worst case is about 1.8 s (an AX lookup bounded to 0.5 s, then the daemon's)
+SHOT_WAIT = 10.0  # seconds a JPEG shot may take (about 50 ms)
+SHOT_QUALITY = 80  # the JPEG quality asked of the runner's shot (shot.render encodes the answer's picture again)
+# (2.0, worker H) seconds a read of an app whose screen doesn't answer and keeps moving may be left unasked after a real
+# one went out (ReadBudget.plan): on TikTok's feed each read cost its whole budget (1.3-1.4 s at 1500 ms), before and
+# after every action. One real short-budget read goes out every UNASKED_FOR seconds, so a screen of that app that reads
+# (a profile, while a video plays in it) is found again; a still screen gets the normal budget at once (ReadBudget).
+UNASKED_FOR = 8.0
+UNASKED_WHY = ("not asked: {bundle} is still in front, its screen keeps moving, and its read {age:.1f} s ago gave no "
+               "elements in time")
+
+
+def tree_path(budget_ms: int, normal_ms: int, forced: str | None = None) -> str:
+    """The runner's way of reading for a read with `budget_ms` (see TREE_PATH_FORCED)."""
+    forced = TREE_PATH_FORCED if forced is None else forced
+    if forced in ("direct", "xctest"):
+        return forced
+    return "direct" if budget_ms < normal_ms else "xctest"
+
+
+class ReadBudget:
+    """How long the runner may spend on a tree read of an app (route version 9's `budget`). A screen that never answers
+    in time (TikTok's For You feed: a read of one element takes 14 s) would otherwise cost the whole budget on every
+    look and every action. So, per bundle id: when a read with the normal budget came back truncated, that app's reads
+    use the short budget for BUDGET_MEMORY seconds; a read that comes back full after more than the short budget gives
+    it the normal budget again at once (the screen is only slow to read). A full read the short budget would have
+    covered changes nothing: a feed that reads whole for a moment after a launch and then not again (TikTok's, phone
+    2026-11-26) paid the whole normal budget at every flip.
+    A truncated answer to a short-budget read doesn't renew the time: once it runs out, one read with the normal
+    budget asks again (a screen that is only slow to read gets its whole tree back within BUDGET_MEMORY seconds).
+    A screen that is still (the caller's `still`: the stream's pictures show nothing moving) gets the normal budget even
+    then: a playing feed is never still, and a still screen of the same app (a profile, a settings page) is usually one
+    that reads whole (review R200v H1). When such a read is cut short too (the feed showing a photo, a paused video:
+    still, and it doesn't answer), stillness gives the normal budget again only after BUDGET_MEMORY seconds: on the phone
+    every read of that screen cost the normal budget, and none was left unasked (lead, 2026-11-26)."""
+
+    def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
+                 memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic,
+                 unasked_for: float = UNASKED_FOR) -> None:
+        self.normal_ms, self.short_ms, self.memory, self.clock = normal_ms, short_ms, memory, clock
+        self.unasked_for = unasked_for
+        self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
+        self._still_cut: dict[str, float] = {}  # bundle id -> when a read its stillness gave the normal budget was
+        # (the app whose next read has the normal budget because its screen is still, when that was decided)
+        self._by_still: tuple[str, float] | None = None
+        self._tried: dict[str, float] = {}  # bundle id -> when a real read of it last went out
+
+    def plan(self, bundle: str | None, still: Callable[[], bool] | None = None) -> tuple[int, bool]:
+        """(the budget in ms, whether the read may be left unasked) for a read of `bundle`. (2.0, worker H) Unasked only
+        where the short budget applies (the app's memory of a cut read is fresh, and the screen isn't still) and a real
+        read of the app went out within `unasked_for` seconds: the caller then asks the runner only which app is in front
+        (route version 11), and makes the `root` answer itself when it is still this app."""
+        budget = self.budget(bundle, still)
+        if bundle is None or budget >= self.normal_ms:
+            return budget, False
+        at = self._tried.get(bundle)
+        return budget, at is not None and self.clock() - at < self.unasked_for
+
+    def tried(self, bundle: str | None) -> None:
+        """A real read of `bundle` goes out now."""
+        if bundle is not None:
+            self._tried[bundle] = self.clock()
+
+    def tried_ago(self, bundle: str | None) -> float | None:
+        """Seconds since a real read of `bundle` went out (None: none did)."""
+        at = self._tried.get(bundle) if bundle is not None else None
+        return None if at is None else self.clock() - at
+
+    def budget(self, bundle: str | None, still: Callable[[], bool] | None = None) -> int:
+        """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget). `still` is asked only
+        when the short budget would apply: True gives the normal one."""
+        if still is not None:
+            # (CodeRabbit, PR #26) a read's own plan: a mark a read that raised left (answered() never took it) isn't
+            # this read's. (`short()` asks without `still` and leaves the planned read's mark alone)
+            self._by_still = None
+        if bundle is None or bundle not in self._cut:
+            return self.normal_ms
+        if self.clock() - self._cut[bundle] >= self.memory:
+            del self._cut[bundle]
+            self._still_cut.pop(bundle, None)
+            if still is not None and still():
+                self._by_still = (bundle, self.clock())  # (cut short again, this read is the still screen's one too)
+            return self.normal_ms
+        at = self._still_cut.get(bundle)
+        if still is not None and (at is None or self.clock() - at >= self.memory) and still():
+            self._by_still = (bundle, self.clock())
+            return self.normal_ms
+        return min(self.short_ms, self.normal_ms)  # (CodeRabbit, PR #26: a normal budget set lower stays the most)
+
+    def short(self, bundle: str | None) -> bool:
+        return self.budget(bundle) < self.normal_ms
+
+    def answered(self, bundle: str | None, truncated: bool, budget_ms: int, took_ms: float | None = None) -> None:
+        """A read of `bundle` with `budget_ms` came back truncated or full, after `took_ms` (None: not timed)."""
+        held, self._by_still = self._by_still, None
+        # (review K, question 4) a read that raised never came here: what its stillness gave is not the next read's
+        by_still = held[0] if held is not None and self.clock() - held[1] < BY_STILL_FOR else None
+        if bundle is None:
+            return
+        if not truncated:
+            # (review K-H1) the screen in front reads: the next read is asked for real. Left unasked, it was made up
+            # as a root with no elements, for a screen that had just given all of them
+            self._tried.pop(bundle, None)
+            if took_ms is None or took_ms >= self.short_ms:
+                self._cut.pop(bundle, None)
+                self._still_cut.pop(bundle, None)
+        elif budget_ms >= self.normal_ms:
+            self._cut[bundle] = self.clock()
+            if by_still == bundle:
+                self._still_cut[bundle] = self.clock()  # its still screen didn't answer either
+
+    def forget(self) -> None:
+        self._cut.clear()
+        self._still_cut.clear()
+        self._by_still = None
+        self._tried.clear()
+
+
+SHORT_SETTLE = 0.5  # seconds an action's settle may wait on a screen that never stands still (SettleCap)
+READABLE_SETTLE = 1.0  # the same while that app's newest tree is whole: its elements are read after it, and a tree read
+#                        in the middle of a page's push lists both pages (a push takes 0.35-0.5 s; a video hides its end)
+LAUNCH_SETTLE = 2.0  # the same after its launch: 0.5 s after one the app wasn't up yet (phone, 2026-11-26)
+
+
+class SettleCap:
+    """(2.0, lead's decision) How long an action's answer waits for the screen of an app to stand still. A screen that
+    never does (TikTok's playing feed) made every settle wait its whole cap (2 s, 4 s after a launch): a swipe there took
+    3.2 s. So, per bundle id: when a settle of the app ran past `short` seconds with the picture still changing (it ended
+    by its cap, or stood still only later) while the newest tree of that app was cut short, its next settles wait at most
+    `short` seconds; a settle that ends still while the app's newest tree is whole, or a read of it that comes back whole,
+    gives it the normal cap again. Pure: the daemon says what happened and asks for the cap.
+
+    (Worker H, phone log 2026-11-26) It switched only on the third swipe on the feed: the first two settles ended still
+    (0.77 s and 1.64 s: the feed stands still for a moment while the next video starts), and only a capped settle
+    counted, while a still end cleared the memory again. Now a settle still moving at `short` seconds counts (the short
+    cap would have ended it there), and a still end on a screen that still doesn't read keeps the short cap."""
+
+    def __init__(self, short: float = SHORT_SETTLE, readable: float = READABLE_SETTLE,
+                 launch: float = LAUNCH_SETTLE) -> None:
+        self.short, self.readable, self.launch = short, readable, launch
+        self._restless: set[str] = set()
+
+    def cap(self, bundle: str | None, cap: float, cut: bool = True, launch: bool = False) -> float:
+        """The cap for a settle of `bundle`'s screen whose normal cap is `cap`. `cut`: the app's newest tree was cut
+        short (False: it reads, and the settle is given `readable` seconds). `launch`: the settle after its launch."""
+        if bundle is None or bundle not in self._restless:
+            return cap
+        return min(cap, self.launch if launch else self.short if cut else self.readable)
+
+    def settled(self, bundle: str | None, capped: bool, cut: bool, seconds: float = 0.0,
+                unread: bool | None = None) -> bool:
+        """A settle of `bundle` ended after `seconds`: by its cap with frames still changing (`capped`), else on frames
+        that stood still; the newest tree of the app cut short (`cut`). `unread`: that tree gave no elements at all
+        (None: as `cut`). True when the app's cap switched (the caller logs it).
+        (review K-M2) A settle that stood still, only later than the short cap, counts as moving on a screen that gave
+        no elements (a feed between two videos). On one that was read in part (a heavy page) it is an ordinary push:
+        counting it capped that app's settles at half a second from then on, so its next page was read mid-push."""
+        if bundle is None:
+            return False
+        nothing_read = cut if unread is None else unread
+        moving = capped or (seconds > self.short and nothing_read)  # still changing when the short cap would have ended it
+        if moving and cut and bundle not in self._restless:
+            self._restless.add(bundle)
+            return True
+        if not capped and not cut and bundle in self._restless:
+            self._restless.discard(bundle)
+            return True
+        return False
+
+    def read_whole(self, bundle: str | None) -> bool:
+        """A read of `bundle` came back whole. Nothing switches (False): its feed may read whole for a moment and then
+        not again (TikTok's after a launch, phone 2026-11-26), and each flip back to the normal cap cost a 2 s settle.
+        The cap is `readable` while the tree is whole (cap), and the normal one again once a settle ends still."""
+        return False
+
+    def restless(self, bundle: str | None) -> bool:
+        return bundle is not None and bundle in self._restless
+
+    def forget(self) -> None:
+        self._restless.clear()
+
+
+PINCH_GAP = 60.0  # points between a pinch's two fingers at its narrow end
+PINCH_MARGIN = 10.0  # points a pinch's fingers stay inside the screen's edges
+PINCH_MOVE_MIN = 4.0  # points each finger must travel: less, and a pinch is a still two-finger press
+
+
+def pinch_spread(x: float, y: float, scale: float, screen: tuple[float, float]) -> tuple[float, float]:
+    """(start, end) distance of each of a pinch's two fingers from (x, y), along the horizontal line through it: from
+    PINCH_GAP / 2 out to `scale` times that (scale > 1), or the other way (scale < 1), kept PINCH_MARGIN inside the
+    screen. Near an edge the wide end is what fits and the narrow end that divided by the scale, so the fingers still
+    move (CodeRabbit, PR #26: both were capped to the room, a still two-finger press); bad_params when they can't move
+    PINCH_MOVE_MIN points (nothing is touched)."""
+    room = min(x, screen[0] - x) - PINCH_MARGIN
+    ratio = max(scale, 1 / scale)
+    wide = min(PINCH_GAP / 2 * ratio, room)
+    narrow = min(PINCH_GAP / 2, wide / ratio)
+    # (review N-M1) what the scale itself asks for is never too little: only the edge's cap can be. A scale of 1.1
+    # in the middle of the screen moves each finger 3 points, and was refused as "too near the edge"
+    if wide - narrow < min(PINCH_MOVE_MIN, PINCH_GAP / 2 * (ratio - 1)) - 1e-9:
+        raise Refused("bad_params", f"({x:g}, {y:g}) is too near the screen's edge for a pinch's two fingers to move; "
+                                    "pinch farther from it. Nothing was touched.")
+    return (narrow, wide) if scale >= 1 else (wide, narrow)
 
 
 class FrontUnchecked(Refused):
@@ -171,6 +475,27 @@ class _FieldGone(Exception):
 
 
 KEYS ={"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
+ROOT_BUNDLE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bbundleId="([^"]*)"')
+
+
+def _jpeg_of(value: object, what: str) -> bytes:
+    """The JPEG bytes of a runner answer's `jpeg` (base64, route version 11). Raises DeviceError when there are none."""
+    data = value.get("jpeg") if isinstance(value, dict) else None
+    if not isinstance(data, str) or not data:
+        raise DeviceError(f"the runner's {what} came without a picture")
+    try:
+        picture = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise DeviceError(f"the runner's {what} sent a picture that can't be read") from None
+    if not picture.startswith(b"\xff\xd8"):
+        raise DeviceError(f"the runner's {what} sent no JPEG")
+    return picture
+
+
+def _root_bundle(source: object) -> str | None:
+    """The bundle id the tree's root Application names, or None."""
+    found = ROOT_BUNDLE.search(source[:2000]) if isinstance(source, str) else None
+    return found.group(1) or None if found else None
 
 
 @dataclass
@@ -200,6 +525,9 @@ class Session:
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
         self.app_names: dict[str, str] = {}  # bundle id -> display name, from the installed apps
         self.not_installed: set[str] = set()  # bundle ids already looked for in the installed apps and not found
+        self._apps: tuple[float, list[dict]] | None = None  # (when, the installed apps as the phone last listed them)
+        self._apps_task: asyncio.Task | None = None  # the list being read again behind a call
+        self._apps_asked = self._apps_kept = 0  # (how many reads of the list began; which of them the kept list is)
         # (field key, element id) of the input our last type_text verified and typed into, while nothing else has
         # touched the phone since: typing there again needs no tap. Every other action clears it.
         self.typed_into: tuple[str, str] | None = None
@@ -244,6 +572,28 @@ class Session:
         # Called with each tree the daemon's reads build (refresh, snapshot): what tells it an app showed a one-time code
         # field (§20.4). Never with Notification Center's tree, which is read raw (notifications.py).
         self.on_tree = None
+        # Tapwright 2.0: the HID hands (hands.Hands), set by the server for the real phone; None (tests' fakes, or no
+        # hands): every touch goes through the runner. motion_rng shapes human-like taps and swipes (motion.py).
+        self.hands: "hands_module.Hands | None" = None
+        self.hands_at: float | None = None  # time.monotonic() when the hands last finished a gesture
+        self.motion_rng = random.Random()
+        # (2.0, route version 9) how the newest tree read came back: "full", "shallow" (part of the tree, the runner's
+        # budget ran out) or "root" (the application node alone: the screen doesn't answer accessibility reads); and
+        # the runner's short reason for a cut. A runner older than 9 always reads the whole tree: "full".
+        self.last_tier = "full"
+        self.last_why = ""
+        self.budgets = ReadBudget()
+        # Set by the daemon: does the stream show the screen still right now (Daemon._proven_still)? A still screen's
+        # read gets the normal budget even while its app is on the short one (ReadBudget). None: never taken as still.
+        self.screen_still: Callable[[], bool] | None = None
+        self.budget_app: str | None = None  # the app the newest bounded read was budgeted for or named (L2)
+        self.center_tier = "full"  # how much of Notification Center the newest read_center got (R200v L4)
+        self.settles = SettleCap()  # (2.0) which apps' screens never stand still: their settles wait less
+        self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
+        # whether this session's start had the pixel scale from the runner's screen route (version 9), which doesn't read
+        # the app: then nothing asks /wda/screen for it, which reads the app (worker H: on TikTok's feed, the AX timeout)
+        self.scale_by_runner = False
+        self._made_root: str | None = None  # the newest root made here without asking for the tree (_unasked_root)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -257,20 +607,85 @@ class Session:
         if not runner:
             raise NotSetUp("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
         await self.device.start_wda(runner)
-        sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": {}}}))["sessionId"]
+        # (2.0) the runner's route version, by the route that needs no session and reads nothing of the app. Version 9
+        # bounds every accessibility read by twAXTimeout, which each POST /session resets: given as a capability it
+        # bounds the session's own start too (RUNNER-V9-PROTOCOL §2), and the screen's size comes without reading the
+        # app, so a screen that never answers doesn't hold the connection up
+        version = await self._probe_version()
+        bounded = version is not None and version >= BOUNDED_VERSION
+        wanted = {"twAXTimeout": AX_TIMEOUT} if bounded else {}
+        sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": wanted}}))["sessionId"]
         # Asked before anything reads the app: once a read hangs behind a frozen app, nothing else gets an answer.
         locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
+        self.scale_by_runner = False
         try:
-            size = (await self.device.http("GET", f"/session/{sid}/window/size", timeout=FIRST_READ_WAIT))["value"]
+            screen = await self._screen_of_runner() if bounded else None
+            if screen is None:
+                size = (await self.device.http("GET", f"/session/{sid}/window/size", timeout=FIRST_READ_WAIT))["value"]
+                screen = (float(size["width"]), float(size["height"]))
         except ConnectionLost as e:
             raise await self._why_stuck(bool(locked), e) from e
-        self.screen = (float(size["width"]), float(size["height"]))
-        await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": dict(self.session_settings)},
+        self.screen = screen
+        # (review R200 H1) the phone may have turned while the line was down: upright is turn 0, and a landscape side
+        # is asked again by the next read (hands map points by `turn`, so a stale one puts a touch elsewhere)
+        self.turn = 0 if screen[0] <= screen[1] else TURN_UNKNOWN
+        self._turn_asked = -float("inf")
+        settings = dict(self.session_settings)
+        if bounded:
+            settings["twAXTimeout"] = AX_TIMEOUT  # a ceiling for every accessibility read besides the tree's budget
+        await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": settings},
                                timeout=READ_CUT)  # (before sid is committed: no read can run without them)
         self.fast_tap = self.fast_drag = None  # a new session may be a new runner: ask again
         self.tw_version = 0
+        if version is not None:  # the session-less route said it (the fork has answered both since route 1): kept
+            self.fast_tap, self.fast_drag, self.tw_version = version >= 1, version >= 2, version
         self.fast_read, self.last_compact = None, None
+        self.bounded, self.last_tier, self.last_why = bounded, "full", ""
+        self.budgets.forget()
+        self.settles.forget()
+        self.budget_app = None
         self.sid = sid  # committed last: a failure above leaves no half-started session
+
+    async def _probe_version(self) -> int | None:
+        """The fork's route version by the session-less route (VERSION_PATH; the fork has answered it there and on the
+        session's route since its route 1): 0 for a runner without it (Appium's build), None when it can't be told (any
+        other error, a malformed answer: then the session starts as 1.10.0's did, and `_fast_routes` asks later)."""
+        try:
+            answer = await self.device.http("GET", VERSION_PATH, timeout=LOCK_WAIT)
+        except DeviceError as e:
+            said = str(e).lower()
+            unknown = "unknown command" in said or "unknown method" in said
+            return 0 if unknown and not isinstance(e, ConnectionLost) else None
+        value = answer.get("value") if isinstance(answer, dict) else None
+        version = value.get("tapwright") if isinstance(value, dict) else None
+        return version if isinstance(version, int) and not isinstance(version, bool) and version >= 0 else None
+
+    async def _screen_of_runner(self) -> tuple[float, float] | None:
+        """(width, height) in points from SCREEN_PATH (route version 9), and the pixel scale with it; None when the
+        answer can't be used (window/size is asked instead). A dropped line is raised, as from window/size."""
+        try:
+            answer = await self.device.http("GET", SCREEN_PATH, timeout=LOCK_WAIT)
+        except ConnectionLost:
+            raise
+        except DeviceError:
+            return None
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if not isinstance(value, dict):
+            return None
+        try:
+            w, h = float(value["width"]), float(value["height"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        try:
+            scale = float(value.get("scale"))
+        except (TypeError, ValueError):
+            scale = 0.0
+        if scale > 0:
+            self.scale, self.scale_read = scale, True  # (no read of the app needed for it later either)
+            self.scale_by_runner = True
+        return w, h
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
         """The first read of a fresh WebDriverAgent hung: say why when the phone can tell. A locked phone, or
@@ -386,8 +801,8 @@ class Session:
     async def _follow_orientation(self, source: str | None) -> None:
         """Keep `screen` and `turn` with the phone's orientation: the tree's root says the screen's size in points
         now (932x430 in landscape), and WebDriverAgent's rotation says which way it turned (z 90 or 270)."""
-        if not isinstance(source, str):
-            return
+        if not isinstance(source, str) or source is getattr(self, "_made_root", None):
+            return  # (a root made here from `screen` says nothing new: the rotation question isn't asked for it)
         root = ROOT_SIZE.search(source[:2000])
         if root is None:
             return
@@ -395,18 +810,30 @@ class Session:
         if w <= 0 or h <= 0:
             return
         same = (w > h) == (self.screen[0] > self.screen[1])
-        if same and (w <= h or time.monotonic() - self._turn_asked < TURN_RECHECK):
+        if w <= h:  # upright: always turn 0, whatever it was (review R200 H1: a turn left from before a reconnect)
+            self.screen, self.turn = (w, h), 0
+            return
+        if same and not self._turn_due():
             return  # (in landscape the phone may have turned to the other side: asked again now and then)
         self.screen = (w, h)
-        if w <= h:
-            self.turn = 0
-            return
+        await self._ask_turn()
+
+    def _turn_due(self) -> bool:
+        """In landscape: is which side is up to be asked again (unknown, or asked more than TURN_RECHECK ago)?"""
+        return self.turn == TURN_UNKNOWN or time.monotonic() - self._turn_asked >= TURN_RECHECK
+
+    async def _ask_turn(self) -> None:
+        """Which side is up, from WebDriverAgent's rotation (it asks no app), for a landscape screen."""
         self._turn_asked = time.monotonic()
         try:
             z = int((await self._call("GET", "/session/{sid}/rotation", timeout=LOCK_WAIT)).get("value", {}).get("z", 0))
         except (DeviceError, TypeError, ValueError):
-            z = 90
-        self.turn = TURN_FOR_Z.get(z % 360, 90)
+            # not guessed (R200 H1): the two sides are 180 degrees apart for a touch sent by hands. Unknown keeps
+            # touches on the runner, and the next read asks again
+            self.turn = TURN_UNKNOWN
+            self._turn_asked = -float("inf")
+            return
+        self.turn = TURN_FOR_Z.get(z % 360, TURN_UNKNOWN)
 
     async def _banner_over_an_app(self, source: str | None) -> bool:
         """Is this tree only a notification banner sliding over the app in front? While one shows, WebDriverAgent
@@ -447,26 +874,144 @@ class Session:
         except ConnectionLost as e:
             raise await self._why_stuck(False, e) from e
 
-    async def _read_tree(self, timeout: float):
+    async def _read_tree(self, timeout: float, center: bool = False):
         """One read of the tree as /source's XML: through the fork's compact read when this runner has it (FAST_READ),
-        else /source itself."""
+        else /source itself. `center` (Notification Center's read, review R200v L4): with the normal budget, outside the
+        budget memory and the "unchanged" token."""
+        self.last_tier, self.last_why = "full", ""
         if FAST_READ != "0" and self.fast_read is not False:
+            await self.ensure()  # (2.0: a session's start learns the runner's version: no second question then)
             if self.fast_tap is None:
                 await self._fast_routes()  # (once per session: the version route doesn't read the app)
-            if self.tw_version >= 4:
-                source = await self._compact_tree(timeout)
-                if source is not None:
-                    return source
+            if self.tw_version >= BOUNDED_VERSION and center:
+                normal = self.budgets.normal_ms
+                source = await self._compact_tree(timeout, since=False, budget_ms=normal, remember=False,
+                                                  read_path=tree_path(normal, normal))
+            elif self.tw_version >= 4:
+                source = await self._bounded_tree(timeout) if self.tw_version >= BOUNDED_VERSION else \
+                    await self._compact_tree(timeout)
+            else:
+                source = None
+            if source is not None:
+                return source
+            # (CodeRabbit, PR #26) a compact answer that was then discarded (a quick give-up whose retry was refused) left
+            # its tier: the tree returned is /source's, which is whole
+            self.last_tier, self.last_why = "full", ""
         return (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
 
-    async def _compact_tree(self, timeout: float, since: bool = True) -> str | None:
+    async def _bounded_tree(self, timeout: float) -> str | None:
+        """(route version 9) The compact read with a budget: the app's own (ReadBudget), by the app the newest read
+        found in front. A read cut short on the short budget whose answer names another app than the one the budget
+        was for is read again with the normal budget: the short budget was that app's, not this one's."""
+        # (review R200v L2) a root the runner couldn't name an app for (RUNNER-V9-PROTOCOL §1: `b` left out) is kept
+        # under the app the read was budgeted for, so the short budget still applies to it; and such a root is never
+        # taken for another app's
+        bundle = (self.read_app[1] if isinstance(self.read_app, tuple) else None) or self.budget_app
+        normal = self.budgets.normal_ms
+        budget, unasked = self.budgets.plan(bundle, still=self.screen_still)
+        if unasked and self.tw_version >= FRONT_VERSION and bundle is not None:
+            source = await self._unasked_root(bundle)
+            if source is not None:
+                return source
+        self.budgets.tried(bundle)
+        source = await self._compact_tree(timeout, budget_ms=budget, budget_for=bundle,
+                                          read_path=tree_path(budget, normal))
+        named = _root_bundle(source)
+        if (source is not None and self.last_tier != "full" and budget < normal
+                and named is not None and named != bundle):
+            self.budgets.tried(named)
+            source = await self._compact_tree(timeout, budget_ms=normal, budget_for=named,
+                                              read_path=tree_path(normal, normal))
+            named = _root_bundle(source)
+        if source is not None:
+            self.budget_app = named or bundle
+        return source
+
+    async def _unasked_root(self, bundle: str) -> str | None:
+        """(2.0, worker H) The `root` answer a read of `bundle` would get, made here without asking the runner for the
+        tree (ReadBudget.plan said it may be left unasked): only when the runner's FRONT_PATH says that app is still in
+        front, with its pid. The XML is the one a runner's `root` answer becomes (RUNNER-V9-PROTOCOL §1: the
+        application node, the screen in points). None (read as before) when another app is in front or it can't say."""
+        front = await self.front_app()
+        if front is None or front[0] != bundle:
+            return None
+        # (review K-M1) the screen's size and turn are learned from a real read's root: a root made here would keep
+        # the old ones for as long as reads are left unasked, and a touch after the phone was turned would be placed
+        # for the old way up. The runner's screen route asks no app; when it shows another shape, or can't say, the
+        # read is made for real.
+        shape = await self._screen_of_runner()
+        if shape is None or (shape[0] > shape[1]) != (self.screen[0] > self.screen[1]):
+            return None
+        if shape[0] > shape[1] and self._turn_due():
+            # (CodeRabbit, PR #26) turned over from one landscape side to the other, the screen keeps its shape: the
+            # side is asked again as a real read asks it, else a hands touch goes to the opposite part of the screen
+            await self._ask_turn()
+        node: dict = {"t": "Application", "r": [0, 0, self.screen[0], self.screen[1]], "b": bundle}
+        if front[1] is not None:
+            node["pid"] = front[1]
+        label = self.read_app[0] if isinstance(self.read_app, tuple) and self.read_app[1] == bundle else \
+            self.app_names.get(bundle)
+        if label and label != bundle:
+            node["l"] = label
+        source = self._made_root = ui.xml_of_tree(node)
+        age = self.budgets.tried_ago(bundle) or 0.0
+        self.last_tier, self.last_why = "root", UNASKED_WHY.format(bundle=bundle, age=age)
+        self.last_compact = None  # (a cut-short tree is never the "unchanged" baseline)
+        self.budget_app = bundle
+        if TRACE and not QUIET.get():
+            getattr(self.device, "log", lambda *a: None)(f"trace tree {self.last_why}")
+        return source
+
+    async def front_app(self) -> tuple[str, int | None] | None:
+        """(bundle id, pid or None) of the app in front, by the runner's FRONT_PATH (route version 11): found the way a
+        tree read finds it, without reading the app (a few ms). None when this runner is older, the app can't be told,
+        or the question failed; a dropped line is raised."""
+        if self.tw_version < FRONT_VERSION:
+            return None
+        try:
+            answer = await self._call("GET", FRONT_PATH, timeout=FRONT_WAIT)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            getattr(self.device, "log", lambda *a: None)(f"the runner couldn't say which app is in front ({e})")
+            return None
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if not isinstance(value, dict):
+            return None
+        bundle, pid = value.get("b"), value.get("pid")
+        if not isinstance(bundle, str) or not bundle or bundle == "unknown":
+            return None
+        return bundle, pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+    async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None,
+                            budget_for: str | None = None, remember: bool = True,
+                            read_path: str | None = None, budget_asked: int | None = None) -> str | None:
         """The tree through the fork's compact read (TREE_PATH), as the XML /source would have sent; None when it
         can't be had that way (the caller reads /source). A dropped line or a frozen app is raised as from /source.
-        `since`: send the last read's token, so an unchanged screen comes back as "unchanged" without the tree."""
+        `since`: send the last read's token, so an unchanged screen comes back as "unchanged" without the tree.
+        `budget_ms` (route version 9): the runner answers within about that long with what it could read, and says
+        how much (`tier`); a cut-short answer is kept as `last_tier`, never as the token an "unchanged" reuses.
+        `budget_for`: the app the budget was chosen for, which the answer is kept under when its root names none.
+        `remember` False: the answer feeds no budget memory (Notification Center's read). `read_path`: the runner's way
+        of reading (`direct` or `xctest`, tree_path), sent with a budget. `budget_asked`: the budget the caller chose,
+        when this read is one asked again within it (QUICK_CUT) and has what is left of it."""
         last = self.last_compact if since else None
-        path = TREE_PATH + (f"?since={last[0]}" if last else "")
+        # (route version 10) the direct read asking only for the attributes the list uses is the fastest way on every
+        # screen measured (lead, phone, 2026-11-26: Settings > General 543 ms against 942 by xctest and 1269 by direct
+        # with the standard set; Settings root 168 / 315 / 184; home screen 206 / 416 / 273), gives the same nodes (the
+        # same token) and keeps to its budget. So with a version 10 runner every budgeted read goes that way.
+        lean = (budget_ms is not None and self.tw_version >= 10 and TREE_ATTRS != "std"
+                and TREE_PATH_FORCED not in ("direct", "xctest"))
+        if lean:
+            read_path = "direct"
+        query = [*([f"budget={budget_ms}"] if budget_ms is not None else []),
+                 *([f"path={read_path}"] if budget_ms is not None and read_path else []),
+                 *(["attrs=lean"] if lean else []),
+                 *([f"since={last[0]}"] if last else [])]
+        path = TREE_PATH + ("?" + "&".join(query) if query else "")
+        began = time.monotonic()
         try:
-            value = (await self._call("GET", path, timeout=min(timeout, READ_CUT))).get("value")
+            value = (await self._call("GET", path, timeout=min(timeout, read_wait(budget_ms)))).get("value")
         except ConnectionLost:
             raise
         except DeviceError as e:
@@ -481,28 +1026,70 @@ class Session:
             return None
         if value.get("unchanged") is True:
             if last is not None and last[0] == token:
-                return last[1]
+                return last[1]  # (only a whole tree is kept as the token's: unchanged is a full read)
             # an "unchanged" this read can't use (it sent no such token): read the whole tree
-            return await self._compact_tree(timeout, since=False) if since else None
+            return await self._compact_tree(timeout, since=False, budget_ms=budget_ms, budget_for=budget_for,
+                                            remember=remember, read_path=read_path) if since else None
         try:
             source = ui.xml_of_tree(value.get("tree"))
         except ValueError as e:
             getattr(self.device, "log", lambda *a: None)(f"compact read unreadable ({e}): /source instead")
             return None
         self.fast_read = True
-        self.last_compact = (token, source)
+        tier = "full"  # (a read without a budget, an older runner's: whole, as 1.10.0 took it)
+        if budget_ms is not None:
+            tier = value.get("tier") if value.get("tier") in TIERS else "full"
+            if tier == "full" and value.get("truncated") is True:
+                tier = "shallow"  # (said truncated: never taken for a whole tree)
+        why = value.get("why")
+        self.last_tier, self.last_why = tier, why if isinstance(why, str) else ""
+        if budget_ms is not None:
+            took_ms = (time.monotonic() - began) * 1000
+            left = int(budget_ms - took_ms - RETRY_GAP * 1000)
+            gave_up = _gave_up_ms(self.last_why)
+            if tier == "root" and gave_up is not None and gave_up < QUICK_CUT * budget_ms and left >= RETRY_MIN_MS:
+                # the runner gave the read up long before its budget: the app didn't keep it waiting, it had nothing to
+                # answer with yet (0.5 s after a launch: kAXErrorServerNotFound after 8 ms). Asked again within what is
+                # left of the budget, so an app that is only starting isn't taken for one that doesn't answer.
+                if TRACE:
+                    getattr(self.device, "log", lambda *a: None)(
+                        f"trace tree read given up after {gave_up:.0f} ms of {budget_ms}: asked again"
+                        f"{': ' + self.last_why[:120] if self.last_why else ''}")
+                await asyncio.sleep(RETRY_GAP)
+                return await self._compact_tree(timeout, since=False, budget_ms=left, budget_for=budget_for,
+                                                remember=remember, read_path=read_path,
+                                                budget_asked=budget_asked or budget_ms)
+            if remember:
+                self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_asked or budget_ms,
+                                      took_ms)
+            if tier != "full":
+                getattr(self.device, "log", lambda *a: None)(
+                    f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")
+        # a cut-short tree is no baseline for "unchanged": the next read asks for the whole tree again
+        self.last_compact = (token, source) if tier == "full" else None
         return source
 
     async def read_center(self, timeout: float = READ_CUT) -> str:
         """Notification Center's tree (SpringBoard's) as XML, read once and kept nowhere: not as the last read, not as the
         compact read's token, never traced but for its timing (notifications.py drops every other app's notification
         from it at once). No banner wait: its notifications are what is read."""
+        tier_was, why_was = self.last_tier, self.last_why
         try:
-            return str(await self._read_tree(timeout) or "")
+            source = str(await self._read_tree(timeout, center=True) or "")
+            self.center_tier = self.last_tier
+            return source
         finally:
             self.last_compact = None
+            # (R200v L4) not the newest read of the app either: its tier is left as the app's read left it
+            self.last_tier, self.last_why = tier_was, why_was
 
     async def foreground_bundle_id(self) -> str | None:
+        """The bundle id of the app in front. (2.0, worker H) By route version 11's FRONT_PATH when the runner has it:
+        found as a tree read finds its root's app, without reading the app (a few ms, where /wda/activeAppInfo took
+        1.7-30 s on TikTok's feed); activeAppInfo only when that can't say."""
+        await self.ensure()
+        if (front := await self.front_app()) is not None:
+            return front[0]
         try:
             info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
         except ConnectionLost:
@@ -518,7 +1105,7 @@ class Session:
         if refresh:
             self.not_installed = set()
         try:
-            self.app_names = {a["bundle_id"]: a["name"] for a in await self.device.user_apps() if a["name"]}
+            await self._list_apps()
         except ConnectionLost:
             raise
         except Exception:  # a nicety: without names the header shows what WebDriverAgent says
@@ -529,6 +1116,8 @@ class Session:
         root's (label, bundle id): the same answer without a request (activeAppInfo cost 70 ms an answer)."""
         if known is not None:
             info = {"name": known[0], "bundleId": known[1]}
+        elif self.tw_version >= FRONT_VERSION and (front := await self.front_app()) is not None:
+            info = {"name": "", "bundleId": front[0]}  # (route version 11: without reading the app, as foreground_bundle_id)
         else:
             try:
                 info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
@@ -542,9 +1131,12 @@ class Session:
         if bundle == "com.apple.springboard":
             return "Home screen", bundle
         if bundle not in self.app_names and bundle not in self.not_installed:
-            await self.read_app_names()  # perhaps installed since; if not, don't ask again for this one
-            if bundle not in self.app_names:
-                self.not_installed.add(bundle)
+            if bundle.startswith(APPLE_APPS):
+                self._name_behind(bundle)
+            else:
+                await self.read_app_names()  # perhaps installed since; if not, don't ask again for this one
+                if bundle not in self.app_names:
+                    self.not_installed.add(bundle)
         return self.app_names.get(bundle) or str(info.get("name") or bundle), bundle
 
     async def read_scale(self, refresh: bool = False) -> float | None:
@@ -577,14 +1169,26 @@ class Session:
     async def snapshot(self, keyboard: bool = False, timeout: float = 60) -> Snapshot:
         """Read the tree, the foreground app and the scale; `items` is the new list, numbered from e1."""
         source = await self._source(timeout)
-        return await self.snapshot_from(ui.read(source, self.screen, keyboard=keyboard))
+        return await self.snapshot_from(self._tiered(ui.read(source, self.screen, keyboard=keyboard)))
 
     async def snapshot_from(self, tree: ui.Tree) -> Snapshot:
         """A snapshot of a tree that was already read (`refresh`): this adds the foreground app, the one
         request a tree-only read leaves out."""
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
-        self.app = self.read_app = await self._app(tree.app)
+        known = tree.app
+        if known is None and tree.tier != "full" and self.tw_version >= FRONT_VERSION:
+            # (2.0, worker H) a cut-short root that names no app: activeAppInfo reads the app (1.7-30 s on TikTok's feed);
+            # route version 11 says which app is in front without reading it, and if it can't say, the app isn't known
+            front = await self.front_app()
+            known = (self.app_names.get(front[0]) or front[0], front[0]) if front is not None else None
+            if known is None:
+                self.app = self.read_app = None
+                self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
+                self.last_tree = tree
+                self._seen_tree(tree)
+                return Snapshot(tree, None, self.scale)
+        self.app = self.read_app = await self._app(known)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
         self._seen_tree(tree)
@@ -593,6 +1197,78 @@ class Session:
     async def screenshot_png(self) -> bytes:
         """WebDriverAgent's /screenshot (PNG, full resolution): the fallback when the stream has no frame."""
         return base64.b64decode((await self._call("GET", "/screenshot", timeout=60))["value"])
+
+    def shoots(self) -> bool:
+        """Does the runner take JPEG shots, and send the OCR read's picture with its text (route version 11)? Known
+        once the session has started."""
+        return self.tw_version >= FRONT_VERSION
+
+    async def shot_jpeg(self, width: int | None = None) -> bytes:
+        """(route version 11) The screen as a JPEG by SHOT_PATH, `width` pixels wide (None: the screenshot's own),
+        upright as /screenshot's PNG is: about 50 ms, where the PNG took 250-640 ms. Raises DeviceError when the answer
+        has no picture that can be read."""
+        query = [*([f"width={int(width)}"] if width else []), f"quality={SHOT_QUALITY}"]
+        answer = await self._call("GET", f"{SHOT_PATH}?{'&'.join(query)}", timeout=SHOT_WAIT)
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if isinstance(value, dict) and isinstance(value.get("ms"), dict):
+            trace.note("shot_wda_ms", {k: v for k, v in value["ms"].items()
+                                       if isinstance(v, (int, float)) and not isinstance(v, bool)})
+        return _jpeg_of(value, "shot")
+
+    async def screen_picture(self, width: int | None = None) -> bytes:
+        """A picture of the screen now, for an answer when the stream has none: the runner's JPEG shot (route version
+        11; `width` pixels wide, None: full size), else /screenshot's PNG. A shot that fails is taken as a PNG."""
+        await self.ensure()
+        if self.shoots():
+            try:
+                return await self.shot_jpeg(width)
+            except ConnectionLost:
+                raise
+            except DeviceError as e:
+                getattr(self.device, "log", lambda *a: None)(f"the runner's JPEG shot failed ({e}): /screenshot instead")
+        return await self.screenshot_png()
+
+    def reads_text(self) -> bool:
+        """Can the runner read the screen's text itself (OCR_PATH, route version 9)? Known once a read has asked the
+        runner's routes (the first look of a session)."""
+        return self.tw_version >= BOUNDED_VERSION
+
+    async def read_text(self, level: str = "accurate") -> "list[ocr.Seen]":
+        """The text lines on the screen now, read on the phone by Apple's Vision (OCR_PATH): placed in this session's
+        points, in reading order. `level`: "accurate" (a look) or "fast" (wait_for's polls). Raises DeviceError when the
+        runner can't (the caller reads the picture on this computer instead)."""
+        return (await self._read_text(level, None))[0]
+
+    async def read_text_and_picture(self, level: str = "accurate",
+                                    width: int | None = None) -> "tuple[list[ocr.Seen], bytes]":
+        """(route version 11) read_text, and the picture the text was read from as a JPEG `width` pixels wide (None:
+        full size), in one request (`image=1`): a look whose tree was cut short needs both. Raises DeviceError when the
+        runner can't, or its answer has no picture (an older runner ignores `image`)."""
+        if not self.shoots():
+            raise DeviceError("this runner can't send the OCR read's picture (route version 11)")
+        seen, value = await self._read_text(level, width or 0)
+        return seen, _jpeg_of(value, "OCR read")
+
+    async def _read_text(self, level: str, image: int | None) -> "tuple[list[ocr.Seen], object]":
+        """(the lines, the answer's value): read_text's request; with `image` (a width, 0: full size) it asks for the
+        picture too."""
+        if level not in ("fast", "accurate"):
+            raise ValueError(f"level must be fast or accurate, not {level!r}")
+        languages = ",".join(p.strip() for p in OCR_LANGUAGES.split(",") if p.strip())
+        if level == "fast" and not fast_reads(languages):
+            level = "accurate"  # (review R200v M4) the fast level would fail every read in these languages
+        path = f"{OCR_PATH}?level={level}" + (f"&languages={urllib.parse.quote(languages, safe=',-')}" if languages else "")
+        if image is not None:
+            path += f"&image=1{f'&width={int(image)}' if image else ''}&quality={SHOT_QUALITY}"
+        answer = await self._call("GET", path, timeout=OCR_WAIT, again=False)
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if isinstance(value, dict) and isinstance(value.get("ms"), dict):
+            trace.note("ocr_wda_ms", {k: v for k, v in value["ms"].items()
+                                      if isinstance(v, (int, float)) and not isinstance(v, bool)})
+        try:
+            return ocr.of_runner(value, self.screen), value
+        except ValueError as e:
+            raise DeviceError(f"the runner's OCR answer can't be read: {e}") from None
 
     async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):
         """(text, jpeg bytes or None): the screen as elements, and as a picture."""
@@ -609,7 +1285,7 @@ class Session:
             img.save(buf, "JPEG", quality=80)
             image = buf.getvalue()
         return ui.describe(tree.items, self.screen, scale, app, tree.alert, tree.keyboard, tree.more,
-                           (tree.above, tree.below)), image
+                           (tree.above, tree.below), tier=tree.tier), image
 
     async def back_point(self) -> ui.Back:
         """The top navigation bar: whether there is one, and where its back button is, in points."""
@@ -638,12 +1314,17 @@ class Session:
         """Read the tree and keep nothing of it: `items` and the rest stay as the last read left them (one request). For a
         check right before a touch that must see the screen as it is now without renumbering the agent's list (a draft's
         digest: Codex, PR #12 cycle 1, H3)."""
-        return ui.read(await self._source(timeout), self.screen)
+        return self._tiered(ui.read(await self._source(timeout), self.screen))
+
+    def _tiered(self, tree: ui.Tree) -> ui.Tree:
+        """The tree, marked with how much of it the read that made it got (`last_tier`, route version 9)."""
+        tree.tier = self.last_tier
+        return tree
 
     async def refresh(self, timeout: float = 60) -> ui.Tree:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""
         source = await self._source(timeout)
-        tree = ui.read(source, self.screen)
+        tree = self._tiered(ui.read(source, self.screen))
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
@@ -688,8 +1369,20 @@ class Session:
         (the home screen), are not held up."""
         if at[1] >= BANNER_ZONE:
             return
+        # (review L-M2) the agent's newest read is of SpringBoard itself (Control Center pulled over an app, the home
+        # screen): it is aiming at SpringBoard's own screen, and nothing slid over what it aimed at
+        if isinstance(self.read_app, tuple) and self.read_app[1] == SPRINGBOARD:
+            return
         waited = 0.0
-        while await self.foreground_bundle_id() == SPRINGBOARD:
+        while True:
+            if self.tw_version >= FRONT_VERSION:
+                # (review L-M1) only the route that answers in a few ms: when it can't say, the touch goes out.
+                # foreground_bundle_id would fall back to activeAppInfo, 1.7-30 s on a screen that doesn't answer
+                front = await self.front_app()
+                if front is None or front[0] != SPRINGBOARD:
+                    return
+            elif await self.foreground_bundle_id() != SPRINGBOARD:
+                return
             try:
                 in_front = await asyncio.wait_for(self.device.foreground_apps(), 5)
             except Exception:
@@ -714,7 +1407,11 @@ class Session:
     async def _fast_tap(self, x: float, y: float, hold_ms: int) -> bool:
         """Touch through the fork's fast tap route when this runner has it (see FAST_TAP). False when the touch is
         left to W3C actions: no route, not portrait (the route's points are portrait screen points), or an error
-        that says nothing was played. An error that may come after the touch was played is raised, never retried."""
+        that says nothing was played. An error that may come after the touch was played is raised, never retried.
+        Hands (HID) go first when they can be used: they need no runner route and work in landscape too."""
+        # (getattr: a session without hands, a test's fake among them, runs only the code below, as before 2.0)
+        if getattr(self, "hands", None) is not None and await self._hands_tap(x, y, hold_ms):
+            return True
         if FAST_TAP == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
             return False
         await self.ensure()
@@ -742,6 +1439,104 @@ class Session:
         if checked:
             self.front_apps = None  # the app in front was one of them as the touch went out: the check is done
         return True
+
+    def hands_on(self) -> bool:
+        """May the next touch try the hands? Not with TAPWRIGHT_HANDS=runner, not without Hands, and not while a tap
+        is to check the app in front itself (front_apps: only the runner's tap can)."""
+        return self.hands is not None and HANDS != "runner" and self.front_apps is None
+
+    async def _by_hands(self, what: str, act: "Callable[[Callable[[], Awaitable[None]]], Awaitable[None]]",
+                        input_: bool = True, detail: str = "") -> bool:
+        """Play a gesture through the hands: `act(before)` sends it, awaiting `before` right before its first report.
+        `before` makes the checks a runner request makes in _timed (the execution guard, then the one-use input check
+        for an input), and the trace notes the touch. False, with nothing sent, when the hands can't be used
+        (HandsUnavailable): the caller uses the runner, as before. Anything else is raised as it came (ConnectionLost,
+        HandsError = Unanswered: it may have been played; or a guard's refusal: nothing was sent)."""
+        if not self.hands_on():
+            return False
+        await self.ensure()  # (the tunnel, and the screen's size from the runner's session)
+        validate = self.before_input if input_ else None
+        pending: list = []
+
+        async def before() -> None:
+            guard = getattr(self, "execution_guard", None)
+            if guard is not None:
+                await guard()
+            if validate is not None:
+                await validate(self.input_point)
+            pending.append(None if QUIET.get() else trace.request("POST", f"{HANDS_PATH}/{what}"))
+
+        began = time.monotonic()
+        try:
+            await act(before)
+        except hands_module.HandsUnavailable:
+            return False
+        except BaseException:
+            if pending:
+                trace.response(pending[0], ok=False)
+            raise
+        if validate is not None and self.before_input is validate:
+            self.before_input = None
+        if pending:
+            trace.response(pending[0], {})
+        self.hands_at = time.monotonic()  # (the daemon's settle believes "nothing changed" later after a hands touch)
+        if TRACE and not QUIET.get():
+            getattr(self.device, "log", lambda *a: None)(
+                f"trace hands {what} {(time.monotonic() - began) * 1000:.0f} ms{detail}")
+        return True
+
+    async def _hands_tap(self, x: float, y: float, hold_ms: int) -> bool:
+        """A tap or long press through the hands. A plain tap (TAP_MS) gets a human hold and lands within a point of
+        its target (motion.tap); a long press keeps its hold."""
+        hands = self.hands
+        if hands is None or not self.hands_on():
+            return False
+        if hold_ms == TAP_MS:
+            hx, hy, held = motion.tap(x, y, self.motion_rng)
+            if held:
+                x, y, hold_ms = hx, hy, held
+        return await self._by_hands("tap", lambda before: hands.tap(x, y, hold_ms, screen=self.screen,
+                                                                    turn=self.turn, before=before),
+                                    detail=f" at ({x:.1f}, {y:.1f}) hold {hold_ms} ms, turn {self.turn}")
+
+    async def hands_keys(self, text: str) -> bool:
+        """Type US-ASCII text into whatever has focus through the HID keyboard (for later use: type_text still goes
+        through the runner). False when the hands can't be used; hands.Untypable before anything is sent."""
+        hands = self.hands
+        if hands is None:
+            return False
+        hands_module.plan_keys(text)  # (Untypable before any guard or touch hook runs)
+        return await self._by_hands("keys", lambda before: hands.keys(text, before=before))
+
+    async def pinch(self, x: float, y: float, scale: float, ms: int = 500) -> str:
+        """Two fingers about (x, y), moving apart (scale > 1: zoom in) or together (scale < 1) along a line through it,
+        over `ms`. Hands only: Refused(unsupported) when they can't be used (nothing was touched)."""
+        hands = self.hands
+        if hands is None or not self.hands_on():
+            raise Refused("unsupported", "pinch needs touches through CoreDevice HID, which this phone or Tapwright "
+                                         "setup doesn't have; nothing was touched.")
+        self.typed_into = None
+        await self.ensure()
+        if hands.why_not(getattr(self.device, "rsd", None)) is not None:  # (review R200 L1: before Tapline hears of it)
+            raise Refused("unsupported", "pinch needs touches through CoreDevice HID, which this phone doesn't take; "
+                                         "nothing was touched.")
+        near, far = pinch_spread(x, y, scale, self.screen)
+        try:
+            # (CodeRabbit, PR #26) a turn the hands can't map is refused before the touch hook tells anyone of a touch
+            hands_module.Hands._mapped(self.screen, self.turn)
+        except hands_module.HandsUnavailable as e:
+            raise Refused("unsupported", f"pinch needs touches through CoreDevice HID, and they can't be used now "
+                                         f"({e.reason}); nothing was touched.") from None
+        await self._touching(ms, (x, y))
+        ends = [(-1.0, 0.0), (1.0, 0.0)]
+        paths = [[(0.0, x + dx * near, y + dy * near), (float(ms), x + dx * far, y + dy * far)] for dx, dy in ends]
+        if not await self._by_hands("pinch", lambda before: hands.multi(paths, screen=self.screen, turn=self.turn,
+                                                                         before=before)):
+            raise Refused("unsupported", "pinch needs touches through CoreDevice HID, and they can't be used now; "
+                                         "nothing was touched.")
+        self.last_point = (x, y)
+        return f"{'spread' if scale >= 1 else 'pinched'} two fingers at ({round(x)}, {round(y)}), " \
+               f"{2 * near:.0f} -> {2 * far:.0f} pt apart"
 
     async def hit_at(self, x: float, y: float) -> ui.Hit | None:
         """The element a touch at (x, y) would land on, as the fork's hit test says (HIT_PATH, route version 5). None
@@ -822,6 +1617,23 @@ class Session:
             return  # do not cache a malformed response as proof of a legacy runner
         self.fast_tap, self.fast_drag = version >= 1, version >= 2
         self.tw_version = version
+        if version >= BOUNDED_VERSION and not self.bounded and self.sid is not None:
+            await self._bound_late()
+
+    async def _bound_late(self) -> None:
+        """(review R200v L6) ensure's version probe couldn't tell, so the session started as 1.10.0's did; a later probe
+        says version 9: the runner's ceiling for every accessibility read is set now (its reads are budgeted from now
+        on too), so the session isn't half-bounded. A setting that can't be posted leaves it as it was (asked again by
+        the next session)."""
+        try:
+            await self._call("POST", "/session/{sid}/appium/settings", {"settings": {"twAXTimeout": AX_TIMEOUT}},
+                             timeout=READ_CUT)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            getattr(self.device, "log", lambda *a: None)(f"the runner's AX timeout couldn't be set ({e})")
+            return
+        self.bounded = True
 
     async def runner_version(self) -> int:
         """The fork's route version of this phone's runner (0: not the fork)."""
@@ -914,15 +1726,23 @@ class Session:
         deleted = value.get("deleted") if isinstance(value, dict) else None
         return deleted if isinstance(deleted, int) and not isinstance(deleted, bool) else 0
 
-    async def _drag(self, points: list, w3c: dict) -> None:
+    async def _drag(self, points: list, w3c: dict, shaped: list | None = None) -> None:
         """Play a finger path, [(t_ms from the press, x, y), ...] in points: through the fork's fast drag route when
-        this runner has it (see FAST_DRAG), else as the W3C actions `w3c`, which describe the same path."""
-        if not await self._fast_drag(points):
+        this runner has it (see FAST_DRAG), else as the W3C actions `w3c`, which describe the same path. `shaped`: the
+        human-like version of a free swipe (motion.swipe), played instead of `points` when hands play it."""
+        if not await self._fast_drag(points, shaped):
             await self._call("POST", "/session/{sid}/actions", w3c, timeout=points[-1][0] / 1000 + ACTION_WAIT)
 
-    async def _fast_drag(self, points: list) -> bool:
+    async def _fast_drag(self, points: list, shaped: list | None = None) -> bool:
         """False when the drag is left to W3C actions: no route, not portrait, or an error that says nothing was
-        played. An error that may come after the drag was played is raised, never retried: it would scroll twice."""
+        played. An error that may come after the drag was played is raised, never retried: it would scroll twice.
+        Hands (HID) go first when they can be used."""
+        hands = getattr(self, "hands", None)  # (as in _fast_tap: no hands, the code as before 2.0)
+        if hands is not None:
+            path = shaped or points
+            if await self._by_hands("drag", lambda before: hands.path(path, screen=self.screen, turn=self.turn,
+                                                                      before=before)):
+                return True
         if FAST_DRAG == "0" or FAST_TAP == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
             return False
         await self.ensure()
@@ -1237,8 +2057,12 @@ class Session:
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
         self.typed_into = None
         await self._touching(duration_ms + hold_ms, (x0, y0))
+        # a free swipe through the hands moves as a person's finger does (motion.swipe); one that rests at its end
+        # (hold_ms) keeps the straight shape, as scroll drags keep theirs
+        shaped = (motion.swipe(x0, y0, x1, y1, duration_ms, self.motion_rng)
+                  if getattr(self, "hands", None) is not None and motion.HUMAN and not hold_ms else None)
         await self._drag(ui.swipe_points(x0, y0, x1, y1, duration_ms, hold_ms),
-                         ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms))
+                         ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms), shaped)
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
@@ -1259,7 +2083,16 @@ class Session:
         return f"dragged through {len(points)} points"
 
     async def press_button(self, name: str) -> str:
+        """A hardware button: through the hands when they can be used (lock only there: XCTest can't press it), else
+        the runner (home by its home-screen route, which waits for the home screen)."""
         self.typed_into = None
+        hands, hand = getattr(self, "hands", None), HAND_BUTTONS.get(name)
+        if hands is not None and hand is not None and await self._by_hands(
+                "button", lambda before: hands.button(hand, before=before), input_=False):
+            return f"pressed {name}"
+        if name == "lock":
+            raise Refused("unsupported", "lock needs CoreDevice HID, which this phone or Tapwright setup doesn't have "
+                                         "(the runner can't press it); nothing was pressed.")
         if name == "home":  # pressButton "home" does nothing on iOS 26 (measured); this one waits for the home screen
             await self._call("POST", "/wda/homescreen", {})
         else:
@@ -1269,6 +2102,9 @@ class Session:
     async def rotate(self, to: str) -> str:
         """Turn the phone (XCUIDevice's orientation, no touch). The screen's new size comes with the next read."""
         await self._call("POST", "/session/{sid}/orientation", {"orientation": ORIENTATIONS[to]})
+        # which side is up is asked again by the next read; until then no touch is mapped by the old side (R200 H1)
+        self.turn = TURN_UNKNOWN
+        self._turn_asked = -float("inf")
         return f"rotated to {to.replace('_', ' ')}"
 
     async def key(self, name: str) -> str:
@@ -1312,10 +2148,48 @@ class Session:
         return f"Sent alert {action} request{named}. Check the screen to confirm the result."
 
     # ---- apps ----
-    async def apps(self) -> list[dict]:
+    def warm_hands(self) -> "asyncio.Task | None":
+        """Open CoreDevice HID behind the caller, so the first touch finds it open (Hands.warm). None when touches
+        don't go through the hands here."""
+        if self.hands is None or HANDS == "runner":
+            return None
+        task = asyncio.ensure_future(self.hands.warm())
+        task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (never a failed connect)
+        return task
+
+    async def apps(self, fresh: bool = False) -> list[dict]:
+        """The apps you installed. Asking the phone takes about a second (2.0: 0.9-1.1 s on USB, measured), and
+        open_app, close_app, a crash check and a header's name all need the list, so the last answer is kept and
+        given at once. One older than APPS_STALE is read again behind the call that used it, for the next one.
+        `fresh`: ask the phone now (what was looked for isn't in the kept list and may have been installed since)."""
         await self.ensure()
+        kept = self._apps
+        if fresh or kept is None:
+            return await self._list_apps()
+        if time.monotonic() - kept[0] > APPS_STALE and (self._apps_task is None or self._apps_task.done()):
+            self._apps_task = asyncio.ensure_future(self._list_apps())
+            self._apps_task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (never fails a call)
+        return kept[1]
+
+    def _name_behind(self, bundle: str) -> None:
+        """An Apple app the kept list doesn't hold is nearly always a built-in one, which the phone's list of
+        installed apps never holds: the list is read again behind this answer instead of before it (asking takes
+        about a second, and every first look at a built-in app paid it). One of Apple's installed since (Pages,
+        TestFlight) has its name from the next answer on; it isn't asked for again either way."""
+        if self._apps_task is not None and not self._apps_task.done():
+            return  # a read is on its way, begun before this app showed: the next answer asks again
+        self.not_installed.add(bundle)
+        self._apps_task = asyncio.ensure_future(self._list_apps())
+        self._apps_task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a nicety: never fails)
+
+    async def _list_apps(self) -> list[dict]:
+        self._apps_asked += 1
+        mine = self._apps_asked
         apps = await self.device.user_apps()
-        self.app_names = {a["bundle_id"]: a["name"] for a in apps if a["name"]}
+        if mine >= self._apps_kept:  # (review K, question 6: a read begun earlier never replaces a later one's list)
+            self._apps_kept = mine
+            self._apps = (time.monotonic(), apps)
+            self.app_names = {a["bundle_id"]: a["name"] for a in apps if a["name"]}
         return apps
 
     async def launch(self, bundle_id: str, arguments: list[str] | None = None) -> str:
@@ -1339,4 +2213,9 @@ class Session:
         return f"opened {url}"
 
     async def close(self) -> None:
+        if self.hands is not None:
+            try:
+                await asyncio.wait_for(self.hands.close(), 5)  # (before the tunnel goes: its services close cleanly)
+            except Exception:
+                pass
         await self.device.close()

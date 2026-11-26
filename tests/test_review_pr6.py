@@ -69,6 +69,7 @@ def test_a_plain_open_app_after_launch_overrides_relaunches_with_the_defaults():
         assert d.session.closed == ["com.example.app"] and d.session.launch_args[-1] == []
         await d.run_tool("a", "open_app", {**app, "language": "ar"})
         await d.run_tool("a", "close_app", {"app": "com.example.app"})  # closing forgets the overrides
+        await d._closing_done()  # (2.0: the runner is told behind the answer)
         d.session.closed.clear()
         await d.run_tool("a", "open_app", app)
         assert d.session.closed == []

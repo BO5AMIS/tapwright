@@ -649,3 +649,25 @@ def test_native_kill_rechecks_after_process_lookup_and_between_processes(monkeyp
             device_module.BEFORE_SEND.reset(token)
     asyncio.run(go(True))
     asyncio.run(go(False))
+
+
+def test_a_widgets_renderer_is_never_the_app_in_front(monkeypatch):
+    """Seen on the phone 2026-11-26: with an interactive widget on the home screen iOS lists
+    com.apple.chrono.WidgetRenderer-Default as a foreground application. `notifications` took it for an app under a
+    banner, "brought it back" and could not show Notification Center closed."""
+    import pymobiledevice3.services.dvt.instruments.device_info as device_info
+    import pymobiledevice3.services.dvt.instruments.dvt_provider as dvt_provider
+
+    class Info(_Ctx):
+        async def proclist(self):
+            return [{"pid": 35, "name": "SpringBoard", "bundleIdentifier": "com.apple.springboard",
+                     "foregroundRunning": True, "isApplication": False},
+                    {"pid": 9206, "name": "WidgetRenderer_Default", "foregroundRunning": True, "isApplication": True,
+                     "bundleIdentifier": "com.apple.chrono.WidgetRenderer-Default"},
+                    {"pid": 77, "name": "Example", "bundleIdentifier": "com.example.app", "foregroundRunning": True,
+                     "isApplication": True}]
+    monkeypatch.setattr(dvt_provider, "DvtProvider", _Ctx)
+    monkeypatch.setattr(device_info, "DeviceInfo", Info)
+    d = Device(log=lambda *a: None)
+    d.rsd = object()
+    assert asyncio.run(d.foreground_apps()) == ["com.example.app"]

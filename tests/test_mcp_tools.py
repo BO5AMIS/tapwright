@@ -29,6 +29,7 @@ EXPECTED = {
     "press_button": {"name", "look", "screenshot", "brief"},
     "unlock": set(),  # 1.7.8, Tapwright only: the passcode comes from serve's own vault, never from the call
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run", "brief"},
+    "pinch": {"x", "y", "scale", "seconds", "look", "screenshot", "brief"},  # 2.0, Tapwright only (CoreDevice HID)
     "rotate": {"to", "look", "screenshot", "brief"},
     "explore": {"minutes", "steps", "depth", "from", "focus", "fill", "continue", "guide"},  # (no account in 1.8.0: R180 M3)
     "bug_report": {"finding", "run", "from", "note", "expected", "verify", "reset", "account", "bug", "with_picture",
@@ -49,22 +50,24 @@ EXPECTED = {
 }
 REQUIRED = {"compare_screen": ["name"], "run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],
-            "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "rotate": ["to"], "network": ["mode"]}
+            "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "pinch": ["x", "y", "scale"], "rotate": ["to"], "network": ["mode"]}
 DEFAULTS = {
-    "look": {"screenshot": True, "width": 600, "labels": False, "ocr": False},
-    "tap": {"force": False, "look": True, "screenshot": False, "dry_run": False},
-    "long_press": {"seconds": 1.0, "force": False, "look": True, "screenshot": False, "dry_run": False},
-    "type_text": {"target": None, "replace": True, "submit": False, "force": False, "look": True, "screenshot": False,
+    # (2.0) `ocr` and an action's `screenshot` unset: the daemon decides (a picture where a tree was cut short)
+    "look": {"screenshot": True, "width": 600, "labels": False, "ocr": None},
+    "tap": {"force": False, "look": True, "screenshot": None, "dry_run": False},
+    "long_press": {"seconds": 1.0, "force": False, "look": True, "screenshot": None, "dry_run": False},
+    "type_text": {"target": None, "replace": True, "submit": False, "force": False, "look": True, "screenshot": None,
                   "dry_run": False},
     # no default direction in the schema: it is down, or the way `to` goes (as Tapline declares it)
-    "scroll": {"direction": None, "amount": 0.8, "to": None, "target": None, "look": True, "screenshot": False,
+    "scroll": {"direction": None, "amount": 0.8, "to": None, "target": None, "look": True, "screenshot": None,
                "dry_run": False},
     "toggle": {"value": None, "force": False, "look": True, "screenshot": False, "dry_run": False},
-    "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": False},
+    "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": None},
     "logs": {"since": None, "level": "info", "grep": None, "limit": 100, "all": False},
     "crash": {"all": False, "pull": False},
     "session_report": {"since": None},
-    "swipe": {"seconds": 0.35, "look": True, "screenshot": False, "dry_run": False},
+    "swipe": {"seconds": 0.35, "look": True, "screenshot": None, "dry_run": False},
+    "pinch": {"seconds": 0.5, "look": True, "screenshot": None},  # (CodeRabbit, PR #26: None, the daemon's default)
     "filmstrip": {"frames": 6, "interval_ms": 250, "frame_width": 200, "tap": None},
     "compare_screen": {"update": False, "width": 600, "threshold": 0.5, "ignore": None},
 }
@@ -100,7 +103,7 @@ def test_enums_are_literals():
         prop = tools[tool].input_schema["properties"][arg]
         return set(prop.get("enum") or [v for part in prop.get("anyOf", []) for v in part.get("enum", [])])
     assert enum("alert", "action") == {"accept", "dismiss", "text", "cancel"}
-    assert enum("press_button", "name") == {"home", "volumeUp", "volumeDown"}
+    assert enum("press_button", "name") == {"home", "lock", "volumeUp", "volumeDown"}  # (2.0: lock by HID)
     assert enum("scroll", "direction") == {"up", "down", "left", "right"}
     assert enum("scroll", "to") == {"start", "end", "target"}
 
@@ -141,16 +144,18 @@ def test_tools_forward_their_arguments_to_the_daemon(monkeypatch):
     asyncio.run(mcp_server.wait_for(text="Done", gone=True))
     asyncio.run(mcp_server.open_app(app="Settings"))
     assert seen == [
-        ("tap", {"target": {"label": "Log in", "index": 1}, "force": False, "look": True, "screenshot": False,
-                 "dry_run": False}),
+        # (2.0) an action's unset `screenshot` isn't sent: the daemon gives a picture where a tree was cut short
+        ("tap", {"target": {"label": "Log in", "index": 1}, "force": False, "look": True, "dry_run": False}),
         ("look", {"screenshot": True, "width": 600, "labels": False}),
-        ("scroll", {"direction": None, "amount": 0.8, "to": "start", "target": None, "look": True,
-                    "screenshot": False, "dry_run": False}),
+        ("scroll", {"direction": None, "amount": 0.8, "to": "start", "target": None, "look": True, "dry_run": False}),
         ("wait", {"seconds": 1.5, "look": True, "screenshot": False}),
-        ("wait_for", {"text": "Done", "id": None, "label": None, "gone": True, "timeout": 10.0, "look": True,
-                      "screenshot": False}),
+        ("wait_for", {"text": "Done", "id": None, "label": None, "gone": True, "timeout": 10.0, "look": True}),
         ("open_app", {"app": "Settings", "look": True, "screenshot": False}),
     ]
+    seen.clear()  # an explicit false is sent, and so is a look's ocr either way
+    asyncio.run(mcp_server.tap(target=mcp_server.Target(x=1, y=2), screenshot=False))
+    asyncio.run(mcp_server.look(ocr=False))
+    assert seen[0][1]["screenshot"] is False and seen[1][1]["ocr"] is False
 
 
 def test_round_trip_through_the_server(monkeypatch):
@@ -167,7 +172,7 @@ def test_round_trip_through_the_server(monkeypatch):
     assert seen == [
         ("toggle", {"target": {"id": "wifi"}, "value": True, "force": False, "look": True, "screenshot": False,
                    "dry_run": False}),
-        ("press_button", {"name": "home", "look": False, "screenshot": False}),
+        ("press_button", {"name": "home", "look": False}),
     ]
     bad = asyncio.run(mcp_server.server.call_tool("press_button", {"name": "power"}))
     assert bad.is_error and bad.content[0].text.startswith("Error bad_params: ") and len(seen) == 2

@@ -293,7 +293,11 @@ EXTRA = {
     ),
     'look': (
         'reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture '
-        'that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note.'
+        'that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note. '
+        "A screen that doesn't answer in time (a video feed, a game) says `Elements: none` or `partly read`, and "
+        "lists its picture's text as `o` refs by itself (`ocr: false` leaves it out; an `o` ref ends with your next "
+        "action). There touch an `o` ref, a point or a `{text}`; an id, label or `e` ref is `not_found`, `audit` and "
+        '`ux_check` are `unsupported`.'
     ),
     'tap': (
         "makes a real touch at the element's centre, or at the centre of its visible part when a bar covers the "
@@ -302,8 +306,9 @@ EXTRA = {
     'long_press': 'holds for `seconds`.',
     'type_text': (
         "taps the field and waits until it has focus and the keyboard is up, then types on the keyboard. It can't "
-        "see which field is focused, so without a target it uses the only input on screen. A secure field's value "
-        'is reported as hidden.'
+        "see which field is focused, so without a target it uses the only input on screen; where the screen's "
+        "elements weren't read, it types into whatever has the keyboard's focus. A secure field's value is reported "
+        'as hidden.'
     ),
     'scroll': (
         'drags on the screen; the main scroll view is the one at the screen\'s centre. `to: "target"` drags toward '
@@ -319,7 +324,10 @@ EXTRA = {
         'nothing changed.'
     ),
     'open_url': 'opens it on the phone, so another app may take it. The answer says which app came up.',
-    'wait_for': 'polls the screen, so it is slower; `network_idle` is `unsupported`.',
+    'wait_for': (
+        "polls the screen, so it is slower; `network_idle` is `unsupported`. Where the screen's elements weren't read, "
+        "a text is also looked for in the picture; an id or label can't be checked (`timeout`)."
+    ),
     'apps': 'the apps installed on the phone, with bundle ids.',
     'notifications': (
         "Your apps' notifications, newest first, at most 20 (`n1 Wayfare (id) 2m ago \"title\" \"body\"`). `open: n` "
@@ -335,6 +343,11 @@ EXTRA = {
         'opens the authenticated whole-phone live view in a local browser for the owner.'
     ),
     'swipe': 'makes a real drag along the line, ending slowly so a list stops where the finger does.',
+    'pinch': (
+        'Two fingers about a point (`x`, `y`, in points): `scale` above 1 spreads them (zoom in), below 1 pinches '
+        '(zoom out); 0.2 to 5. `seconds` is how long they move (0.5). Needs CoreDevice HID (iOS 18 to 26): else '
+        '`unsupported`, nothing touched.'
+    ),
     'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
     'close_app': (
@@ -398,6 +411,13 @@ EXTRA_185 = {
         'opened or `logs` is first used. iOS has no warning level: `error` is an error or fault, `warning` a '
         'plain line that says warn, error, exception, fatal or failed.'
     ),
+    # (2.0) the lines the 2.0 words above replaced: 1.8.5's own
+    'type_text': (
+        "taps the field and waits until it has focus and the keyboard is up, then types on the keyboard. It can't "
+        "see which field is focused, so without a target it uses the only input on screen. A secure field's value "
+        'is reported as hidden.'
+    ),
+    'wait_for': 'polls the screen, so it is slower; `network_idle` is `unsupported`.',
 }
 
 
@@ -405,6 +425,12 @@ EXTRA_185 = {
 # 1.8.5's words byte for byte (tests/data/tools_185.json). The unlock: an unlock that works isn't limited, and never on
 # another SpringBoard keypad (review R191 item 7, L9).
 SHARED_1100 = {
+    # (2.0) `lock` through CoreDevice HID: the runner can't press it
+    'press_button': (
+        'Press a hardware button: `home`, `lock`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps '
+        'running; `open_app` brings it back. `lock` locks the phone (CoreDevice HID only: `unsupported` without it); '
+        '`unlock` opens it again.'
+    ),
     'unlock': (
         'Unlock a locked phone with the passcode saved for it (the vault Tapwright was started with, `--accounts FILE`, '
         '`phone.passcode`). You never see or send the passcode: the tool types it on iOS\'s own lock screen, never on '

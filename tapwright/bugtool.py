@@ -573,8 +573,8 @@ class BugTools:
             return bugcheck.not_checked(CHECK_BUSY)
 
         def key_of(lang: str | None, tree) -> dict | None:
-            if tree is None or not places.has_structure(tree):
-                return None
+            if tree is None or not places.has_structure(tree) or getattr(tree, "tier", "full") != "full":
+                return None  # (R200v M1: a tree the runner cut short says no place)
             key = places.read_place(tree, lang).key
             return {"signature": key["signature"]} if isinstance(key.get("signature"), str) else None
         tokens: tuple = ()

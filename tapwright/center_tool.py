@@ -45,6 +45,8 @@ NOTE_ON_SCREEN = ("Notification Center was on the phone's screen for about a sec
                   "showed it too); only {whose} notifications were read out.")
 FROM_OTHERS_APPS = ("com.apple.MobileSMS", "com.apple.mobilemail")  # their notifications are others' words (§21.1)
 NOT_OPENED = "Notification Center didn't open, so nothing was read."
+CENTER_CUT = ("not all of Notification Center's elements were read within the time given, so more notifications may be "
+              "there than are listed; call notifications again.")  # (2.0, review R200v L4)
 TRIGGER_CLIENT = "notification-trigger"  # the trigger's check: never a client with calls of its own
 NOT_CLOSED = ("Notification Center may still be on the phone's screen: closing it didn't work, so nothing read is "
               "answered. Look at the screen, and close it (or ask the user to) before anything else.")
@@ -223,6 +225,8 @@ class CenterTools:
                 raise Refused("not_found", NOT_OPENED)
             found = notes_lib.parse(source, names, keep)
             del source  # (every other app's notification goes with it)
+            # (2.0, R200v L4) the runner may have cut the read short: what it left out may hold notifications
+            self._center_cut = getattr(s, "center_tier", "full") != "full"
             if open_index is not None and 1 <= open_index <= len(found):
                 chosen = await self._same_notification(found[open_index - 1], open_index, names, keep)
                 await s.tap(ui.Target(x=chosen.center[0], y=chosen.center[1]))
@@ -290,10 +294,12 @@ class CenterTools:
             failed.append(type(e).__name__)
         try:
             front = await s.foreground_bundle_id()
+            pressed = False
             if before and before != SPRINGBOARD and front != before:
                 await s.launch(before)  # (it was running: this brings it back as it was)
             elif home_ok and (not before or before == SPRINGBOARD) and front == SPRINGBOARD:
                 await s.press_button("home")  # the home screen, with nothing pulled down over it
+                pressed = True
             # the check: the app that was in front is again, or (from the home screen) no Notification Center is read
             if before and before != SPRINGBOARD:
                 closed = await s.foreground_bundle_id() == before
@@ -301,6 +307,11 @@ class CenterTools:
                     closed = not notes_lib.is_center(await s.read_center())
             else:
                 closed = not notes_lib.is_center(await s.read_center())
+                if not closed and pressed:
+                    # (CodeRabbit, PR #26) through the hands the press answers as it is pressed (the runner's route
+                    # waited for the home screen): the center may still be going up. Read once more after it has time
+                    await asyncio.sleep(CENTER_CLOSE_WAIT)
+                    closed = not notes_lib.is_center(await s.read_center())
         except Refused:
             raise
         except Exception as e:  # noqa: BLE001 - not shown closed
@@ -333,6 +344,12 @@ class CenterTools:
         apps = "your apps" if given is not None else "the phone's apps"
         note = NOTE_ON_SCREEN.format(whose=whose)
         if n is not None:
+            if opened is None and getattr(self, "_center_cut", False):
+                # (CodeRabbit, PR #26) n may be among what the cut-short read left out: never told absent
+                raise Refused("not_found", f"{len(found)} notification{'' if len(found) == 1 else 's'} from {apps} "
+                                           f"{'was' if len(found) == 1 else 'were'} read, so n{n} couldn't be checked; "
+                                           f"nothing was opened. Call notifications to read the list again.\n"
+                                           f"Note: {CENTER_CUT}\nNote: {note}")
             if opened is None:
                 raise Refused("not_found", f"there {'is' if len(found) == 1 else 'are'} {len(found)} notification"
                                            f"{'' if len(found) == 1 else 's'} from {apps} now, so n{n} isn't "
@@ -342,8 +359,11 @@ class CenterTools:
                 f"Opened n{n}: {self._notification_line(opened, n)}", *(f"Note: {x}" for x in [*notes, note]),
                 "Note: look shows the screen it opened."])), "image": None, "image_size": None}
         names = sorted({x.app for x in found})
+        cut = getattr(self, "_center_cut", False)
         head = (f"Notifications: {len(found)} from {', '.join(names)} (newest first)." if found else
-                f"Notifications: none from {apps}.")
+                f"Notifications: none read from {apps}." if cut else f"Notifications: none from {apps}.")
+        if cut:  # (R200v L4) never a list that looks whole when it isn't
+            notes = [*notes, CENTER_CUT]
         lines = [head, *(self._notification_line(x, i) for i, x in enumerate(found, 1))]
         return {"text": self.scrub_everywhere("\n".join([*lines, *(f"Note: {x}" for x in [*notes, note])])),
                 "image": None, "image_size": None}

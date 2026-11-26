@@ -168,6 +168,18 @@ def test_stream_sends_the_newest_frame_with_its_headers():
     assert b"X-Source: wda\r\n" in body and b"X-Coverage: screen\r\n" in body and b"X-Size: 400x800\r\n" in body
 
 
+def test_stream_sends_a_frame_as_captured_while_the_landscape_side_is_unknown():
+    """(CodeRabbit, PR #26) turn -1 (landscape, which side up not known yet) went to turn_jpeg, whose KeyError ended the
+    viewer's stream on the first frame."""
+    app, d = app_and_daemon()
+    d.session.screen, d.session.turn = (800.0, 400.0), -1
+    d.hub.publish(b"\xff\xd8one")
+    d.hub.close()
+    with TestClient(app) as c:
+        r = c.get("/stream", headers=AUTH)
+    assert r.status_code == 200 and b"\xff\xd8one" in r.content and b"X-Size: 800x400\r\n" in r.content
+
+
 def test_stream_closes_each_part_with_the_next_boundary():
     """A browser <img> shows a frame when the next boundary arrives, so it must follow the JPEG at once."""
     app, d = app_and_daemon()

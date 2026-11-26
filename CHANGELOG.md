@@ -1,5 +1,122 @@
 # Changelog
 
+## 2.0.0 (2026-11-26)
+
+- Faster over USB: Tapwright's requests to the runner on the phone and the live screen stream now go straight through
+  the cable's own channel (usbmuxd) instead of through the developer tunnel: a status check answers in 1 ms, a screenshot
+  in about 240 ms instead of 400 ms. The tunnel stays for starting the runner and for what needs it, and carries
+  everything on Wi-Fi, or over USB when `TAPWRIGHT_DIRECT=0` is set.
+- Hands: taps, long presses, swipes, scrolls and drags go from the computer straight to the phone's touchscreen through
+  CoreDevice HID, on the connection Tapwright already has. No XCTest touch synthesis: a tap is played in about 50 ms
+  instead of about 300, works while an app plays video, and in landscape too. Free swipes move as a finger does (a short
+  rest, an eased start and end, a slight curve); scrolls keep their shape, so a list still stops where the finger does.
+  `TAPWRIGHT_HUMAN=0` keeps straight swipes. Where HID can't be used (iOS older than 18, iOS 27 until the display stream
+  lands, or `TAPWRIGHT_HANDS=runner`), touches go through the runner as before; `TAPWRIGHT_HANDS_LANDSCAPE=0` leaves
+  landscape to the runner.
+- A touch that may have been sent is never sent a second time another way: if the link to the phone drops in the middle
+  of a gesture, the call answers that the touch may have been played (look first), and for 5 seconds after a release
+  that could not be sent nothing is touched through the runner either.
+- After a touch from the computer, `No visible change.` is only said 0.8 s after the touch ended (the phone answers a
+  touch at once, and a page may still be opening), and a settle can't end on a row's highlight (not before 0.35 s).
+- `press_button lock` locks the phone (the runner can't); `home` and the volume buttons are pressed through HID too.
+- `pinch`: two fingers spread (`scale` above 1, zoom in) or pinched (below 1, zoom out) about a point. Needs HID.
+- Needs pymobiledevice3 11.63 or later.
+- The runner is now at route version 15 (`tw-16.15.3.15`). A phone with an older runner keeps working (without the
+  new reads, as in 1.10.0); to install the new one, run `tapwright doctor --fix` (phone on USB, `tapwright serve`
+  stopped: it signs the runner again with your stored profile and installs it) or `tapwright setup --force`.
+- Screens that never answer accessibility reads in time (TikTok's For You feed, games, canvases, some web views) no
+  longer stop Tapwright. With the new runner every read is bounded: a tree read answers within its budget (3 s;
+  `TAPWRIGHT_TREE_BUDGET` in ms) with what it could read, and every other accessibility read stops after 3 s
+  (`TAPWRIGHT_AX_TIMEOUT`, in seconds). An app whose read was cut short gets a 1.5 s budget for the next 60 s, so a look
+  there doesn't cost 3 s each time; once it answers whole again after more than 1.5 s, the normal budget comes back.
+  A screen that stands still (a profile, a photo post, a paused video) gets the normal budget once, then the memory
+  holds for its 60 s too, so a still screen that doesn't answer doesn't pay the normal budget on every read.
+- A screen that doesn't answer and keeps moving (a playing feed) is not read again for 8 seconds after a real read: the
+  app in front is asked for instead (it takes a few milliseconds), so an action there doesn't pay a read before and
+  after it. One real short read goes out every 8 seconds.
+- A look at such a screen still answers: its header says `Elements: none (the screen's elements weren't read within
+  the time given)` or `Elements: partly read`, lists what it could read, and the text in the picture follows as `o1`, `o2`…
+  refs without asking (`ocr: false` leaves it out), with the picture.
+- Text from the picture is read on the phone by Apple's Vision when the runner has it (faster than this computer's CPU),
+  also for `look {ocr: true}`; RapidOCR on this computer (`pip install "tapwright[ocr]"`) is the fallback, and a failed
+  read on the phone falls back to it instead of failing the look. `TAPWRIGHT_RUNNER_OCR=0` reads only on this computer;
+  `TAPWRIGHT_OCR_LANGUAGES` (e.g. `en-US,ar-SA`) sets the languages the phone reads.
+- Actions on such a screen work: a tap or long press at `{x, y}`, an `o` ref or a `{text}`, `swipe`, `scroll` (by
+  direction, or at a point), `press_button`, and `type_text` without a target (into whatever has the keyboard's focus; it
+  isn't cleared first, a saved account's value isn't typed there, and a recording keeps no text typed there, as for a
+  password field). The answer says what was done and `Elements: none…`, with the picture after it unless
+  `screenshot: false`.
+- A tap or long press aimed by `{text}` on a screen whose elements weren't read looks for the text in the text read from
+  the picture and touches the centre of the line that shows it, as `wait_for` does. Several lines show it: `ambiguous`,
+  listing them as `o` refs of a new reading, or pick one with `index`. When the phone was used between the reading
+  of the text and the touch (a person in the live view, another agent), the touch is refused `stale`: look again. The
+  same holds for a touch on an `o` ref, and an action of your own that may have sent input ends your `o` refs. A
+  target by id, label or `e` ref there, a
+  `{text}` the picture doesn't show, and a `{text}` target of any other call than `tap` and `long_press` (`toggle`,
+  `type_text` into a named field, `scroll` to a target) answer `not_found` with how to reach the screen. `wait_for` a
+  text also looks for it in the picture's text there; an id or label there can't be checked, so `wait_for`, `expect`
+  and a `run` step's `if` answer `timeout` saying so (never `Done`, never a failed check; the run stops there).
+- On such a screen nothing is reported as known that wasn't read: `audit` and `ux_check` answer `unsupported` (a
+  report from part of a screen would be false), no place, road or route is saved from it, `explore` files no "no way
+  back" from it, a journey's stress says survival couldn't be checked, `compare_screen` won't ignore elements it
+  couldn't read, and a replay stopped there is no failed route and no break to repair. `notifications` says when
+  Notification Center was read only in part.
+- With the runner at route version 10 or later, a tree read with a budget is the runner's lean direct read (the
+  attributes the list uses): faster than XCTest's way on every screen measured, and it keeps to its budget on a screen
+  that never answers (`TAPWRIGHT_TREE_PATH=direct|xctest` forces one way; `TAPWRIGHT_TREE_ATTRS=std` turns the lean set
+  off). With route version 9 the normal budget reads the way XCTest does and the short budget the direct way. Touches by
+  point or `o` ref there aren't refused as `stale` for a picture that keeps moving.
+- Actions on a screen that doesn't answer settle quickly: the answer waits at most 0.5 s for the picture to stand still
+  (instead of 2 s), 1 s while that app's tree reads whole, and 2 s after the app was launched, until the screen stands
+  still or reads whole again.
+- The look after an action, `back` and the pictures are quicker with runner route version 11: the app in front is found
+  without reading it (`/wda/tw/front`), the picture comes from the runner as a JPEG in about 50 ms (the PNG took
+  250 to 640 ms), and a cut-short look gets its picture and its text in one request. `back` takes its button from your
+  last list, without a new read, when that list is the newest, whole, current and the screen stands still.
+- A read the runner gave up at once (an app just launched) is asked again within its budget, so a launched app is not
+  taken for one that doesn't answer. A new session reads the screen's size without reading the app in front, so a screen
+  that never answers no longer holds up the connection. `not_answering` is now only for an app that blocks even these
+  bounded reads.
+- `open_app`, `close_app` and a crash check use a kept list of the installed apps (asking the phone takes about a
+  second): it is given at once, read again behind the call when it is old, and asked fresh for a name it lacks. The
+  `apps` tool itself always asks the phone. `close_app`
+  answers without waiting for the runner to stop the app (an `open_app` waits for it), and the call after your own
+  `close_app` looks for no crash of the app you closed. Measured on a phone: `open_app` 3.3 s to 1.4 s, `close_app`
+  2.7 s to 0.5 s.
+- `TAPWRIGHT_TRACE=1` (for `tapwright serve`) also times the calls to the phone's own services.
+- After an action with `look: false`, the next call waits for what that action started before it reads the screen
+  (Settings shows nothing for about half a second after a tap on a row, then pushes the page: the next call took
+  that pause for the end and read the page being left). A change only at the screen's edges (the scroll indicator
+  fading, the home indicator) no longer counts as a change. A swipe of 10 points or more reads nothing before its
+  drag. `back` takes its
+  button from your list when the list was read a moment ago.
+- The touch connection is opened when the phone connects, not on the first touch. If touches are acknowledged by
+  the phone but none has changed the screen since the connection was opened (3 taps on elements in a row), it is
+  opened again, and
+  if that doesn't help touches go through the runner; the answer says so each time.
+- `press_button lock` answers `Locked the phone.` and the daemon knows at once: a touch right after it is refused
+  `locked` (before, it learned of the lock up to 5 s later).
+- A tap, long press or `back` aimed at an element in the top of the screen waits for a notification banner to leave
+  (with runner route version 11 or later): a banner that slid over the element used to take the touch and open its
+  own app. A point you give as `{x, y}` is touched as it is.
+- Text read from the picture in landscape is right again: with the screen turned, Apple's text reader returned each
+  line upside down (`789` as `68L`). The runner now reads a turned screen both ways up and keeps the better reading.
+- Over Wi-Fi, a read whose answer never comes is asked again after its budget and 5 s (10 s before).
+- A widget is never the app in front. With an interactive widget on the home screen (a Smart Stack that turned to
+  one), WebDriverAgent and iOS's own process list both named the process that draws widgets as the app in front:
+  the home screen read as a screen with no elements, each read cost its whole budget, and `notifications` could
+  not close Notification Center. The runner (route version 15) and the daemon now name the home screen.
+- Measured on one phone (iPhone 14 Pro Max, iOS 26.5, USB, Settings app, 1.10.0 and 2.0.0 one after the other,
+  medians): `open_app` 4.6 s to 1.7 s; `look` 0.53 s to 0.28 s; a tap with `look: false` 0.28 s to 0.11 s; a swipe
+  3.6 s to 1.3 s; `close_app` 2.7 s to 0.55 s; `press_button home` 1.7 s to 1.2 s; a tap by label that opens a page,
+  with its answer, 3.3 s to 2.4 s; `back` 4.0 s to 3.4 s; a scroll 1.5-1.9 s, unchanged. What is left in a tap's
+  answer is the phone's own: about 1.2 s until the page stands still and up to 0.9 s for iOS to hand over that
+  page's elements. On TikTok's For You feed, which 1.10.0 could not drive at all: a look 0.1-0.8 s, a swipe 0.9 s,
+  a tap 0.6 s.
+- MCP: an action's `screenshot` and look's `ocr` are unset by default (the daemon decides, as above); `false` still
+  turns them off. `--lazy-tools` and `--no-hints` list 1.8.5's tools as before (without `pinch` and `press_button lock`;
+  the daemon takes both from any caller).
+
 ## 1.10.0 (2026-11-21), "the Always-On Update"
 
 Plug and forget: a phone that stays plugged in needs a person only after it restarts. iOS asks for the passcode ("Enter

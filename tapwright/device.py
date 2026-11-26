@@ -11,10 +11,12 @@ over:
 import asyncio
 import contextvars
 import dataclasses
+import functools
 import json
 import os
 import posixpath
 import re
+import socket
 import sys
 import time
 import weakref
@@ -28,6 +30,23 @@ from .diagnostics import CRASH_MAX_MB, CrashSearch, crash_pattern, only_mine
 # Request-local ownership check, carried through connection setup without changing
 # device/fake method signatures or sharing a guard with viewer/background requests.
 BEFORE_SEND = contextvars.ContextVar("before_device_send", default=None)
+TRACE = os.environ.get("TAPWRIGHT_TRACE") == "1"  # (the runner's requests are traced in session.py)
+
+
+def _traced(method):
+    """With TAPWRIGHT_TRACE=1: log how long this call to one of the phone's own services took. Each opens a service on
+    the tunnel, which costs from 50 ms to over a second, and none of them shows in the runner's trace."""
+    if not TRACE:
+        return method
+
+    @functools.wraps(method)
+    async def timed(self, *args, **kwargs):
+        began = time.monotonic()
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            self.log(f"trace device {method.__name__} {(time.monotonic() - began) * 1000:.0f} ms")
+    return timed
 
 
 async def check_before_send() -> None:
@@ -40,6 +59,7 @@ WDA_PORT = 8100
 MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
 MIN_TIMEOUT = 0.5  # seconds: the least any one request to WebDriverAgent is given
 KEEP_IDLE = 2.0  # seconds a kept connection may sit idle and still carry an action (see Device._on_kept)
+DIRECT_RETRY = 30.0  # seconds the tunnel carries the runner's ports after a direct dial failed, before usbmuxd is tried again
 STOP_WAIT = 5.0  # seconds _stop_runner waits for the runner task to end after cancelling it
 STAGE_CHUNK = 4 * 1024 * 1024  # bytes of a video copied to the phone at a time (AFC reads in 4 MB too)
 _CHANGED = ("{name} changed on this computer since media checked it (it is still being written, or another file was put "
@@ -77,6 +97,10 @@ class PhoneLocked(ConnectionLost):
 
 
 AUTH_PROMPT = "LocalAuthenticationUIService"  # the process that draws iOS's passcode screen
+# The processes that draw widgets (chronod's renderers, e.g. com.apple.chrono.WidgetRenderer-Default): with an
+# interactive widget on the home screen iOS lists one as a foreground application (phone, 2026-11-26). Never the app in
+# front: the home screen is. (The runner says the same from route version 15.)
+WIDGET_HOSTS = "com.apple.chrono."
 PROMPT_AFTER = 6.0  # seconds a start may take before the phone is asked whether that screen is up (a start takes 3)
 PROMPT_EVERY = 3.0
 PROMPT_RETRY = 300.0  # seconds after which a start is tried anyway, in case the process list is wrong about the screen
@@ -310,7 +334,46 @@ async def _open_tunnel(userspace_tunnel, tunnel, make):
                 userspace_tunnel._create_no_root_tunnel_provider = original
 
 
+class _Direct:
+    """A port on the phone reached straight through usbmuxd (no tunnel), with the methods a tunnel connection has:
+    sendall, recv_any, recvall, close. Measured on the test phone: /status 1 ms on a kept connection, a PNG 243 ms
+    (about 400 ms through the tunnel), the MJPEG stream 22 fps."""
+
+    def __init__(self, sock) -> None:
+        sock.setblocking(False)
+        try:  # usbmuxd is a TCP socket on Windows: small requests mustn't wait for Nagle's timer
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:  # a unix socket (macOS, Linux)
+            pass
+        self.sock = sock
+
+    async def sendall(self, data: bytes) -> None:
+        await asyncio.get_running_loop().sock_sendall(self.sock, data)
+
+    async def recv_any(self, n: int = 65536) -> bytes:
+        return await asyncio.get_running_loop().sock_recv(self.sock, n)
+
+    async def recvall(self, n: int) -> bytes:
+        """Exactly n bytes, or fewer when the phone closes the connection first."""
+        data = b""
+        while len(data) < n:
+            chunk = await self.recv_any(n - len(data))
+            if not chunk:
+                break
+            data += chunk
+        return data
+
+    async def close(self) -> None:
+        self.sock.close()
+
+
 class Device:
+    # class-level defaults: a Device built without __init__ (tests do) reaches the runner through the tunnel
+    via: str | None = None
+    _mux = None
+    _route: tuple | None = None
+    _direct_off: tuple | None = None
+
     def __init__(self, udid: str | None = None, host: str | None = None, port: int | None = None, log=print):
         state = store.load_state()
         self.udid = udid or state.get("udid")
@@ -331,6 +394,10 @@ class Device:
         self._keep_forced = None if forced not in ("0", "1") else forced == "1"
         self._kept: tuple | None = None
         self._kept_lock = asyncio.Lock()
+        # the runner's ports over USB go straight through usbmuxd (see _dial)
+        self._mux = None  # the usbmux entry of the cabled phone; looked up again after any failure (a replug changes its id)
+        self._route: tuple | None = None  # (tunnel, "direct" | "tunnel"): what _dial last chose, logged when it changes
+        self._direct_off: tuple | None = None  # (tunnel, when): a direct dial failed; the tunnel carries it until then + DIRECT_RETRY
         self.runner = None  # the XCUITest task that keeps WebDriverAgent alive
         self.awaiting_passcode = False  # the last start stopped at iOS's passcode screen (see PasscodeNeeded)
         self._launched_at = 0.0  # when the test runner was last started (monotonic clock)
@@ -343,6 +410,8 @@ class Device:
     async def connect(self) -> None:
         # a new tunnel is a new phone session: the old condition went with the old connection
         self.drop_network("the phone's connection was rebuilt")
+        await self._drop_kept()  # the runner may have restarted with the tunnel; a new phone session starts clean
+        self._mux = self._direct_off = None
         from pymobiledevice3 import usbmux
         from pymobiledevice3.remote import userspace_tunnel
         on_usb = [d for d in await usbmux.list_devices() if d.connection_type == "USB"
@@ -534,6 +603,7 @@ class Device:
         at, self._answered_at = self._answered_at, None
         return at is not None and time.monotonic() - at < ANSWERED_FRESH
 
+    @_traced
     async def lock_state(self) -> LockState | None:
         """The phone's lock state from CoreDevice (iOS 17+), without WebDriverAgent: answers before any runner is
         launched. None when the phone couldn't say (an older iOS, no tunnel, another shape of answer)."""
@@ -568,6 +638,7 @@ class Device:
             return LockedBeforeStart()
         return None
 
+    @_traced
     async def passcode_prompt_up(self) -> bool | None:
         """Is iOS's passcode screen in front (from the process list, which answers without WebDriverAgent)?
         None when the phone couldn't be asked: not known, which is not the same as gone."""
@@ -588,6 +659,7 @@ class Device:
             return PasscodeNeeded()
         return error
 
+    @_traced
     async def battery(self) -> tuple[int | None, bool | None]:
         """(percent, charging) from lockdown's battery domain, for the watchdog (§24.5); (None, None) when the phone
         doesn't say. Asks over the open tunnel only: never connects."""
@@ -608,6 +680,7 @@ class Device:
         """Someone is asking for the phone now (a tool call, a viewer): the next start doesn't wait its turn."""
         self._hurry = True
 
+    @_traced
     async def foreground_apps(self) -> list[str]:
         """Bundle ids of the apps iOS has in the foreground, from its process list: that answers while
         WebDriverAgent is stuck behind a frozen app. SpringBoard isn't an application there (measured)."""
@@ -619,8 +692,9 @@ class Device:
         # frozen app would take the screen away from the person typing)
         return [p["bundleIdentifier"] for p in procs
                 if p.get("foregroundRunning") and p.get("isApplication") and p.get("bundleIdentifier")
-                and p.get("name") != AUTH_PROMPT]
+                and p.get("name") != AUTH_PROMPT and not str(p["bundleIdentifier"]).startswith(WIDGET_HOSTS)]
 
+    @_traced
     async def kill_app(self, bundle_id: str) -> int:
         """End every process of that app, as swiping it away in the app switcher does; how many there were.
         Works while the app is frozen, unlike WebDriverAgent's terminate, which waits on it."""
@@ -635,6 +709,7 @@ class Device:
         return len(pids)
 
     # ---- diagnostics (AGENT-TOOLS §15) ----
+    @_traced
     async def processes(self) -> list["Proc"]:
         """Every process iOS lists: its pid, its bundle id and when it started (a pid is reused, so a pid alone says
         nothing about which process it is)."""
@@ -649,6 +724,7 @@ class Device:
         """That app's running processes, each with its start time (empty: it isn't running)."""
         return [p for p in await self.processes() if p.bundle == bundle_id]
 
+    @_traced
     async def phone_time_ms(self) -> int | None:
         """The phone's own clock now, epoch ms: the log entries' times are on it, not on this computer's."""
         value = await self.rsd.get_value(key="TimeIntervalSince1970")
@@ -677,6 +753,7 @@ class Device:
         finally:
             await self._close(service)
 
+    @_traced
     async def crash_reports(self, executable: str, count: int, bundle_id: str | None = None) -> CrashSearch:
         """The newest `count` crash reports of the app (parsed; newest first): its process is named `executable`
         and, when a report names one, its bundle id is `bundle_id`. Each report is read on its own: one that can't be
@@ -721,6 +798,7 @@ class Device:
             incomplete = len(found) < count and len(ordered) > CRASH_SCAN
         return CrashSearch(found, unreadable, too_big, incomplete, scanned)
 
+    @_traced
     async def crash_file(self, filename: str) -> bytes:
         """The whole of one crash report, as it is on the phone (CrashTooBig when it is over the byte cap)."""
         from pymobiledevice3.services.crash_reports import CrashReportsManager
@@ -894,7 +972,7 @@ class Device:
             return False
 
     async def http(self, method: str, path: str, payload: dict | None = None, timeout: float = 30.0) -> dict:
-        """One request to WebDriverAgent, through the tunnel (works the same over USB and network).
+        """One request to WebDriverAgent: straight through usbmuxd over USB, through the tunnel otherwise (see _dial).
         Raises DeviceError for an error reply, ConnectionLost when nothing usable comes back.
         A deadline shorter than MIN_TIMEOUT is raised to it: running out of the caller's own time is
         not a dead line, and a 0 s deadline once made the daemon reconnect (2026-11-09)."""
@@ -916,7 +994,9 @@ class Device:
             status, rest = kept
         else:
             try:
-                conn = await self.rsd.create_service_connection(WDA_PORT)
+                conn = await self._dial(WDA_PORT)
+            except ConnectionLost:
+                raise
             except Exception as e:
                 raise ConnectionLost(f"can't reach WebDriverAgent: {e}") from e
             try:
@@ -969,7 +1049,9 @@ class Device:
             try:
                 if held is None:
                     try:
-                        held = (self.rsd, await self.rsd.create_service_connection(WDA_PORT), time.monotonic())
+                        held = (self.rsd, await self._dial(WDA_PORT), time.monotonic())
+                    except ConnectionLost:
+                        raise
                     except Exception as e:
                         raise ConnectionLost(f"can't reach WebDriverAgent: {e}") from e
                 self._kept = None  # in use: nothing else finds it half-read
@@ -1020,13 +1102,79 @@ class Device:
 
     async def open_stream(self):
         """A connection to WebDriverAgent's screen stream, request sent; read it with recv_any."""
-        conn = await self.rsd.create_service_connection(MJPEG_PORT)
+        conn = await self._dial(MJPEG_PORT)
         try:
             await conn.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         except BaseException:
             await self._close(conn)
             raise
         return conn
+
+    async def _dial(self, port: int):
+        """A connection to a port of the runner on the phone, with sendall / recv_any / recvall / close.
+        Over USB (and unless TAPWRIGHT_DIRECT=0) it goes straight through usbmuxd: no tunnel, no userspace TCP stack
+        in this process's loop. Otherwise, or when usbmuxd can't do it, through the developer tunnel as before.
+        A refusal by the phone (the runner isn't listening yet) is a ConnectionLost, never a reason to fall back:
+        the tunnel would be refused the same."""
+        why: str | None = None
+        if os.environ.get("TAPWRIGHT_DIRECT") == "0":
+            why = "TAPWRIGHT_DIRECT=0"
+        elif self.via != "USB":
+            why = f"the phone is on {self.via or 'no connection'}, not USB"
+        off = self._direct_off
+        if why is None and off is not None and off[0] is self.rsd:
+            if time.monotonic() - off[1] < DIRECT_RETRY:
+                why = "usbmuxd failed a moment ago"
+            else:
+                self._direct_off = None
+        if why is None:
+            try:
+                conn = await self._dial_usbmux(port)
+            except ConnectionLost:
+                raise
+            except Exception as e:
+                why = f"usbmuxd: {type(e).__name__}: {e}"
+                self._direct_off = (self.rsd, time.monotonic())
+            else:
+                self._note_route("direct", "runner reached over usbmuxd directly")
+                return conn
+        conn = await self.rsd.create_service_connection(port)
+        self._note_route("tunnel", f"runner reached over the tunnel ({why})")
+        return conn
+
+    async def _dial_usbmux(self, port: int) -> _Direct:
+        from pymobiledevice3 import usbmux
+        from pymobiledevice3.exceptions import ConnectionFailedError, ConnectionFailedToUsbmuxdError
+        last: Exception | None = None
+        for attempt in (0, 1):
+            if self._mux is None:  # after a failure the entry is looked up again: a replug gives the phone a new id
+                self._mux = await usbmux.select_device(self.udid, connection_type="USB")
+                if self._mux is None:
+                    raise DeviceError("usbmuxd doesn't list the phone on USB")
+            try:
+                return _Direct(await self._mux.connect(port))
+            except ConnectionFailedToUsbmuxdError:
+                self._mux = None
+                raise  # usbmuxd itself isn't there: the tunnel's way
+            except ConnectionFailedError as e:  # the phone refused: nothing is listening on the port
+                raise ConnectionLost(f"can't reach WebDriverAgent: the phone refused port {port} ({e})") from e
+            except Exception as e:
+                self._mux, last = None, e
+        assert last is not None
+        raise last
+
+    def _note_route(self, kind: str, line: str) -> None:
+        """Log once per tunnel and kind which way the runner is reached."""
+        if self._route != (self.rsd, kind):
+            self._route = (self.rsd, kind)
+            log = getattr(self, "log", None)  # (a Device built without __init__ has none)
+            if log is not None:
+                log(line)
+
+    async def _drop_kept(self) -> None:
+        held, self._kept = self._kept, None
+        if held is not None:
+            await self._close(held[1])
 
     @staticmethod
     async def _close(conn) -> None:
@@ -1037,6 +1185,7 @@ class Device:
             pass
 
     # ---- apps ----
+    @_traced
     async def user_apps(self) -> list[dict]:
         """Apps you installed (App Store, TestFlight, development builds)."""
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
@@ -1063,6 +1212,7 @@ class Device:
         if had:
             self._network_ended("the phone's connection was closed")
         await self._stop_runner()
+        await self._drop_kept()
         if self.tunnel:
             await self.tunnel.aclose()
 

@@ -32,6 +32,8 @@ SETTLE_READS = 2  # reads that show the same other known place before it counts 
 NOT_HERE = "it isn't on this screen"
 LED_ELSEWHERE = "it led to a screen that isn't where the road goes"
 NOT_KNOWN = "it led to a screen the map doesn't know"
+# (2.0, review R200v M1) the runner cut the read short: where the app is can't be told (said as `timeout`, never off_route)
+UNREAD_START = "This screen's elements couldn't be read within the time given"
 
 
 @dataclass
@@ -98,6 +100,7 @@ class Trip:
         self.may_jump = True
         self.foreign = False  # the app in front at the last read isn't the trip's app
         self.live: dict[str, set[str]] = {}  # the titles each place's screen showed during this call (kept out of a repaired road)
+        self.unread = False  # (R200v M1) the newest place_of read a tree the runner cut short
 
     # ---- the map ----
     @property
@@ -105,7 +108,9 @@ class Trip:
         return self.d.maps.data(self.root, self.bundle)
 
     def place_of(self, tree: ui.Tree | None) -> str | None:
-        """The saved place a read is; None when it is none (nothing is saved here: a drive only recognises)."""
+        """The saved place a read is; None when it is none (nothing is saved here: a drive only recognises). A tree the
+        runner cut short is no place either, and `unread` says so (review R200v M1)."""
+        self.unread = tree is not None and getattr(tree, "tier", "full") != "full"
         if tree is None or self.foreign or not places.has_structure(tree):
             return None
         read = places.read_place(tree, self.d._language.get(self.bundle))
@@ -335,6 +340,9 @@ class Trip:
                 raise Refused("not_found", f"no known way{where} to {self.goal}; drive it once (the driver), and it is remembered.")
             return _answer([said] if way.kind == "here" else [roads.say_way(way, self.goal), said])
         if way.kind == "none":
+            if here is None and self.by != "link" and getattr(self, "unread", False):
+                raise Refused("timeout", f"{UNREAD_START}, so where the app is isn't known and no way to {self.goal} "
+                                         "could be planned. Nothing was touched.")
             if here is None and self.by != "link":
                 raise Refused("off_route", f"the app is at a screen the map doesn't know, so there is no way to {self.goal} "
                                            "from here. Nothing was touched.")
@@ -466,7 +474,9 @@ class Trip:
         elif seen.place is not None and hop.src is not None:
             made = d.maps.record(self.root, self.bundle, hop.src, seen.place, hop.move, hop.names, ms, self.build)
             self.dropped(made.dropped if made else [])
-        elif hop.road is not None and hop.src is not None:
+        elif hop.road is not None and hop.src is not None and not (seen.tree is not None
+                                                                   and getattr(seen.tree, "tier", "full") != "full"):
+            # (R200v M1) an arrival whose screen couldn't be read is no failed road
             self.dropped(d.maps.fail(self.root, self.bundle, hop.src, hop.road["move"]))
 
     async def run_route(self, name: str, route: dict) -> None:
@@ -560,9 +570,15 @@ class Trip:
         return shown
 
     async def off_route(self, step: int, total: int, move: dict | None, why: str, here: str | None) -> None:
-        """Stop where the screen isn't where the road leads, with nothing else touched (§4, §18.4)."""
+        """Stop where the screen isn't where the road leads, with nothing else touched (§4, §18.4). (R200v M1) When the
+        screen it stopped at couldn't be read (`unread`), that is said instead, as `timeout`: not a road or route that
+        failed (no off_route, which a route's count takes for a failed replay)."""
         d = self.d
+        cut = here is None and getattr(self, "unread", False)
         where = f"Now at: {here} (known)." if here else "Now at: a screen the map doesn't know."
+        if cut:
+            why = "where it led couldn't be checked" if why == NOT_KNOWN else why
+            where = f"Now at: a screen whose elements couldn't be read ({UNREAD_START[0].lower() + UNREAD_START[1:]})."
         named = f" ({driving.step_of(move)})" if move else ""
         place = f"stopped at step {step} of {total}{named}: " if step else "stopped before the first move: "
         head = f"{place}{why}. {where} {driving.done(self.moves + self.jumps)} Nothing else was touched."
@@ -572,7 +588,7 @@ class Trip:
             text = answer["text"]
         except Exception:  # noqa: BLE001 - the reason is the answer; the screen is a courtesy
             text = "\n".join([head, *(f"Note: {n}" for n in notes)])
-        stop = Refused("off_route", text)
+        stop = Refused("timeout" if cut else "off_route", text)
         stop.screened = True  # type: ignore[attr-defined]
         raise stop
 

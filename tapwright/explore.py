@@ -281,6 +281,7 @@ class Look:
     new: bool = False
     foreign: bool = False
     sheet: bool = False  # a system sheet that spends or shares is open (the share sheet): it is not a place
+    cut: bool = False  # (2.0, R200v M1) the runner cut the read short: where the app is can't be told (no place, no finding)
 
 
 @dataclass(frozen=True)
@@ -596,7 +597,12 @@ class Explorer:
     async def _look(self, arrived: bool, hold_new: bool = False) -> Look:
         """Read the screen, answer an alert (a permission prompt is never allowed), and say what place it is. `hold_new`: a place
         first seen here is announced (its checks run) only by `_announce`, once the move that reached it is registered, so
-        what is found there has the way to it (CodeRabbit, PR #20)."""
+        what is found there has the way to it (CodeRabbit, PR #20). The newest Look is kept (`_newest`): a recovery judges
+        by it whether the screen it gave up on could be read (CodeRabbit, PR #26)."""
+        self._newest = await self._look_now(arrived, hold_new)
+        return self._newest
+
+    async def _look_now(self, arrived: bool, hold_new: bool) -> Look:
         self._new = None
         tree = await self.phone.read()
         # §29.8 (review R185 M6): the kind of system sheet or prompt in front at the moment, for the findings made from here
@@ -620,6 +626,8 @@ class Explorer:
         if explorefloor.system_sheet(tree):
             self._system_now = self._system_now or "share sheet"
             return Look(tree, None, sheet=True)
+        if getattr(tree, "tier", "full") != "full":
+            return Look(tree, None, cut=True)  # (places.recognisable says no place too: nothing is saved from it)
         seen = self.map.observe(tree, arrived)
         if seen is None:
             return Look(tree, None)
@@ -902,7 +910,8 @@ class Explorer:
             return True
         if look.place is None:
             self._mark(place, action.sig, "same")
-            self.notes.append("a move reached a screen with nothing to recognise it by; it went back")
+            self.notes.append("a move reached a screen whose elements couldn't be read in the time given; it went back"
+                              if look.cut else "a move reached a screen with nothing to recognise it by; it went back")
             await self._return_to(place)
             return True
         if look.place == place:
@@ -1084,13 +1093,23 @@ class Explorer:
             await self._moved(await self.phone.open_url(link))
             if (await self._look(True)).place == place:
                 return True
+        # (R200v M1) a screen whose elements couldn't be read may well be the place: no "no way back" finding from it.
+        # The newest read decides (the link's, or the last of a way that failed: CodeRabbit, PR #26)
         return await self._recover(place)
 
-    async def _recover(self, place: str) -> bool:
+    async def _recover(self, place: str, finding: bool | None = None) -> bool:
         """The reset of §25.8: Tapwright's own is a relaunch with `open_app`, which keeps the app's data (the second, `app_command
         reset`, is Tapline's: Tapwright has no such tool, so there the branch ends). At most 3 in a row that don't bring the app
-        to a known place. With `account`, the way to the start place may be a saved route that types that vault account."""
-        await self._find("dead_end", place, "There is a way back.", f"no way back to {place} except a reset", None)
+        to a known place. With `account`, the way to the start place may be a saved route that types that vault account.
+        `finding` (None): a "no way back" is filed unless the newest read was cut short (R200v M1)."""
+        if finding is None:
+            newest = getattr(self, "_newest", None)
+            finding = not (newest is not None and newest.cut)
+        if finding:
+            await self._find("dead_end", place, "There is a way back.", f"no way back to {place} except a reset", None)
+        else:
+            self.notes.append("a screen's elements couldn't be read in the time given, so where the app was couldn't be "
+                              "told; it relaunched the app (no finding)")
         await self._open()
         self.resets.append({"how": "relaunch", "data_kept": True, "at_step": self.steps})
         look = await self._look(False)

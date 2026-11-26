@@ -196,6 +196,7 @@ def test_new_conditions_replace_the_old_ones_and_a_close_forgets_them():
         r = await d.run_tool("a", "open_app", {"app": "com.example.app", "language": "ar", "look": False})
         assert r["text"] == "Opened Example (com.example.app) in ar."  # a launch with conditions, said as before
         await d.run_tool("a", "close_app", {"app": "com.example.app"})
+        await d._closing_done()  # (2.0: the runner is told behind the answer)
         d.session.closed.clear()
         r = await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
         assert d.session.closed == [] and r["text"] == "Opened Example (com.example.app)."  # closed: nothing to undo

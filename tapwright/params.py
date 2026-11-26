@@ -43,6 +43,7 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "press_button": ("name", *_SHOT, *_BRIEF),
     "unlock": (),  # (1.7.8) the passcode comes from serve's own vault, never from the call
     "swipe": ("x0", "y0", "x1", "y1", "seconds", *_SHOT, "dry_run", *_BRIEF),
+    "pinch": ("x", "y", "scale", "seconds", *_SHOT, *_BRIEF),
     "rotate": ("to", *_SHOT, *_BRIEF),
     "journey": ("start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
                 "mode", "target", "survives", "done", "finding"),

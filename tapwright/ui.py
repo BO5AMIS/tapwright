@@ -302,6 +302,14 @@ class Tree:
     behind: list[tuple[Element, Element | None]] = field(default_factory=list)  # (hidden, what is in front)
     structure: Structure = field(default_factory=Structure)  # what the screen is made of, for places.py
     back: "Back | None" = None  # what `back` would do on this screen (back_button), when the screen's size is known
+    # (2.0, runner route version 9) how much of the tree the read got: "full"; "shallow" (the runner's budget ran out
+    # part way: what it read is here, more may be missing); "root" (the application node alone: none of the screen's
+    # elements were read in the time given, as on TikTok's For You feed)
+    tier: str = "full"
+
+    @property
+    def truncated(self) -> bool:
+        return self.tier != "full"
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
@@ -1565,18 +1573,48 @@ def on_glass(items: list[Element]) -> list[Element]:
                        and b.rect[1] <= e.center[1] < b.rect[1] + b.rect[3] for b in e.covered_by)]
 
 
+# (review R200v H1) said as known: the read ran out of the time it was given (a short budget may be why), not that the
+# screen never answers
+ELEMENTS_NONE = "Elements: none (the screen's elements weren't read within the time given)"
+ELEMENTS_PART = "Elements: partly read (not all of the screen's elements were read within the time given; more may be missing)"
+
+
+# (2.0) a target by id, label, text or element ref on a screen that gave no elements, or only some (the daemon's
+# not_found says it; a repair and a route's count read it: review R200v M1)
+# (CodeRabbit, PR #26) the o refs only when the picture's text could be read; else a point of a fresh screenshot
+HINT_NO_ELEMENTS = ("This screen's elements weren't read within the time given, so there are none to find: look shows "
+                    "the text read from its picture as o refs when it can read it; touch one of them or a text it "
+                    "shows ({text}, with tap or long_press), else a point {x, y} of a fresh screenshot.")
+HINT_PART_ELEMENTS = ("Not all of this screen's elements were read within the time given, so the element may be among "
+                      "those left out: look shows the text read from its picture as o refs when it can read it; touch "
+                      "one of them or a text it shows ({text}, with tap or long_press), else a point {x, y} of a fresh "
+                      "screenshot.")
+
+
+def cut_hint(text: str) -> bool:
+    """Does a refusal's text carry the hint of a screen read in part (not_found only because elements weren't read)?"""
+    return HINT_NO_ELEMENTS in text or HINT_PART_ELEMENTS in text
+
+
+def tier_line(tier: str) -> str | None:
+    """The header line that says a read was cut short (route version 9), or None for a whole tree."""
+    return {"root": ELEMENTS_NONE + ".", "shallow": ELEMENTS_PART + "."}.get(tier)
+
+
 def describe(items: list[Element], screen: tuple[float, float], scale: float | None = None,
              app: tuple[str, str] | None = None, alert: Alert | None = None, keyboard: bool = False,
-             more: int = 0, off: tuple[int, int] = (0, 0)) -> str:
+             more: int = 0, off: tuple[int, int] = (0, 0), tier: str = "full") -> str:
     """The full list (docs/AGENT-TOOLS.md §3.2): the header lines, then one line per element.
-    `app` is (name, bundle id); `off` is how many elements lie (above, below) the screen."""
-    head, shown, tail = describe_parts(items, screen, scale, app, alert, keyboard, more, off)
+    `app` is (name, bundle id); `off` is how many elements lie (above, below) the screen; `tier`: how much of the
+    tree was read (Tree.tier)."""
+    head, shown, tail = describe_parts(items, screen, scale, app, alert, keyboard, more, off, tier)
     return "\n".join([*head, *(e.line() for e in shown), *tail])
 
 
 def describe_parts(items: list[Element], screen: tuple[float, float], scale: float | None = None,
                    app: tuple[str, str] | None = None, alert: Alert | None = None, keyboard: bool = False,
-                   more: int = 0, off: tuple[int, int] = (0, 0)) -> tuple[list[str], list[Element], list[str]]:
+                   more: int = 0, off: tuple[int, int] = (0, 0),
+                   tier: str = "full") -> tuple[list[str], list[Element], list[str]]:
     """`describe` in three parts: the header lines, the elements that are listed, and the lines after them. (A brief
     answer, §13.4, lists only some of the elements between the first two and the last.)"""
     eyes = USERS_EYES.get()
@@ -1593,10 +1631,12 @@ def describe_parts(items: list[Element], screen: tuple[float, float], scale: flo
         lines.append(alert_line(alert))
     if keyboard:
         lines.append("Keyboard: shown")
+    if (cut := tier_line(tier)) is not None:
+        lines.append(cut)
     tail = []
     if more:
         tail.append("(more below; scroll)" if eyes else f"(+{more} more below; scroll)")
-    if not items:
+    if not items and cut is None:
         tail.append("(nothing visible; the app may still be loading)")
     return lines, items, tail
 
