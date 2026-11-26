@@ -4573,7 +4573,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # (a launch settles with the launched app's cap: one known never to stand still waits SHORT_SETTLE)
             done = await self._settle(self._mark()[0], cap=settle, since=mark[1],
                                       early=mark[0] if settle == CAP else None,
-                                      bundle=self._opened if name == "open_app" else None)
+                                      **({"bundle": self._opened} if name == "open_app" else {}))
         trace.settled()
         if session_module.TRACE:
             self.log(f"trace {name} settle {done.seconds:.2f} s, changed={done.changed}")
@@ -8644,7 +8644,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         button. A bar without one is a root screen (or has only Cancel,
         Done and the like): nothing is tapped. The edge swipe is only for screens with no bar at all."""
         s = self.session
-        back = await self._still_back()
+        listed = self._back_from_list(view)
+        back = listed if listed is not None else await self._still_back()
+        if listed is not None:
+            trace.note("back_from_list", True)  # (the timing trace only: no read before the touch)
         if back.dismiss is not None:  # AGENT-TOOLS v1.4: what is open on top closes first, as "up one screen"
             self._dry(a, "Would close the sheet.")
             await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
@@ -8664,27 +8667,52 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("not_actionable", HOSTED_BACK)
         if back.point is not None:
             self._dry(a, "Would tap the back button.")
-            await self._back_before(view, a)
+            await self._back_before(view, a, listed is not None)
             await s.tap(ui.Target(x=back.point[0], y=back.point[1]))
             return "Tapped the back button."
         if back.bar:
             raise Refused("not_actionable", "no_action: the navigation bar has no back button")
         width, height = s.screen
         self._dry(a, "Would swipe from the left edge.")
-        await self._back_before(view, a)
+        await self._back_before(view, a, listed is not None)
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
 
-    async def _back_before(self, view, a: dict) -> None:
+    def _back_from_list(self, view) -> ui.Back | None:
+        """(2.0, worker H) What `back` would touch, from the agent's own list when nothing can have changed since it was
+        read: then reading the tree again before the touch only costs time (0.5-1.0 s on a heavy page, measured on the
+        phone 2026-11-26). The same test the tap path uses before it reads live (_current), and stricter: the list's
+        tree is the session's newest read (no other read since, of this agent or another), whole, with nothing open on
+        top (a sheet or popover is read until it stands still, _still_back); the agent's list is current, the stream's
+        newest frame is fresh and like the one the list was read against (_screen_unchanged), and the screen stands
+        still now (_proven_still). Any doubt: None, and `back` reads as before."""
+        s = self.session
+        tree = getattr(view, "tree", None)
+        if (tree is None or tree is not getattr(s, "last_tree", None) or getattr(tree, "tier", "full") != "full"
+                or tree.back is None or tree.back.dismiss is not None or tree.behind):
+            return None
+        if view.opened or self.unsettled or not self._current(view) or not self._screen_unchanged(view):
+            return None
+        try:
+            if not self._proven_still(noted=False):
+                return None
+        except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: read as before
+            return None
+        s.behind, s.front_items = tree.behind, tree.items  # (as back_point leaves them, for `back`'s own checks)
+        return tree.back
+
+    async def _back_before(self, view, a: dict, listed: bool = False) -> None:
         """`back` with `look: false`: the state before the touch, to compare with the one after it (see
         `_back_unchanged`): the newest frame, if there is a stream, and a light read of the tree. The edge swipe
         makes the picture move (an interactive pop that snaps back), so movement says nothing: the end state does.
         Kept on the agent's own view, never on the daemon: another agent's back can't take it. (It runs inside the
-        touch's turn of the phone's queue, so its read is a direct one.)"""
+        touch's turn of the phone's queue, so its read is a direct one.) `listed`: the agent's list was proven the
+        screen now (_back_from_list): it is the state before, with no read."""
         view.back_before = None
         if a.get("look", True):
             return
-        view.back_before = (self.hub.latest, _screen_sig((await self.session.refresh()).items))
+        items = view.tree.items if listed else (await self.session.refresh()).items
+        view.back_before = (self.hub.latest, _screen_sig(items))
 
     async def _back_unchanged(self, view) -> bool:
         """Is the end state of `back`'s touch the one before it? The settled frame against the frame before (when

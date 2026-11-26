@@ -202,3 +202,114 @@ def test_the_daemon_switches_on_the_first_swipe_of_the_feed_and_a_launch_uses_th
         assert s.settles.restless(TIKTOK) and not s.settles.restless("com.apple.Preferences")
         assert sum("never stands still" in str(x) for x in logged) == 1
     run_virtual(go)
+
+
+# ---- 2. back without a needless read ----
+
+def _listing_session():
+    """A FakeSession whose reads keep their tree as `last_tree` with the bar's back button in it (as Session's do), and
+    which counts back_point's reads."""
+    from fakes import FakeSession
+
+    from tapwright import ui
+    from tapwright.session import Snapshot
+
+    class Listing(FakeSession):
+        def __init__(self):
+            super().__init__()
+            self.back_at = (20.0, 60.0)
+            self.back_reads = 0
+            self.last_tree = None
+
+        def _tree(self):
+            tree = ui.Tree(list(self.tree), 0, self.last_alert, self.last_keyboard, tier=self.tier,
+                           back=ui.Back(True, self.back_at))
+            self.last_tree = tree
+            return tree
+
+        async def look(self, screenshot=True):
+            text, image = await super().look(screenshot)
+            self._tree()
+            return text, image
+
+        async def snapshot(self, keyboard=False, timeout=None):
+            self._record("snapshot")
+            tree = self._tree()
+            self.items, self.read_app = list(tree.items), self.app
+            self.last_tier = self.tier
+            return Snapshot(tree, self.app, 3.0)
+
+        async def refresh(self, timeout=None):
+            tree = await super().refresh(timeout)
+            self.last_tree = tree
+            return tree
+
+        async def back_point(self):
+            self.back_reads += 1
+            return await super().back_point()
+    return Listing()
+
+
+def _back_after_look(between=None, frame_after=b"A", look=True):
+    from fakes import FrameFeeder
+    from test_daemon import finish, run, started
+    out = {}
+
+    async def go():
+        s = _listing_session()
+        d = make(s)
+        stop, task = await started(d)
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        await asyncio.sleep(0.1)
+        await d.run_tool("a", "look", {"screenshot": False})
+        if between is not None:
+            await between(d)
+        feeder.then = frame_after
+        await asyncio.sleep(0.1)  # the stream shows the screen still for a while
+        reads = s.back_reads
+
+        def moved(*_):
+            feeder.then = b"B"  # the back button pops the page
+        s.taken_by = None
+        real_tap = s.tap
+
+        async def tap(target, hold_ms=60):
+            moved()
+            return await real_tap(target, hold_ms)
+        s.tap = tap
+        r = await d.run_tool("a", "back", {"look": look})
+        out["reads"], out["text"], out["taps"] = s.back_reads - reads, r["text"], list(s.tap_points)
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+    return out
+
+
+def test_back_on_a_current_list_and_a_still_screen_reads_nothing_before_its_touch():
+    out = _back_after_look()
+    assert out["reads"] == 0 and out["text"].startswith("Tapped the back button.")
+    assert out["taps"][-1] == (20.0, 60.0)
+
+
+def test_back_reads_when_the_picture_changed_since_the_list():
+    out = _back_after_look(frame_after=b"C")  # something moved in after the look
+    assert out["reads"] == 1 and out["text"].startswith("Tapped the back button.")
+
+
+def test_back_reads_when_another_read_came_after_the_agents_list():
+    async def peek(d):
+        await d.session.refresh()  # (another agent's read, say: the session's newest tree isn't the agent's list)
+    out = _back_after_look(between=peek)
+    assert out["reads"] == 1
+
+
+def test_back_reads_after_an_action_with_look_false():
+    async def unlooked(d):
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+    out = _back_after_look(between=unlooked)
+    assert out["reads"] == 1
+
+
+def test_back_with_look_false_takes_its_before_state_from_the_list_it_proved():
+    out = _back_after_look(look=False)
+    assert out["reads"] == 0 and out["text"].splitlines()[0] == "Tapped the back button."
