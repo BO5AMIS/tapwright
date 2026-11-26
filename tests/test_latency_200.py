@@ -472,7 +472,9 @@ def test_a_budgeted_read_is_waited_for_its_budget_and_a_grace_not_ten_seconds():
 # ---- a banner over the element a touch is aimed at ----
 
 def test_a_touch_aimed_at_an_element_waits_a_banner_out_and_a_point_does_not():
-    """Seen on the phone: `back` tapped its button as a banner of another app slid over it, and that app opened."""
+    """Seen on the phone: `back` tapped its button as a banner of another app slid over it, and that app opened. (2.0.3,
+    changed on purpose) A point waits a banner out too: two point taps on a screen whose elements weren't read went to
+    a banner and then to the chat it opened (tests/test_touch_other_app_203.py)."""
     from fakes import button
 
     async def go():
@@ -490,12 +492,12 @@ def test_a_touch_aimed_at_an_element_waits_a_banner_out_and_a_point_does_not():
         d.session.tw_version = 11
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         await d.run_tool("a", "tap", {"target": {"label": "OK"}, "look": False})
-        await d.run_tool("a", "tap", {"target": {"x": 20, "y": 20}, "look": False})  # the agent's own point: as it is
+        await d.run_tool("a", "tap", {"target": {"x": 20, "y": 20}, "look": False})  # (2.0.3) a point: held too
         d.session.tw_version = 10  # an older runner: asking for the app in front costs a read, so no wait (as since 1.7.5)
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
-        assert seen == [True, True, False, False]
+        assert seen == [True, True, True, False]
         assert d._guards_banners("back", None) is False
         d.session.tw_version = 11
-        assert d._guards_banners("back", None) is True and d._guards_banners("swipe", None) is False
+        assert d._guards_banners("back", None) is True and d._guards_banners("swipe", None) is True
         await finish(stop, task)
     run(go)

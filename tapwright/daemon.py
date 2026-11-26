@@ -546,6 +546,10 @@ MAX_SCROLL_SWIPES = 15  # `scroll to start|end` gives up after this many swipes
 SCROLL_CAP = 12.0  # ... or after this many seconds (a spinner or a bounce can keep the screen moving)
 SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the directions each `to` can mean; the first is the default
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
+# (2.0.3) the actions whose touches aren't checked against the app the agent last saw (Session._seen_check): they change the
+# app in front on purpose and their own answers show it (open_app, open_url, press_button: home and the app switcher), or
+# answer what iOS shows over any app (alert), or touch no screen (close_app, rotate)
+SEEN_EXEMPT = frozenset({"open_app", "open_url", "press_button", "alert", "close_app", "rotate"})
 WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take (2.0.3: unless a long read fits, below)
 STILL_AFTER_READ = 1.0  # (2.0.3) seconds a fresh frame is waited for after a cut read, to compare with the one before it
 PLAYS_NOW = 0.3  # (2.0.3, review R203d M1) seconds of the newest frames that must show a change for a screen to play now
@@ -4638,9 +4642,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     self._touch_in_scope()  # (personal mode, a tap whose scope came from its read: before each touch)
                 await notify(ms)
             self.session.touch_hook = touching
-            # banners are visible UI, not a scope boundary: a point the agent chose itself is touched as it is. (2.0)
-            # A touch aimed at an element in the top of the screen waits a banner out (_guards_banners).
+            # (2.0.3) every touch in the top of the screen waits a banner out (_guards_banners), and no touch goes to an
+            # app the agent's last look or answer didn't show it (Session._seen_check)
             self.session.banner_guard = self._guards_banners(name, target)
+            self.session.seen_app = self._seen_apps(view, name)
             touched_token = _SCOPE_TOUCHED.set([])
             try:
                 return await act()
@@ -4653,6 +4658,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     box["hands"] = (getattr(self.session, "hands_at", None),
                                     getattr(self.session, "hands_connection", None))
                     self.session.touch_hook, self.session.banner_guard = None, False
+                    self.session.seen_app = None
                     self.session.before_input = None
                     self.session.execution_guard = None
                     self.session.front_apps = None  # (a tap that checked the app in front cleared it already)
@@ -6414,14 +6420,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
     def _guards_banners(self, name: str, target: "ui.Target | None") -> bool:
         """Does this action's touch wait out a notification banner over the top of the screen (Session.banner_guard,
-        _clear_of_banner: only touches in the top BANNER_ZONE are held)? A touch aimed at an element (by ref, id, label
-        or text, and `back`'s button): the agent meant the element, and a banner that slid over it takes the touch and
-        opens its own app (the phone, 2026-11-26: `back` opened X; before it Mail and another app). Not a point the
-        agent chose itself, and only when the runner says the app in front without reading it (route version 11:
-        a few ms; the question cost 70 ms and more before, which is why the wait was off since 1.7.5)."""
-        if getattr(self.session, "tw_version", 0) < session_module.FRONT_VERSION:
-            return False
-        return name == "back" or (target is not None and target.point is None) or _PICTURE_TEXT.get()
+        _clear_of_banner: only touches in the top BANNER_ZONE are held)? (2.0.3) Every touch of an agent's action,
+        whatever it is aimed by: an element, a point, an `o` ref or a text found in the picture, and every gesture. A
+        banner that slid over the spot takes the touch and opens its own app (the phone, 2026-11-26: `back` opened
+        another app; and two point taps on a screen whose elements weren't read went to a banner and then to the chat it
+        opened, and started a call). 2.0 left points out because "the agent chose the point itself"; the agent chose it
+        on a picture without the banner, so that reason doesn't hold. Only when the runner says the app in front without
+        reading it (route version 11: a few ms; the question cost 70 ms and more before, which is why the wait was off
+        since 1.7.5); when that route can't say, the touch goes out (Session._clear_of_banner)."""
+        return getattr(self.session, "tw_version", 0) >= session_module.FRONT_VERSION
+
+    def _seen_apps(self, view, name: str) -> "tuple[tuple[str, str], ...] | None":
+        """(2.0.3, safety) The apps an agent's touches in this action may go to (Session.seen_app): the app its last look
+        or action's answer showed it (`view.app`), and the one its last touch, `open_app` or `open_url` was meant for
+        (`view.aimed_app`: an `open_app` answered with `look: false` still shows where the agent went). None (no check)
+        for the tools that change the app in front on purpose or touch no screen (SEEN_EXEMPT), and when no app was
+        ever shown (as before)."""
+        if name in SEEN_EXEMPT:
+            return None
+        apps = [a for a in (getattr(view, "app", None), getattr(view, "aimed_app", None)) if isinstance(a, tuple)]
+        unique = tuple(dict.fromkeys(apps))
+        return unique or None
 
     async def _banner_shown(self) -> bool:
         """Is a notification banner over the app now (the runner names SpringBoard in front while the newest read is of
@@ -8585,13 +8604,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             await wait()
             return
         kept = (s.touch_hook, s.banner_guard, s.front_apps, getattr(s, "before_input", None),
-                getattr(s, "execution_guard", None))
+                getattr(s, "execution_guard", None), getattr(s, "seen_app", None))
         s.touch_hook, s.banner_guard, s.front_apps, s.before_input, s.execution_guard = None, False, None, None, None
+        s.seen_app = None
         try:
             await self.control.aside(wait)
         finally:
             if self.control.holds_turn():  # (when the turn wasn't taken back, another action may hold it now)
-                s.touch_hook, s.banner_guard, s.front_apps, s.before_input, s.execution_guard = kept
+                s.touch_hook, s.banner_guard, s.front_apps, s.before_input, s.execution_guard, s.seen_app = kept
 
 
     def dialog_channel(self, client_id: str) -> dialog.Channel:

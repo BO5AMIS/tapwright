@@ -715,6 +715,10 @@ class Session:
         self.execution_guard = None  # persistent ownership check for every mutation in an agent turn
         self.input_point: tuple[float, float] | None = None
         self.banner_guard = False  # set by the daemon for the agent's actions: see _clear_of_banner
+        # (2.0.3, safety) set by the daemon for an agent's action: the apps ((name, bundle id), the one the agent's last
+        # look or answer showed first) its touches may go to (_seen_check); None: no check (a person's input, an action
+        # that changes the app in front on purpose, or no app was ever shown)
+        self.seen_app: tuple[tuple[str, str], ...] | None = None
         # whether one of the agent's touches since the daemon last cleared it began where a banner comes down: a
         # banner landing between the check and the touch takes it (Daemon._taken_away)
         self.top_touch = False
@@ -1701,44 +1705,88 @@ class Session:
     # ---- acting ----
     async def _touching(self, ms: float, at: tuple[float, float] | None = None) -> None:
         """Just before a touch that starts at `at`: wait out a notification banner over the top of the screen (for
-        the agent's touches), then tell Tapline the touch is the agent's."""
+        the agent's touches), refuse it when another app than the one the agent last saw is in front (_seen_check),
+        then tell Tapline the touch is the agent's. The banner wait and the check share one question to the runner
+        (FRONT_PATH, a few ms): at most one a touch, none on a read.
+        (2.0.3) The check and the touch are two steps: the answer comes a few ms before the touch goes out, after the
+        touch hook (Tapline's notice) and the hands' or the runner's own start. A banner or an app that comes to the
+        front inside that window isn't caught: the window is made small, not closed."""
         self.input_point = at
+        front: tuple[str, int | None] | None | bool = False  # (False: not asked yet)
         if self.banner_guard and at is not None:
-            await self._clear_of_banner(at)
+            front = await self._clear_of_banner(at)
             self.top_touch = self.top_touch or at[1] < BANNER_ZONE
+        if self.seen_app is not None and at is not None:
+            await self._seen_check(front)
         if self.touch_hook is not None:
             await self.touch_hook(ms)
         trace.mark("guard")
 
-    async def _clear_of_banner(self, at: tuple[float, float]) -> None:
+    async def _seen_check(self, front: "tuple[str, int | None] | None | bool") -> None:
+        """(2.0.3, safety: the owner's phone, 2026-11-26) An agent's touch goes only to an app its last look or answer
+        showed it (`seen_app`). Two point taps on a screen whose elements weren't read went, the first to a banner that
+        opened another app on a chat with a person, the second to that chat's call button: a call was started. Refused
+        `stale` when another app is in front. `front`: the banner wait's answer when it asked (False: not asked).
+        SpringBoard in front over the app the agent saw (a banner below the banner zone, an alert, a permission
+        prompt: iOS's process list still has the app) is no other app. When the runner can't say in a few ms (an
+        older runner, no answer): the touch goes out, as before."""
+        seen = self.seen_app
+        if not seen:
+            return
+        if front is False:
+            front = await self.front_app() if self.tw_version >= FRONT_VERSION else None
+        if not isinstance(front, tuple):
+            return
+        bundles = [b for _, b in seen]
+        if front[0] in bundles:
+            return
+        if front[0] == SPRINGBOARD:
+            try:
+                in_front = await asyncio.wait_for(self.device.foreground_apps(), 5)
+            except Exception:
+                return  # the phone can't say whether SpringBoard lies over the app: the touch goes out, as before
+            if any(b in in_front for b in bundles):
+                return
+        name = self.app_names.get(front[0]) or ("Home screen" if front[0] == SPRINGBOARD else front[0])
+        now = front[0] if name == front[0] else f"{name} ({front[0]})"
+        was_name, was_bundle = seen[0]
+        was = was_bundle if not was_name or was_name == was_bundle else f"{was_name} ({was_bundle})"
+        raise Refused("stale", f"{now} is in front now, not {was}, where your last look was. Nothing was touched; "
+                               "look again.")
+
+    async def _clear_of_banner(self, at: tuple[float, float]) -> "tuple[str, int | None] | None | bool":
         """A touch near the top of the screen while a notification banner is there lands on the banner: a tap opens
         the notification's app, a drag down opens the notification out (seen on the phone 2026-11-10: a scroll to
         a list's start pulled a Mail banner open). While a banner shows, WebDriverAgent names SpringBoard as the
         app in front though the phone's process list still has the app: then this waits for it to leave, and
         refuses the touch if it doesn't. Touches lower down, and SpringBoard's own screens with no app in front
-        (the home screen), are not held up."""
+        (the home screen), are not held up. Returns the last answer of the front route (None: it couldn't say; False:
+        it wasn't asked), for _seen_check to use instead of asking again."""
         if at[1] >= BANNER_ZONE:
-            return
+            return False
         # (review L-M2) the agent's newest read is of SpringBoard itself (Control Center pulled over an app, the home
-        # screen): it is aiming at SpringBoard's own screen, and nothing slid over what it aimed at
+        # screen): it is aiming at SpringBoard's own screen, and nothing slid over what it aimed at. (2.0.3) Kept for
+        # points too: the route names SpringBoard for a banner and for SpringBoard's own screen alike, so a banner over
+        # SpringBoard can't be told from it; rule B still refuses a touch whose app the agent didn't see
         if isinstance(self.read_app, tuple) and self.read_app[1] == SPRINGBOARD:
-            return
+            return False
         waited = 0.0
+        front: "tuple[str, int | None] | None | bool" = False
         while True:
             if self.tw_version >= FRONT_VERSION:
                 # (review L-M1) only the route that answers in a few ms: when it can't say, the touch goes out.
                 # foreground_bundle_id would fall back to activeAppInfo, 1.7-30 s on a screen that doesn't answer
                 front = await self.front_app()
                 if front is None or front[0] != SPRINGBOARD:
-                    return
+                    return front
             elif await self.foreground_bundle_id() != SPRINGBOARD:
-                return
+                return False
             try:
                 in_front = await asyncio.wait_for(self.device.foreground_apps(), 5)
             except Exception:
-                return  # the phone can't say: WebDriverAgent's answer alone is no reason to refuse
+                return front  # the phone can't say: WebDriverAgent's answer alone is no reason to refuse
             if not in_front:
-                return  # the home screen itself: nothing lies over an app
+                return front  # the home screen itself: nothing lies over an app
             if waited >= BANNER_WAIT:
                 raise Refused("not_actionable", "covered: a notification is over the top of the screen, so nothing "
                                                 "was touched; wait a few seconds, then try again.")

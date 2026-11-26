@@ -21,7 +21,8 @@ def real_dispatch(s, *, change=None, typing=False, delay="banner"):
     s.typed_place, s._placed_proof = None, None
     s.dispatched, s.banner_checks = [], 0
     s.input_point, s.before_input = None, None
-    for name in ("_target", "_touching", "_keys", "_clear_of_banner", "tap", "_fast_tap", "_fast_routes", "_call", "_timed"):
+    for name in ("_target", "_touching", "_seen_check", "_keys", "_clear_of_banner", "tap", "_fast_tap", "_fast_routes",
+                 "_call", "_timed"):
         setattr(s, name, types.MethodType(getattr(Session, name), s))
     if typing:
         s.type_text = types.MethodType(Session.type_text, s)
