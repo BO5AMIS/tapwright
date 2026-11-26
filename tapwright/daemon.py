@@ -4866,6 +4866,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         except Exception:
             return False  # the phone can't say: count the app as gone, the safer side for an agent's next touch
 
+    async def _upright(self, seq: int, jpeg: bytes) -> bytes | None:
+        """A WebDriverAgent stream frame (captured portrait) as the screen stands: turned in landscape; None while
+        which side is up isn't known (turn -1: CodeRabbit, PR #26), and the caller takes the phone's own picture."""
+        turn = getattr(self.session, "turn", 0)
+        if turn == 0:
+            return jpeg
+        return await self.turned(seq, jpeg, turn) if turn > 0 else None
+
     async def turned(self, seq: int, jpeg: bytes, degrees: int) -> bytes:
         """A stream frame turned upright for landscape, made once per frame for every viewer."""
         kept = self._turned
@@ -7022,9 +7030,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 source = await jpeg_of(frame)
             except PictureGone:  # one of the older pictures, whose pixels are let go
                 source = None
-            turn = getattr(self.session, "turn", 0)
-            if source is not None and turn and getattr(frame, "picture", None) is None:
-                source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
+            if source is not None and getattr(frame, "picture", None) is None:
+                source = await self._upright(frame.seq, source)  # landscape: the stream's frame comes as captured
             if source is not None:
                 return frame.seq, frame.at, source
         asked = self.hub.mono()
@@ -9440,9 +9447,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 source = await jpeg_of(frame) if frame is not None else picture  # a video picture is encoded here
             except PictureGone:  # it was one of the older pictures, whose pixels are let go
                 source = None
-            turn = getattr(self.session, "turn", 0)
-            if source is not None and turn and frame is not None and getattr(frame, "picture", None) is None:
-                source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
+            if source is not None and frame is not None and getattr(frame, "picture", None) is None:
+                source = await self._upright(frame.seq, source)  # landscape: the stream's frame comes as captured
             if source is None:
                 asked = self.hub.mono()
                 source = await self._phone_picture(width)

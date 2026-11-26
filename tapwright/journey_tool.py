@@ -157,9 +157,8 @@ class JourneyTools:
                         source = await d.jpeg_of(frame)
                     except d.PictureGone:
                         source = None
-                    turn = getattr(self.session, "turn", 0)
-                    if source is not None and turn and getattr(frame, "picture", None) is None:
-                        source = await self.turned(frame.seq, source, turn)
+                    if source is not None and getattr(frame, "picture", None) is None:
+                        source = await self._upright(frame.seq, source)  # (None while the side is unknown: the phone's)
                 if source is None:
                     source = await self._read(self.session.screenshot_png)
                 # Dedicated: the frame can be the next one the stream sends; the app is read again after it, and the

@@ -1970,6 +1970,25 @@ def test_an_action_adds_a_picture_only_when_asked():
     run(go)
 
 
+def test_a_picture_while_the_landscape_side_is_unknown_is_the_phones_own_not_an_error():
+    """(CodeRabbit, PR #26) turn -1 went to turn_jpeg (KeyError): a look's picture was a "no screenshot" note and a
+    filmstrip failed. A stream frame can't be turned upright then: the phone's own picture is taken."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen, d.session.turn = (1600.0, 800.0), -1
+        d.hub.publish(blue_frame())
+        r = await d.run_tool("a", "look", {})
+        assert "no screenshot" not in r["text"] and r["image"] is not None
+        assert pixel(r, (5, 5)) != BLUE and "screenshot" in d.session.calls  # the phone's (green), not the stream's
+        frame = d.hub.publish(blue_frame())
+        shots = d.session.calls.count("screenshot")
+        seq, _, shot = await d._film_frame(frame.seq - 1, 0.0)  # a filmstrip's frame
+        assert d.session.calls.count("screenshot") == shots + 1 and seq == frame.seq - 1 and shot
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_failed_screenshot_is_a_note_not_an_error():
     async def go():
         d = make()

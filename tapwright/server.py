@@ -464,7 +464,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                     except PictureGone:
                         continue  # a newer frame is already there
                     turn = getattr(daemon.session, "turn", 0)
-                    if turn and picture is None:  # landscape: the WebDriverAgent frame comes as captured, portrait
+                    # landscape: the WebDriverAgent frame comes as captured, portrait. While which side is up isn't
+                    # known (turn -1) it goes as captured, until a read says (CodeRabbit, PR #26)
+                    if turn > 0 and picture is None:
                         jpeg = await daemon.turned(frame.seq, jpeg, turn)
                     mono = ""
                     if hide and (arrived := hub.arrival_of(frame.seq)) is not None:
