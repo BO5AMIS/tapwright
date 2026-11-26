@@ -109,6 +109,34 @@ def test_k_m1_a_turn_of_the_phone_is_seen_by_the_next_read(state):
     assert s.screen == (932.0, 430.0)
 
 
+def test_k_m1_a_landscape_phone_turned_to_its_other_side_is_seen_while_reads_are_left_unasked(state, monkeypatch):
+    """(CodeRabbit, PR #26) from 90 to 270 degrees the screen keeps its landscape size, so the screen route alone can't
+    tell: the made-up root was taken as is, and a hands touch went to the opposite part of the screen for as long as
+    reads were left unasked. The side is asked again (the rotation route asks no app) as a real read asks it."""
+    monkeypatch.setattr(session_module, "TURN_RECHECK", 0.0)
+    runner = _v11([_root(932, 430)])
+    z = [90]
+    real = runner.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.replace("/session/S", "") == "/wda/tw/screen":
+            runner.requests.append((method, path, payload))
+            return {"value": {"width": 932, "height": 430, "scale": 3, "orientation": 4}}
+        if path.endswith("/rotation"):
+            runner.requests.append((method, path, payload))
+            return {"value": {"x": 0, "y": 0, "z": z[0]}}
+        return await real(method, path, payload, timeout)
+    runner.http = http
+    s = Session(runner)
+    s.read_app = ("TikTok", TT)
+    asyncio.run(s.refresh())
+    assert s.screen == (932.0, 430.0) and s.turn == 90
+    z[0] = 270  # the phone is turned over to its other side
+    asyncio.run(s.refresh())
+    assert len(runner.paths("/wda/tw/tree")) == 1  # (left unasked: the made-up root)
+    assert s.turn == 270
+
+
 # ---- K-H2: a person's input between the picture's text read and the touch is not caught ----
 
 def test_k_h2_a_person_acting_after_the_picture_was_read_stops_the_touch_aimed_from_it(monkeypatch):

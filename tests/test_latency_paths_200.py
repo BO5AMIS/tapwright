@@ -622,7 +622,8 @@ def test_the_app_in_front_is_asked_by_front_on_a_v11_runner_and_by_active_app_in
     assert old.paths("/wda/tw/front") == [] and len(old.paths("/wda/activeAppInfo")) == 1
 
 
-def test_a_root_made_here_asks_no_rotation_in_landscape(state):
+def test_a_root_made_here_asks_no_rotation_in_landscape_while_the_side_was_asked_lately(state):
+    # (CodeRabbit, PR #26) asked again only after TURN_RECHECK, as a real read asks it: test_review_200_latency
     from tapwright.session import Session
     runner = _v11()
     s = Session(runner)
@@ -630,7 +631,7 @@ def test_a_root_made_here_asks_no_rotation_in_landscape(state):
     s.screen, s.turn, s._turn_asked = (932.0, 430.0), 90, -float("inf")  # landscape, the side not asked lately
     s.read_app = ("TikTok", TT)
     asyncio.run(s.refresh())  # the real read (its root is 430x932 in the fake: it asks nothing either way)
-    s.screen, s.turn = (932.0, 430.0), 90
+    s.screen, s.turn, s._turn_asked = (932.0, 430.0), 90, time.monotonic()  # the side was just asked
     real = runner.http
 
     async def http(method, path, payload=None, timeout=30.0):

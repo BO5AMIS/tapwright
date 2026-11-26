@@ -792,9 +792,17 @@ class Session:
         if w <= h:  # upright: always turn 0, whatever it was (review R200 H1: a turn left from before a reconnect)
             self.screen, self.turn = (w, h), 0
             return
-        if same and self.turn != TURN_UNKNOWN and time.monotonic() - self._turn_asked < TURN_RECHECK:
+        if same and not self._turn_due():
             return  # (in landscape the phone may have turned to the other side: asked again now and then)
         self.screen = (w, h)
+        await self._ask_turn()
+
+    def _turn_due(self) -> bool:
+        """In landscape: is which side is up to be asked again (unknown, or asked more than TURN_RECHECK ago)?"""
+        return self.turn == TURN_UNKNOWN or time.monotonic() - self._turn_asked >= TURN_RECHECK
+
+    async def _ask_turn(self) -> None:
+        """Which side is up, from WebDriverAgent's rotation (it asks no app), for a landscape screen."""
         self._turn_asked = time.monotonic()
         try:
             z = int((await self._call("GET", "/session/{sid}/rotation", timeout=LOCK_WAIT)).get("value", {}).get("z", 0))
@@ -913,6 +921,10 @@ class Session:
         shape = await self._screen_of_runner()
         if shape is None or (shape[0] > shape[1]) != (self.screen[0] > self.screen[1]):
             return None
+        if shape[0] > shape[1] and self._turn_due():
+            # (CodeRabbit, PR #26) turned over from one landscape side to the other, the screen keeps its shape: the
+            # side is asked again as a real read asks it, else a hands touch goes to the opposite part of the screen
+            await self._ask_turn()
         node: dict = {"t": "Application", "r": [0, 0, self.screen[0], self.screen[1]], "b": bundle}
         if front[1] is not None:
             node["pid"] = front[1]
