@@ -120,6 +120,21 @@
   held for 15.63 s" during a look of a simple screen and nothing about the cause. `user_apps` (2.1 s seen just after
   it) now asks iOS for the six attributes it reads instead of every attribute of every app. Cost: one thread that
   looks four times a second.
+- A touch near the top no longer goes onto a timer's banner. On a phone with iOS 26.5, a 23 s timer was started, a
+  shopping app opened and looked at, and after the timer's banner came down, `tap {x: 200, y: 85}` went onto the
+  banner and the timer's app came to the front. The banner check rests on the runner naming SpringBoard in front while
+  a banner shows; asked every 0.5 s before and during this banner, the front route and activeAppInfo named the app the
+  whole time. The runner's hit test does see it: SpringBoard's element framed `[11, 11, 408, 490]` at (200, 85), the
+  app at (200, 150) and below, 13 to 32 ms a question, the heavy app too; the status bar is SpringBoard's at all times
+  (frames that end above 64 pt). Now, when the runner names the app the agent saw and a touch starts in the top 200 pt,
+  the hit test is asked at that point: SpringBoard's element reaching below the status bar is a banner, waited out up
+  to 8 s (asked again every 0.5 s), then `covered`; when the hit test can't say, a point, an `o` ref or a picture text
+  is refused `covered` and a touch aimed at an element goes. A swipe from the banner up off the top edge (the `swipe`
+  tool only) goes at once: that sent the timer's banner away without opening anything, and `covered`'s words now say
+  so (a timer, an alarm or a call stays until answered). The picture-text aim's banner check asks the hit test too, at
+  (the screen's middle, 80). Not asked (as before): the phone not upright, a runner below route version 6 or without
+  the route, `TAPWRIGHT_HIT_CHECK=0`. Cost: one hit question (about 20 ms) for each touch, points and elements alike,
+  that starts in the top 200 pt of an app the runner names; none lower down.
 - A touch aimed by a point, an `o` ref or a picture text in the top 200 pt is refused `covered` while the only word
   on the app in front is iOS's process list (the runner couldn't name it, and `open_app` had named that app). That
   list never has SpringBoard, so a notification over the app looks the same as the app alone: the touch that started
