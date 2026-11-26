@@ -274,6 +274,10 @@ class ReadBudget:
     def budget(self, bundle: str | None, still: Callable[[], bool] | None = None) -> int:
         """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget). `still` is asked only
         when the short budget would apply: True gives the normal one."""
+        if still is not None:
+            # (CodeRabbit, PR #26) a read's own plan: a mark a read that raised left (answered() never took it) isn't
+            # this read's. (`short()` asks without `still` and leaves the planned read's mark alone)
+            self._by_still = None
         if bundle is None or bundle not in self._cut:
             return self.normal_ms
         if self.clock() - self._cut[bundle] >= self.memory:

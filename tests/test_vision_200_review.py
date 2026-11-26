@@ -60,6 +60,20 @@ def test_a_still_screen_gets_the_normal_budget_while_its_app_is_on_the_short_one
     assert b.budget("a", still=lambda: False) == 1500
 
 
+def test_a_stillness_mark_left_by_a_read_that_raised_isnt_the_next_ordinary_reads():
+    # (CodeRabbit, PR #26) the still screen's read raised, so answered() never took its mark; the next read, an ordinary
+    # one (the memory ran out, nothing still) was cut and was charged to stillness: the still screen then got the short
+    # budget for the whole memory
+    clock = Clock()
+    b = ReadBudget(normal_ms=3000, short_ms=1500, memory=20.0, clock=clock)
+    b.answered("a", True, 3000)
+    assert b.budget("a", still=lambda: True) == 3000  # the still screen's read... which raises: no answered()
+    clock.t += 21.0  # the memory ran out
+    assert b.budget("a", still=lambda: False) == 3000  # an ordinary normal-budget read, of a moving screen
+    b.answered("a", True, 3000)  # cut short
+    assert b.budget("a", still=lambda: True) == 3000  # a still screen still gets the normal budget once
+
+
 def test_the_short_budget_is_never_more_than_a_normal_budget_set_lower():
     # (CodeRabbit, PR #26) TAPWRIGHT_TREE_BUDGET=500: a read cut short on it was then given 1500 ms
     b = ReadBudget(normal_ms=500, short_ms=1500, memory=20.0, clock=Clock())
@@ -705,12 +719,23 @@ def test_the_daemons_settle_shortens_on_a_feed_and_comes_back_when_it_stands_sti
     run(go)
 
 
-def test_a_whole_read_gives_the_app_the_normal_settle_cap_again(state):
+def test_a_whole_read_leaves_a_restless_app_restless(state):
+    # (CodeRabbit, PR #26: the test named the rule before SettleCap.read_whole changed nothing; it passed because the
+    # session's start forgets, below) a feed may read whole for a moment and not again: no flip back to the normal cap
     runner = V9Runner()
     runner.trees = [{"token": "f1", "tree": _app(children=[BUTTON]), "tier": "full", "truncated": False}]
     s = Session(runner)
+    asyncio.run(s.ensure())
     s.settles.settled(TIKTOK, capped=True, cut=True)
     asyncio.run(s.refresh())
+    assert s.last_tier == "full" and s.settles.restless(TIKTOK)
+
+
+def test_a_new_session_forgets_the_restless_apps(state):
+    runner = V9Runner()
+    s = Session(runner)
+    s.settles.settled(TIKTOK, capped=True, cut=True)
+    asyncio.run(s.ensure())
     assert not s.settles.restless(TIKTOK)
 
 
