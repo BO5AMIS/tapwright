@@ -667,6 +667,19 @@ HINT_LOADING = ("The app may still be on its way: look, or wait_for what you exp
 DELIVERED_TOOLS = ("tap", "long_press")
 
 
+BANNER_PROBE_Y = 80.0  # (round G) where the zone is asked whether a banner is over the app: below the status bar
+
+
+def _flick_up(a: dict) -> bool:
+    """(round G) Is this swipe a flick up off the top edge: it ends above its start within FLICK_TOP of the top, moving
+    more up than sideways? On a banner it goes at once (Session._front_rules): that is how a person sends one away."""
+    try:
+        x0, y0, x1, y1 = (float(a[k]) for k in ("x0", "y0", "x1", "y1"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return y1 <= session_module.FLICK_TOP and y1 < y0 and y0 - y1 > abs(x1 - x0)
+
+
 def touch_name(tool: str) -> str:
     """What the touch is called in NOTE_DELIVERED: `tap`, `long press`, or `double tap` (a journey's double_tap stress)."""
     return "long press" if tool == "long_press" else "double tap" if _DOUBLE.get() else "tap"
@@ -4801,7 +4814,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # (2.0.3) every touch in the top of the screen waits a banner out (_guards_banners), and no touch goes to an
             # app the agent's last look or answer didn't show it (Session._seen_check)
             self.session.banner_guard = self._guards_banners(name, target)
-            self.session.touch_rules = self._touch_rules(view, name, target)
+            self.session.touch_rules = self._touch_rules(view, name, target, args)
             self.session.found_front = None
             touched_token = _SCOPE_TOUCHED.set([])
             try:
@@ -6597,7 +6610,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         since 1.7.5); when that route can't say, the touch goes out (Session._clear_of_banner)."""
         return getattr(self.session, "tw_version", 0) >= session_module.FRONT_VERSION
 
-    def _touch_rules(self, view, name: str, target: "ui.Target | None") -> "session_module.TouchRules | None":
+    def _touch_rules(self, view, name: str, target: "ui.Target | None",
+                     args: dict | None = None) -> "session_module.TouchRules | None":
         """(2.0.3, safety, review RP) What an agent's touches in this action are checked against (Session._front_rules):
         the front state its newest answer showed it (`view.seen_front`, recorded by _front_answer), and whether the
         action aims at an element of its list by ref, id or label. None (no check) for the tools that change the app in
@@ -6606,7 +6620,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         front = getattr(view, "seen_front", None)
         element = (target is not None and target.kind in ("ref", "id", "label") and not _PICTURE_TEXT.get())
-        return session_module.TouchRules(front if isinstance(front, session_module.Front) else None, element)
+        return session_module.TouchRules(front if isinstance(front, session_module.Front) else None, element,
+                                         name == "swipe" and _flick_up(args or {}))
 
     async def _front_state_now(self) -> "session_module.Front | None":
         """Session.front_state, None without one (a fake, or a runner that answered a version below 11). (Not
@@ -6692,7 +6707,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
     async def _banner_shown(self) -> bool:
         """Is a notification banner over the app now (the runner names SpringBoard in front while the newest read is of
-        an app: Session._clear_of_banner)? False when the runner can't say in a few ms (route version 11)."""
+        an app: Session._clear_of_banner; or, round G, the hit test at the zone's probe point finds SpringBoard there,
+        which a timer's banner on iOS 26.5 needs)? False when the runner can't say in a few ms (route version 11)."""
         s = self.session
         if getattr(s, "tw_version", 0) < session_module.FRONT_VERSION:
             return False
@@ -6700,7 +6716,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if isinstance(read_app, tuple) and read_app[1] == session_module.SPRINGBOARD:
             return False  # SpringBoard's own screen: nothing slid over an app
         front = await s.front_app()
-        return front is not None and front[0] == session_module.SPRINGBOARD
+        if front is not None and front[0] == session_module.SPRINGBOARD:
+            return True
+        banner_at = getattr(s, "banner_at", None)
+        if not callable(banner_at):
+            return False
+        return await banner_at((s.screen[0] / 2, BANNER_PROBE_Y)) == session_module.BANNER_OVER
 
     async def _locked_by_press(self) -> bool:
         """After the agent's own `press_button lock`: ask the phone whether it is locked now (it takes a moment), for

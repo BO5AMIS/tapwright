@@ -597,10 +597,23 @@ class Front:
 class TouchRules:
     """(2.0.3) What an agent's touches in one action are checked against (Session._front_rules): `seen`, the front state
     the agent's last answer showed it (None: none was recorded), and `element`, whether the action aims at an element by
-    ref, id or label from the agent's list (it may then touch SpringBoard's own UI it saw, a banner's row included)."""
+    ref, id or label from the agent's list (it may then touch SpringBoard's own UI it saw, a banner's row included).
+    `flick` (round G): the action is the agent's `swipe` up off the top edge (FLICK_TOP), the way a person sends a banner
+    away: on a banner it goes at once."""
     seen: Front | None
     element: bool = False
+    flick: bool = False
 
+
+# (round G, phone 2026-11-27, iOS 26.5) the hit test at a point of the banner zone: what is there, by SpringBoard's own
+# elements. The status bar is SpringBoard's at all times (the island: frame [122, 11, 156, 37]; the clock: [46, 11, 40,
+# 22]); a timer's banner was SpringBoard's `Other` [11, 11, 408, 490]. So "over" is SpringBoard's element reaching below
+# HIT_BANNER_BELOW, where the status bar ends. While that banner showed, the front route and activeAppInfo named the app
+# the whole time: the hit test, 13-32 ms a question (a heavy app too), is the only word on it.
+HIT_BANNER_BELOW = 64.0
+HIT_BANNER_WAIT = 1.5  # seconds the gate waits for the hit test's answer before it can't say
+BANNER_OVER, BANNER_CLEAR, BANNER_UNSURE, BANNER_UNASKED = "over", "clear", "unsure", "unasked"
+FLICK_TOP = 10.0  # points from the top edge within which a flick up ends
 
 # (review RP2 L2, M4) every refusal of the rules starts with its reason word; a screen where the route can't name the app
 # says how to go on: open_app names it (and is exempt), then look
@@ -610,7 +623,11 @@ UNSEEN_FRONT = ("unknown_front: your last look couldn't tell which app was in fr
                 "(or open_app the app you mean, then look), then try again.")
 NO_LOOK = "no_look: no look yet in this session shows what is in front, so nothing was touched; look first."
 COVERED_BANNER = ("covered: a notification is over the top of the screen, so nothing was touched; wait a few seconds, "
-                  "then look and try again.")
+                  "then look and try again. A timer, an alarm or a call stays until answered: send it away with a swipe "
+                  "from it up off the top edge (swipe {x0: 215, y0: 70, x1: 215, y1: 2}), then look.")
+# (round G) the hit test couldn't say what is at the top of the screen, though the route names the app
+COVERED_UNSURE = ("covered: can't tell whether a notification is over the top of the screen (the phone's runner didn't "
+                  "answer what is there), so nothing was touched; aim at an element (by ref, id or label), or lower.")
 COVERED_HOME = ("covered: a notification may be over the top of the home screen, so nothing was touched; aim at an "
                 "element (by ref, id or label), or look again.")
 # (review RF H1) the app in front known only from iOS's process list, which can't see a banner
@@ -1820,10 +1837,42 @@ class Session:
             await asyncio.sleep(BANNER_POLL)
             waited += BANNER_POLL
             now = await self.front_state()
-            if now is None or now.kind != FRONT_OVER:
+            if now is None or now.kind not in (FRONT_OVER, FRONT_APP):
                 return
+            # (round G) the route names the app while a banner iOS 26.5 shows: then the hit test at the touch's start
+            at = self._gate_at
+            if now.kind == FRONT_APP and (at is None or await self.banner_at(at) != BANNER_OVER):
+                return  # (the gate runs again in full: the check, then the guard)
         self._gate_at = None
         raise Refused("not_actionable", COVERED_BANNER)
+
+    async def banner_at(self, at: tuple[float, float]) -> str:
+        """(round G) Is something of SpringBoard at this point, over an app: the hit test (HIT_PATH, route version 6),
+        asked once with a short wait. BANNER_OVER: SpringBoard's element there reaches below the status bar
+        (HIT_BANNER_BELOW); BANNER_CLEAR: any other verified answer; BANNER_UNSURE: an error, no answer in time, a
+        malformed or unverified answer. BANNER_UNASKED (as before round G): the check is off, the phone isn't upright (the
+        route takes portrait points), or the runner is older or says it has no such route. Not hit_at: its refusals are a
+        touch's, this is a question about the screen. A trace line names the point and the frame only, never a label."""
+        if HIT_CHECK == "0" or self.turn != 0 or self.screen[0] > self.screen[1] or self.tw_version < 6:
+            return BANNER_UNASKED
+        try:
+            answer = await self._call("GET", f"{HIT_PATH}?x={at[0]:.2f}&y={at[1]:.2f}", timeout=HIT_BANNER_WAIT,
+                                      again=False)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            said = str(e).lower()
+            return BANNER_UNASKED if "unknown command" in said or "unknown method" in said else BANNER_UNSURE
+        except Exception:  # noqa: BLE001 - no answer in time, or any other failure: it can't say
+            return BANNER_UNSURE
+        value = answer.get("value") if isinstance(answer, dict) else None
+        hit = ui.hit_of(value)
+        if hit is None or not isinstance(value, dict) or value.get("identity") != "verified":
+            return BANNER_UNSURE
+        if hit.bundle == SPRINGBOARD and hit.rect[1] + hit.rect[3] > HIT_BANNER_BELOW:
+            trace.note("banner_hit", {"at": [round(at[0]), round(at[1])], "frame": [round(v) for v in hit.rect]})
+            return BANNER_OVER
+        return BANNER_CLEAR
 
     async def front_state(self) -> "Front | None":
         """(2.0.3) What is in front now (FRONT_*): one question to the front route, and iOS's process list only when it
@@ -1892,6 +1941,10 @@ class Session:
           an `o` ref or a text of the picture: in the banner zone a banner is waited out (`covered` if it stays),
           anywhere else refused `covered`. Element-aimed when the agent saw the app alone: the zone waits, below it
           `stale`;
+        - (round G) the route names the agent's app, the touch starts in the banner zone: the hit test at that point
+          (banner_at). SpringBoard's element reaching below the status bar is a banner: waited out as above (`covered`
+          if it stays), except the agent's flick up from it; the hit test can't say: a point, an `o` ref or a text of
+          the picture is refused `covered`, an element-aimed touch goes;
         - anything else: `stale`;
         - the route or the process list can't say (asked twice, 0.2 s apart), the agent's last answer couldn't:
           `unknown_front`; no answer of the agent recorded anything: `no_look`.
@@ -1921,6 +1974,20 @@ class Session:
                     if now.guessed and zone and not rules.element:
                         # (review RF H1) only the process list says so: a banner over the top can't be ruled out
                         raise Refused("not_actionable", COVERED_GUESS.format(app=self._words(now)))
+                    # (round G, iOS 26.5) the route names the app while a timer's banner is over it: in the zone, the
+                    # hit test at the touch's start says whether SpringBoard is there
+                    said = await self.banner_at(at) if zone else BANNER_UNASKED
+                    if said == BANNER_OVER and not rules.flick:
+                        if not wait:
+                            raise _BannerUp()
+                        if waited >= BANNER_WAIT:
+                            raise Refused("not_actionable", COVERED_BANNER)
+                        await asyncio.sleep(BANNER_POLL)
+                        waited += BANNER_POLL
+                        now = await self.front_state() or Front(FRONT_UNKNOWN)
+                        continue
+                    if said == BANNER_UNSURE and not rules.element:
+                        raise Refused("not_actionable", COVERED_UNSURE)
                     self.found_front = now  # (review RP2 M2: what the agent saw over the app has gone)
                     return
                 break
@@ -1943,7 +2010,10 @@ class Session:
                 # (review RP2 M2) a point, an o ref, a text of the picture: never on the system over the app
                 raise Refused("not_actionable", f"covered: {self._words(now)}, so nothing was touched; aim at one of "
                                                 "its elements by ref, or look again.")
-            # in the banner zone, SpringBoard over the app: a banner may be there; wait it out (rule A)
+            # in the banner zone, SpringBoard over the app: a banner may be there; wait it out (rule A), unless the
+            # touch is the agent's flick up from it (round G: how a person sends a banner away)
+            if rules.flick and await self.banner_at(at) == BANNER_OVER:
+                return
             if not wait:
                 raise _BannerUp()
             if waited >= BANNER_WAIT:

@@ -54,10 +54,15 @@ class PointSession(DescribingSession):
     _words = _real("_words")
     see_front = _real("see_front")
     _wait_banner = _real("_wait_banner")
+    banner_at = _real("banner_at")
 
     def __init__(self, app=SHOP) -> None:
         super().__init__()
-        self.tw_version = 11
+        self.tw_version, self.turn = 11, 0
+        # (round G) the runner's hit test: what a touch at a point lands on (the app's own element unless a test says)
+        self.hit = lambda x, y: {"t": "XCUIElementTypeOther", "r": [0, 0, 10, 10], "b": self.app[1],
+                                 "identity": "verified"}
+        self.hit_questions: list[tuple[float, float]] = []
         self.app = app
         self.front: tuple[str, int | None] | None = (app[1], 7)
         self.in_front = [] if app[1] == SPRINGBOARD else [app[1]]
@@ -77,6 +82,16 @@ class PointSession(DescribingSession):
     async def front_app(self):
         self.front_questions += 1
         return self.front
+
+    async def _call(self, method, path, payload=None, timeout=None, again=True):
+        if not path.startswith(session_module.HIT_PATH):
+            raise AssertionError(f"unexpected runner request {method} {path}")
+        x, y = (float(p.split("=")[1]) for p in path.split("?")[1].split("&"))
+        self.hit_questions.append((x, y))
+        answer = self.hit(x, y)
+        if isinstance(answer, BaseException):
+            raise answer
+        return {"value": answer}
 
     async def _goes(self, kind: str, ms: float, at: tuple[float, float]) -> None:
         await self._touching(ms, at)
