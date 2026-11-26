@@ -85,10 +85,12 @@
 - After an action with `look: false`, the next call waits for what that action started before it reads the screen
   (Settings shows nothing for about half a second after a tap on a row, then pushes the page: the next call took
   that pause for the end and read the page being left). A change only at the screen's edges (the scroll indicator
-  fading, the home indicator) no longer counts as a change. A swipe reads nothing before its drag. `back` takes its
+  fading, the home indicator) no longer counts as a change. A swipe of 10 points or more reads nothing before its
+  drag. `back` takes its
   button from your list when the list was read a moment ago.
 - The touch connection is opened when the phone connects, not on the first touch. If touches are acknowledged by
-  the phone but none has changed the screen since the connection was opened (3 in a row), it is opened again, and
+  the phone but none has changed the screen since the connection was opened (3 taps on elements in a row), it is
+  opened again, and
   if that doesn't help touches go through the runner; the answer says so each time.
 - `press_button lock` answers `Locked the phone.` and the daemon knows at once: a touch right after it is refused
   `locked` (before, it learned of the lock up to 5 s later).
@@ -97,7 +99,7 @@
   own app. A point you give as `{x, y}` is touched as it is.
 - Text read from the picture in landscape is right again: with the screen turned, Apple's text reader returned each
   line upside down (`789` as `68L`). The runner now reads a turned screen both ways up and keeps the better reading.
-- Over Wi-Fi, a read whose answer never comes is asked again after its budget and 3 s (10 s before).
+- Over Wi-Fi, a read whose answer never comes is asked again after its budget and 5 s (10 s before).
 - Measured on one phone (iPhone 14 Pro Max, iOS 26.5, USB, Settings app, 1.10.0 and 2.0.0 one after the other,
   medians): `open_app` 4.6 s to 1.7 s; `look` 0.53 s to 0.28 s; a tap with `look: false` 0.28 s to 0.11 s; a swipe
   3.6 s to 1.3 s; `close_app` 2.7 s to 0.55 s; `press_button home` 1.7 s to 1.2 s; a tap by label that opens a page,

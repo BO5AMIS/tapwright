@@ -109,12 +109,13 @@ HANDS_GESTURES = frozenset({"tap", "long_press", "swipe", "scroll", "back", "pin
 LOCK_PRESS_WAIT = 1.5  # seconds `press_button lock` waits for the phone to say it is locked, asking every LOCK_PRESS_POLL
 LOCK_PRESS_POLL = 0.15
 LOCKED_BY_PRESS = "Locked the phone."  # (the note every answer of a locked phone carries says how to go on)
-NOTE_HANDS_REOPENED = ("the last touches were acknowledged by the phone but none has changed the screen since the touch "
-                       "connection was opened, so it was opened again. If this touch should have changed something, "
-                       "look, then repeat it.")
-NOTE_HANDS_RUNNER = ("touches sent from this computer were acknowledged by the phone but changed nothing, also after the "
-                     "touch connection was opened again: from now on touches go through the runner on the phone "
-                     "(slower, about 0.3 s each). If this touch should have changed something, look, then repeat it.")
+HANDS_EXPECTED = frozenset({"tap", "long_press", "toggle"})  # ... of which these, aimed at an element, should show
+NOTE_HANDS_REOPENED = ("no touch has changed the screen since the touch connection was opened (the phone acknowledges "
+                       "them either way), so the connection may not be reaching the screen: it was opened again. If "
+                       "this touch should have changed something, look, then repeat it.")
+NOTE_HANDS_RUNNER = ("still no touch from this computer has changed the screen, also after the touch connection was "
+                     "opened again: to be safe, touches go through the runner on the phone from now on (slower, about "
+                     "0.3 s each). If this touch should have changed something, look, then repeat it.")
 # (2.0) TAPWRIGHT_RUNNER_OCR=0: text is read from the picture on this computer only (RapidOCR), never by the runner
 RUNNER_OCR = os.environ.get("TAPWRIGHT_RUNNER_OCR", "1")
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
@@ -467,8 +468,8 @@ def alike_on_glass(a: Frame | None, b: Frame | None, screen: tuple[float, float]
     screen's size known; anything that can't be compared that way is as `alike` says."""
     if alike(a, b):
         return True
-    if turn or a is None or b is None or not screen or not screen[0] or not screen[1]:
-        return False
+    if turn or a is None or b is None or not screen or not screen[0] or not screen[1] or screen[0] > screen[1]:
+        return False  # (review L-L2: a landscape screen whose turn isn't known yet has its strips elsewhere too)
     try:
         x, y = a.thumb, b.thumb
         if x is None or y is None or x.size != y.size:
@@ -3989,6 +3990,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         said.taken = True
         arrival = trace.arrive()  # (None when the trace is off) the touch's trace counts from here, before the front check
         before = self._bundle()  # the app under test when the call began (see _crash_check), and its process if read
+        # (review L-L4) did this client's last answer show the screen? After a `look: false` action the app may have
+        # stopped unseen, and a home press that follows must still ask
+        shown_before = not self.unsettled and self.control.client(client_id).unlooked == 0
         pid_before = self._log_pids.get(before) if before else None
         try:
             # The stream is held open for the length of every tool call; the pump's own linger keeps
@@ -4012,7 +4016,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                         e = enriched
                     raise e from None
                 note = await self._crash_note(client_id, scope, name, before, None, pid_before,
-                                              sent_away=name == "press_button" and args.get("name") == "home")
+                                              sent_away=(name == "press_button" and args.get("name") == "home"
+                                                         and shown_before))
                 if note is not None:
                     answer = {**answer, "text": f"{answer['text']}\nNote: {note}"}
                 elif client_id not in self._crash_pending and name not in DIAG_TOOLS:
@@ -4615,6 +4620,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if isinstance(result, Unchanged):  # nothing was done: nothing to settle or diff
             return _answer([str(result)], notes)
         if name == "press_button" and args.get("name") == "lock" and await self._locked_by_press():
+            # (review L-L1) as any action that ends without a look: the list is of the screen before it, nothing is
+            # owed a settle (the phone is locked), and the live view and Tapline are told of the press
+            view.moved = True
+            self.unsettled, self.unsettled_from = False, None
+            pressed = self._redact(str(result))
+            self._announce("agent", name, label=element_name(pressed), caption=step_caption(name, pressed, args),
+                           point=self._point(self.session.last_point))
             return _answer([LOCKED_BY_PRESS], notes)
         reads_only = name == "alert" and args.get("action") == "text"  # it changes nothing on the phone
         looks = settle is not None and args.get("look", True) and not reads_only
@@ -4676,7 +4688,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         trace.settled()
         if session_module.TRACE:
             self.log(f"trace {name} settle {done.seconds:.2f} s, changed={done.changed}")
-        if (doubt := await self._judge_hands(name, box.get("began"), done.changed)) is not None:
+        if (doubt := await self._judge_hands(name, box.get("began"), done.changed, target)) is not None:
             notes = [*notes, doubt]
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
@@ -6293,19 +6305,28 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 if await self.control.read(lambda: self._connected_only(self.session.locked)):
                     self._set_state("locked", "unlock the phone")
                     return True
+            except ConnectionLost as e:
+                self.lost(e)  # (review L-L1: a dropped line is said now, not at the next heartbeat)
+                return False
             except (Refused, DeviceError):
                 return False  # (it can't say: the heartbeat will)
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(LOCK_PRESS_POLL)
 
-    async def _judge_hands(self, name: str, began: float | None, changed: bool) -> str | None:
+    async def _judge_hands(self, name: str, began: float | None, changed: bool,
+                           target: "ui.Target | None" = None) -> str | None:
         """After the settle of a touchscreen gesture the hands played (Session.hands_at is from this call): tell the
         hands whether the screen changed (Hands.judged), and give the note for the answer when they doubt their
-        connection. A nicety that never fails a call."""
+        connection. Any gesture that changed the screen proves the connection. Against it counts only a tap, long press
+        or toggle aimed at an element that changed nothing (review L-L3): a scroll at a list's end, a `back` with
+        nothing to go back to and a tap at a point the agent chose change nothing by right. A nicety that never
+        fails a call."""
         s = self.session
         hands, at = getattr(s, "hands", None), getattr(s, "hands_at", None)
         if name not in HANDS_GESTURES or hands is None or began is None or at is None or at < began:
+            return None
+        if not changed and not (name in HANDS_EXPECTED and target is not None and target.point is None):
             return None
         try:
             verdict = await hands.judged(changed)

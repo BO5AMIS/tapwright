@@ -91,21 +91,27 @@ def test_the_answer_says_when_the_touch_connection_was_opened_again_and_when_the
                 self.heard.append(changed)
                 return self.says
         judge = d.session.hands = Judge()
+        row = daemon_module.ui.Target(label="General")
         d.session.hands_at = None
-        assert await d._judge_hands("tap", 10.0, False) is None and judge.heard == []  # the runner made this touch
+        assert await d._judge_hands("tap", 10.0, False, row) is None and judge.heard == []  # the runner made this touch
         d.session.hands_at = 9.0
-        assert await d._judge_hands("tap", 10.0, False) is None and judge.heard == []  # (an earlier call's touch)
+        assert await d._judge_hands("tap", 10.0, False, row) is None and judge.heard == []  # (an earlier call's touch)
         d.session.hands_at = 11.0
         assert await d._judge_hands("press_button", 10.0, False) is None and judge.heard == []
-        assert await d._judge_hands("swipe", 10.0, True) is None and judge.heard == [True]
+        # (review L-L3) what changes nothing by right is never held against the hands: a scroll at a list's end, a
+        # `back` with nothing to go back to, a tap at a point the agent chose itself
+        for name, target in (("scroll", None), ("back", None), ("swipe", None),
+                             ("tap", daemon_module.ui.Target(x=215.0, y=12.0))):
+            assert await d._judge_hands(name, 10.0, False, target) is None and judge.heard == [], name
+        assert await d._judge_hands("swipe", 10.0, True) is None and judge.heard == [True]  # any change proves them
         judge.says = "reopened"
-        assert await d._judge_hands("tap", 10.0, False) == daemon_module.NOTE_HANDS_REOPENED
+        assert await d._judge_hands("tap", 10.0, False, row) == daemon_module.NOTE_HANDS_REOPENED
         judge.says = "runner"
-        assert await d._judge_hands("back", 10.0, False) == daemon_module.NOTE_HANDS_RUNNER
+        assert await d._judge_hands("toggle", 10.0, False, row) == daemon_module.NOTE_HANDS_RUNNER
 
         async def broken(changed):
             raise RuntimeError("no")
         judge.judged = broken
-        assert await d._judge_hands("tap", 10.0, False) is None  # a nicety: never a failed call
+        assert await d._judge_hands("tap", 10.0, False, row) is None  # a nicety: never a failed call
         await finish(stop, task)
     run(go)

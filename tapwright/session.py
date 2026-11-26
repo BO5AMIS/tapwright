@@ -161,7 +161,7 @@ QUICK_CUT = 0.25  # a read that comes back with no elements in under this part o
 #                   app: the app had nothing to answer with yet. It is asked again, RETRY_GAP seconds later, while at
 #                   least RETRY_MIN_MS of the budget is left
 BY_STILL_FOR = 30.0  # seconds a read may take to answer and still count as the one a still screen was given
-BUDGET_GRACE = 3.0  # seconds past its budget a budgeted read's answer is waited for (the runner answers within the
+BUDGET_GRACE = 5.0  # seconds past its budget a budgeted read's answer is waited for (the runner answers within the
 #                     budget, plus up to 0.5 s for the turn of a root and the time to build and carry the answer)
 
 
@@ -1333,8 +1333,20 @@ class Session:
         (the home screen), are not held up."""
         if at[1] >= BANNER_ZONE:
             return
+        # (review L-M2) the agent's newest read is of SpringBoard itself (Control Center pulled over an app, the home
+        # screen): it is aiming at SpringBoard's own screen, and nothing slid over what it aimed at
+        if isinstance(self.read_app, tuple) and self.read_app[1] == SPRINGBOARD:
+            return
         waited = 0.0
-        while await self.foreground_bundle_id() == SPRINGBOARD:
+        while True:
+            if self.tw_version >= FRONT_VERSION:
+                # (review L-M1) only the route that answers in a few ms: when it can't say, the touch goes out.
+                # foreground_bundle_id would fall back to activeAppInfo, 1.7-30 s on a screen that doesn't answer
+                front = await self.front_app()
+                if front is None or front[0] != SPRINGBOARD:
+                    return
+            elif await self.foreground_bundle_id() != SPRINGBOARD:
+                return
             try:
                 in_front = await asyncio.wait_for(self.device.foreground_apps(), 5)
             except Exception:
