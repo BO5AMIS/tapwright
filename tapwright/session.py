@@ -5,6 +5,7 @@ import base64
 import binascii
 import contextvars
 import io
+import math
 import os
 import random
 import re
@@ -143,15 +144,22 @@ def fast_reads(languages: str) -> bool:
 
 
 def _env_float(name: str, default: float) -> float:
+    """A positive, finite number from the environment, else `default` (CodeRabbit, PR #26: "inf" failed the import)."""
     try:
         value = float(os.environ.get(name, default))
     except ValueError:
         return default
-    return value if value > 0 else default
+    return value if math.isfinite(value) and value > 0 else default
+
+
+def _env_ms(name: str, default: int) -> int:
+    """A whole number of milliseconds, at least 1, from the environment, else `default` (0.5 gave a 0 ms budget)."""
+    value = int(_env_float(name, default))
+    return value if value >= 1 else default
 
 
 AX_TIMEOUT = _env_float("TAPWRIGHT_AX_TIMEOUT", 3.0)  # seconds: the runner's ceiling for any one accessibility read
-TREE_BUDGET_MS = int(_env_float("TAPWRIGHT_TREE_BUDGET", 3000))  # ms a tree read may take on the runner
+TREE_BUDGET_MS = _env_ms("TAPWRIGHT_TREE_BUDGET", 3000)  # ms a tree read may take on the runner
 # ms for an app whose last read was cut short. (Review R200v H1) The runner gives `full` 60 % of the budget, after
 # finding the app and an idle wait of up to a quarter of it, and tries `shallow` only with 0.25 s left past a reserve
 # for `root`: at 600 ms nearly every read came back `root`, even of a screen that reads whole in 0.4 s (the home screen's
@@ -278,7 +286,7 @@ class ReadBudget:
         if still is not None and (at is None or self.clock() - at >= self.memory) and still():
             self._by_still = (bundle, self.clock())
             return self.normal_ms
-        return self.short_ms
+        return min(self.short_ms, self.normal_ms)  # (CodeRabbit, PR #26: a normal budget set lower stays the most)
 
     def short(self, bundle: str | None) -> bool:
         return self.budget(bundle) < self.normal_ms

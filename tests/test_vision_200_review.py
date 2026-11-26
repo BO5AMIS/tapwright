@@ -60,6 +60,24 @@ def test_a_still_screen_gets_the_normal_budget_while_its_app_is_on_the_short_one
     assert b.budget("a", still=lambda: False) == 1500
 
 
+def test_the_short_budget_is_never_more_than_a_normal_budget_set_lower():
+    # (CodeRabbit, PR #26) TAPWRIGHT_TREE_BUDGET=500: a read cut short on it was then given 1500 ms
+    b = ReadBudget(normal_ms=500, short_ms=1500, memory=20.0, clock=Clock())
+    b.answered("a", True, 500)
+    assert b.budget("a", still=lambda: False) == 500 and b.plan("a", still=lambda: False) == (500, False)
+
+
+def test_a_budget_setting_that_isnt_a_finite_positive_number_of_ms_is_the_default(monkeypatch):
+    # (CodeRabbit, PR #26) "inf" failed the import (int of infinity), 0.5 gave a budget of 0 ms
+    for bad in ("inf", "nan", "-1", "0", "0.5", "x"):
+        monkeypatch.setenv("TAPWRIGHT_TREE_BUDGET", bad)
+        assert session_module._env_ms("TAPWRIGHT_TREE_BUDGET", 3000) == 3000, bad
+    monkeypatch.setenv("TAPWRIGHT_TREE_BUDGET", "500")
+    assert session_module._env_ms("TAPWRIGHT_TREE_BUDGET", 3000) == 500
+    monkeypatch.setenv("TAPWRIGHT_AX_TIMEOUT", "inf")
+    assert session_module._env_float("TAPWRIGHT_AX_TIMEOUT", 3.0) == 3.0
+
+
 def test_the_session_asks_the_daemons_stillness_before_a_short_budget(state):
     runner = V9Runner()
     runner.trees = [{"token": "r1", "tree": _app(), "tier": "root", "truncated": True}]
