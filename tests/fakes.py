@@ -309,6 +309,7 @@ class FakeSession:
         self.installed = [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7",
                           "executable": "Example"}]
         self.app_names: dict[str, str] = {}  # filled by read_app_names, as Session does at connect
+        self.not_installed: set[str] = set()
         self.foreground: str | None = None  # the bundle id the phone shows
         self.tree_app: tuple[str, str] | None = None  # the root Application a read names (None: it names none)
         self.read_app: tuple[str, str] | None = None  # what the newest read named (Session.read_app)
@@ -525,7 +526,7 @@ class FakeSession:
         self.read_app = self.app
         return Snapshot(tree, self.app, 3.0)
 
-    async def apps(self):
+    async def apps(self, fresh=False):
         self._record("apps")
         self.app_names = {a["bundle_id"]: a["name"] for a in self.installed}
         return list(self.installed)

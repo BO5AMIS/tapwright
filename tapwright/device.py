@@ -11,6 +11,7 @@ over:
 import asyncio
 import contextvars
 import dataclasses
+import functools
 import json
 import os
 import posixpath
@@ -29,6 +30,23 @@ from .diagnostics import CRASH_MAX_MB, CrashSearch, crash_pattern, only_mine
 # Request-local ownership check, carried through connection setup without changing
 # device/fake method signatures or sharing a guard with viewer/background requests.
 BEFORE_SEND = contextvars.ContextVar("before_device_send", default=None)
+TRACE = os.environ.get("TAPWRIGHT_TRACE") == "1"  # (the runner's requests are traced in session.py)
+
+
+def _traced(method):
+    """With TAPWRIGHT_TRACE=1: log how long this call to one of the phone's own services took. Each opens a service on
+    the tunnel, which costs from 50 ms to over a second, and none of them shows in the runner's trace."""
+    if not TRACE:
+        return method
+
+    @functools.wraps(method)
+    async def timed(self, *args, **kwargs):
+        began = time.monotonic()
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            self.log(f"trace device {method.__name__} {(time.monotonic() - began) * 1000:.0f} ms")
+    return timed
 
 
 async def check_before_send() -> None:
@@ -581,6 +599,7 @@ class Device:
         at, self._answered_at = self._answered_at, None
         return at is not None and time.monotonic() - at < ANSWERED_FRESH
 
+    @_traced
     async def lock_state(self) -> LockState | None:
         """The phone's lock state from CoreDevice (iOS 17+), without WebDriverAgent: answers before any runner is
         launched. None when the phone couldn't say (an older iOS, no tunnel, another shape of answer)."""
@@ -615,6 +634,7 @@ class Device:
             return LockedBeforeStart()
         return None
 
+    @_traced
     async def passcode_prompt_up(self) -> bool | None:
         """Is iOS's passcode screen in front (from the process list, which answers without WebDriverAgent)?
         None when the phone couldn't be asked: not known, which is not the same as gone."""
@@ -635,6 +655,7 @@ class Device:
             return PasscodeNeeded()
         return error
 
+    @_traced
     async def battery(self) -> tuple[int | None, bool | None]:
         """(percent, charging) from lockdown's battery domain, for the watchdog (§24.5); (None, None) when the phone
         doesn't say. Asks over the open tunnel only: never connects."""
@@ -655,6 +676,7 @@ class Device:
         """Someone is asking for the phone now (a tool call, a viewer): the next start doesn't wait its turn."""
         self._hurry = True
 
+    @_traced
     async def foreground_apps(self) -> list[str]:
         """Bundle ids of the apps iOS has in the foreground, from its process list: that answers while
         WebDriverAgent is stuck behind a frozen app. SpringBoard isn't an application there (measured)."""
@@ -668,6 +690,7 @@ class Device:
                 if p.get("foregroundRunning") and p.get("isApplication") and p.get("bundleIdentifier")
                 and p.get("name") != AUTH_PROMPT]
 
+    @_traced
     async def kill_app(self, bundle_id: str) -> int:
         """End every process of that app, as swiping it away in the app switcher does; how many there were.
         Works while the app is frozen, unlike WebDriverAgent's terminate, which waits on it."""
@@ -682,6 +705,7 @@ class Device:
         return len(pids)
 
     # ---- diagnostics (AGENT-TOOLS §15) ----
+    @_traced
     async def processes(self) -> list["Proc"]:
         """Every process iOS lists: its pid, its bundle id and when it started (a pid is reused, so a pid alone says
         nothing about which process it is)."""
@@ -696,6 +720,7 @@ class Device:
         """That app's running processes, each with its start time (empty: it isn't running)."""
         return [p for p in await self.processes() if p.bundle == bundle_id]
 
+    @_traced
     async def phone_time_ms(self) -> int | None:
         """The phone's own clock now, epoch ms: the log entries' times are on it, not on this computer's."""
         value = await self.rsd.get_value(key="TimeIntervalSince1970")
@@ -724,6 +749,7 @@ class Device:
         finally:
             await self._close(service)
 
+    @_traced
     async def crash_reports(self, executable: str, count: int, bundle_id: str | None = None) -> CrashSearch:
         """The newest `count` crash reports of the app (parsed; newest first): its process is named `executable`
         and, when a report names one, its bundle id is `bundle_id`. Each report is read on its own: one that can't be
@@ -768,6 +794,7 @@ class Device:
             incomplete = len(found) < count and len(ordered) > CRASH_SCAN
         return CrashSearch(found, unreadable, too_big, incomplete, scanned)
 
+    @_traced
     async def crash_file(self, filename: str) -> bytes:
         """The whole of one crash report, as it is on the phone (CrashTooBig when it is over the byte cap)."""
         from pymobiledevice3.services.crash_reports import CrashReportsManager
@@ -1154,6 +1181,7 @@ class Device:
             pass
 
     # ---- apps ----
+    @_traced
     async def user_apps(self) -> list[dict]:
         """Apps you installed (App Store, TestFlight, development builds)."""
         from pymobiledevice3.services.installation_proxy import InstallationProxyService

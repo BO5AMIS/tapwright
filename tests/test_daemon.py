@@ -2158,6 +2158,7 @@ def test_close_app_by_name():
         d = make()
         stop, task = await started(d)
         r = await d.run_tool("a", "close_app", {"app": "Example"})
+        await d._closing_done()  # (2.0: the runner is told behind the answer)
         assert d.session.closed == ["com.example.app"] and r["text"] == "Closed Example (com.example.app)."
         await finish(stop, task)
     run(go)
@@ -2173,6 +2174,7 @@ def test_close_app_ends_the_app_through_ios_first_then_tells_webdriveragent():
         r = await d.run_tool("a", "close_app", {"app": "Example"})
         assert r["text"] == "Closed Example (com.example.app)."
         assert d.session.device.killed == ["com.example.app"]
+        await d._closing_done()  # (2.0: the runner is told behind the answer)
         assert d.session.closed == ["com.example.app"]  # WebDriverAgent's bookkeeping matches
         said = [line for line in logs if "com.example.app" in line and "process control" in line]
         assert len(said) == 1 and re.search(r"in \d+\.\d s", said[0])
@@ -2981,6 +2983,7 @@ def test_close_app_needs_an_exact_name_or_bundle_id():
             await d.run_tool("a", "close_app", {"app": "Exam"})
         assert e.value.code == "not_found" and not d.session.closed
         await d.run_tool("a", "close_app", {"app": "example"})
+        await d._closing_done()
         assert d.session.closed == ["com.example.app"]
         await finish(stop, task)
     run(go)
@@ -2999,6 +3002,7 @@ def test_system_apps_open_by_name():
             r = await d.run_tool("a", "open_app", {"app": name.lower()})
             assert d.session.launched[-1] == bundle and r["text"].startswith(f"Opened {name} ({bundle}).")
         await d.run_tool("a", "close_app", {"app": "Settings"})
+        await d._closing_done()
         assert d.session.closed == ["com.apple.Preferences"]
         await finish(stop, task)
     run(go)

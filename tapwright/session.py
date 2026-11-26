@@ -34,6 +34,9 @@ BANNER_ID = "NotificationShortLookView"  # the identifier of a notification bann
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
 # TAPWRIGHT_TRACE=1: every request to WebDriverAgent is logged with how long it took (for profiling, e.g. over Wi-Fi)
 TRACE = os.environ.get("TAPWRIGHT_TRACE") == "1"
+APPS_STALE = 30.0  # seconds after which the kept list of installed apps is read again, behind the call that used it
+APPLE_APPS = "com.apple."  # Apple's own bundle ids: built-in apps, which no list of installed apps holds, and a few
+#                            from the App Store (Pages, TestFlight), which it does
 # The passcode unlock's keypad (unlock.PhoneLockScreen.press_keys): its requests write no trace line, neither the TRACE
 # log line nor trace.py's request count, so nothing gives the passcode's length (last Opus review of 1.7.8, L4)
 QUIET: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_quiet_trace", default=False)
@@ -442,6 +445,8 @@ class Session:
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
         self.app_names: dict[str, str] = {}  # bundle id -> display name, from the installed apps
         self.not_installed: set[str] = set()  # bundle ids already looked for in the installed apps and not found
+        self._apps: tuple[float, list[dict]] | None = None  # (when, the installed apps as the phone last listed them)
+        self._apps_task: asyncio.Task | None = None  # the list being read again behind a call
         # (field key, element id) of the input our last type_text verified and typed into, while nothing else has
         # touched the phone since: typing there again needs no tap. Every other action clears it.
         self.typed_into: tuple[str, str] | None = None
@@ -982,7 +987,7 @@ class Session:
         if refresh:
             self.not_installed = set()
         try:
-            self.app_names = {a["bundle_id"]: a["name"] for a in await self.device.user_apps() if a["name"]}
+            await self._list_apps()
         except ConnectionLost:
             raise
         except Exception:  # a nicety: without names the header shows what WebDriverAgent says
@@ -1008,9 +1013,12 @@ class Session:
         if bundle == "com.apple.springboard":
             return "Home screen", bundle
         if bundle not in self.app_names and bundle not in self.not_installed:
-            await self.read_app_names()  # perhaps installed since; if not, don't ask again for this one
-            if bundle not in self.app_names:
-                self.not_installed.add(bundle)
+            if bundle.startswith(APPLE_APPS):
+                self._name_behind(bundle)
+            else:
+                await self.read_app_names()  # perhaps installed since; if not, don't ask again for this one
+                if bundle not in self.app_names:
+                    self.not_installed.add(bundle)
         return self.app_names.get(bundle) or str(info.get("name") or bundle), bundle
 
     async def read_scale(self, refresh: bool = False) -> float | None:
@@ -2004,9 +2012,34 @@ class Session:
         return f"Sent alert {action} request{named}. Check the screen to confirm the result."
 
     # ---- apps ----
-    async def apps(self) -> list[dict]:
+    async def apps(self, fresh: bool = False) -> list[dict]:
+        """The apps you installed. Asking the phone takes about a second (2.0: 0.9-1.1 s on USB, measured), and
+        open_app, close_app, a crash check and a header's name all need the list, so the last answer is kept and
+        given at once. One older than APPS_STALE is read again behind the call that used it, for the next one.
+        `fresh`: ask the phone now (what was looked for isn't in the kept list and may have been installed since)."""
         await self.ensure()
+        kept = self._apps
+        if fresh or kept is None:
+            return await self._list_apps()
+        if time.monotonic() - kept[0] > APPS_STALE and (self._apps_task is None or self._apps_task.done()):
+            self._apps_task = asyncio.ensure_future(self._list_apps())
+            self._apps_task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (never fails a call)
+        return kept[1]
+
+    def _name_behind(self, bundle: str) -> None:
+        """An Apple app the kept list doesn't hold is nearly always a built-in one, which the phone's list of
+        installed apps never holds: the list is read again behind this answer instead of before it (asking takes
+        about a second, and every first look at a built-in app paid it). One of Apple's installed since (Pages,
+        TestFlight) has its name from the next answer on; it isn't asked for again either way."""
+        if self._apps_task is not None and not self._apps_task.done():
+            return  # a read is on its way, begun before this app showed: the next answer asks again
+        self.not_installed.add(bundle)
+        self._apps_task = asyncio.ensure_future(self._list_apps())
+        self._apps_task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a nicety: never fails)
+
+    async def _list_apps(self) -> list[dict]:
         apps = await self.device.user_apps()
+        self._apps = (time.monotonic(), apps)
         self.app_names = {a["bundle_id"]: a["name"] for a in apps if a["name"]}
         return apps
 

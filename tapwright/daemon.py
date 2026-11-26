@@ -2862,7 +2862,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
     async def _executable(self, bundle: str) -> str | None:
         """The name of the app's process (its executable), from the installed apps: crash reports are named after it."""
-        if not self._executables.get(bundle):
+        if not self._executables.get(bundle):  # (the kept list: a built-in app is in none, however often it is asked)
             for a in await self._phone_files("list the installed apps", self.session.apps()):
                 self._executables[a["bundle_id"]] = a.get("executable") or ""
         return self._executables.get(bundle) or None
@@ -2969,8 +2969,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         target = self._opened if name == "open_app" else before
         left, self._left_front = self._left_front, None  # a touch found the home screen where the app was (_taken_away)
+        closed, self._closed_on_purpose = self._closed_on_purpose, None  # (it holds for the one call after the close)
         if not target or target == SPRINGBOARD:
             return None
+        if closed == target and name != "open_app":
+            return None  # (2.0) the agent's own close_app ended it: nothing to look for (it cost the next call 1-2 s)
         cut = error is not None and error.code in CRASH_CUT_CODES
         if self._bundle() == target and not cut and left != target:
             return None
@@ -5746,19 +5749,30 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         built-in app's name; a bundle-id-looking string as given (built-in apps aren't in `apps`). Parts
         of bundle ids and of later words never match, so "Notes" doesn't hit "Sticky Notes"."""
         q = query.strip()
-        apps = await self.session.apps()
         low = q.lower()
-        for a in apps:
-            if a["bundle_id"] == q:
-                return q, f"{a['name']} ({q})"
-        hits = [a for a in apps if a["name"].lower() == low]
         builtin = next((n for n in SYSTEM_APPS if n.lower() == low), None)
-        if not hits and builtin:
-            return SYSTEM_APPS[builtin], f"{builtin} ({SYSTEM_APPS[builtin]})"
-        if not hits and partial:
-            hits = [a for a in apps if a["name"].lower().startswith(low)]
+        s = self.session
+        # (2.0) the installed apps as the phone last listed them (asking takes about a second). What that list doesn't
+        # hold is looked for once more in a fresh one, since it may have been installed since, except one of Apple's
+        # bundle ids (a built-in app's, nearly always) and a bundle id already looked for and not found: launching
+        # those says whether they exist.
+        for fresh in (False, True):
+            if fresh and (q in s.not_installed or q.startswith(session_module.APPLE_APPS)):
+                break
+            apps = await s.apps(fresh=fresh)
+            for a in apps:
+                if a["bundle_id"] == q:
+                    return q, f"{a['name']} ({q})"
+            hits = [a for a in apps if a["name"].lower() == low]
+            if not hits and builtin:
+                return SYSTEM_APPS[builtin], f"{builtin} ({SYSTEM_APPS[builtin]})"
+            if not hits and partial:
+                hits = [a for a in apps if a["name"].lower().startswith(low)]
+            if hits:
+                break
         if not hits:
             if BUNDLE_ID.match(q):
+                s.not_installed.add(q)
                 return q, q  # launching it says whether it exists
             raise Refused("not_found", f'no installed app is named "{q}"; call apps to see them')
         if len(hits) > 1:
@@ -5780,9 +5794,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         resume = _RESUME.get() and not extra  # (a journey brings its app back from the background: the process stays as it is)
         back = bool(before) and not extra and not resume
         try:
+            await self._closing_done()
             if extra or back:  # a running app is closed first, as close_app does (WebDriverAgent's terminate alone is slow)
                 if (await self._end_app(bundle_id))[1]:
-                    await self._tell_runner_closed(bundle_id)
+                    self._tell_runner_closed(bundle_id)
+                    await self._closing_done()
                 else:
                     try:
                         await self.session.terminate(bundle_id)
@@ -5803,6 +5819,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         elif not resume:
             self._launched_with.pop(bundle_id, None)
         self._opened = bundle_id
+        if self._closed_on_purpose == bundle_id:
+            self._closed_on_purpose = None  # it runs again: its stopping would be news
         view.opened = True
         view.auto = autoroute.Chain(bundle_id)  # (1.9.0, §30) the way from the app's start begins at what it shows now
         view.auto_begun.add(bundle_id)
@@ -5831,8 +5849,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         began = time.monotonic()
         way, found = await self._end_app(bundle_id)
         if found:
-            if not await self._tell_runner_closed(bundle_id):
-                way += f"; WebDriverAgent's terminate took over {CLOSE_TERMINATE_CAP:g} s and was left to finish"
+            # (2.0) iOS ended it: the answer doesn't wait for the runner's own terminate (1.0 s with nothing left to
+            # wait for, measured). It goes out now and whatever is asked of the runner next comes after it; an
+            # open_app waits for it (_closing_done).
+            self._tell_runner_closed(bundle_id)
         else:
             try:
                 await self.session.terminate(bundle_id)
@@ -5846,6 +5866,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # closed (iOS ended it, or WebDriverAgent's terminate did): the process is gone, and its launch conditions with
         # it. A close that failed leaves the app running as it was launched, so they are kept (Codex, PR #8).
         self._launched_with.pop(bundle_id, None)
+        self._closed_on_purpose = bundle_id  # its leaving the front is no news to the next call (_crash_check)
         self.log(f"closed {bundle_id} through {way} in {time.monotonic() - began:.1f} s")
         return f"Closed {shown}."
 
@@ -5874,11 +5895,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             device_module.BEFORE_SEND.reset(token)
         return ("iOS process control", found) if found else (way + " (iOS process control found no process)", 0)
 
-    async def _tell_runner_closed(self, bundle_id: str) -> bool:
-        """After a kill that ended the app: tell WebDriverAgent, for at most CLOSE_TERMINATE_CAP. False if it was
-        still going by then. Its request is never cancelled (that tears down the connection and leaves the request
-        in flight on the phone): it is left to end by its own timeout, and a failure is only logged. The app is
-        closed either way."""
+    _closed_on_purpose: str | None = None  # the app the agent's last close_app ended, until the next call has run
+
+    def _tell_runner_closed(self, bundle_id: str) -> None:
+        """After a kill that ended the app: tell WebDriverAgent, behind the call. Its request is never cancelled (that
+        tears down the connection and leaves the request in flight on the phone): it is left to end by its own
+        timeout, and a failure is only logged. The app is closed either way."""
         task = asyncio.ensure_future(self.session.terminate(bundle_id))
         self._closing.add(task)
 
@@ -5887,8 +5909,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if not done.cancelled() and done.exception() is not None:
                 self.log(f"closed {bundle_id}; WebDriverAgent's terminate afterwards failed: {done.exception()}")
         task.add_done_callback(ended)
-        finished, _ = await asyncio.wait({task}, timeout=CLOSE_TERMINATE_CAP)
-        return bool(finished)
+
+    async def _closing_done(self) -> None:
+        """Before an app is launched: the runner has been told of every app closed before (its terminate of an app
+        must not come after that app's new launch), for at most CLOSE_TERMINATE_CAP; one still going then is left."""
+        if self._closing:
+            await asyncio.wait(set(self._closing), timeout=CLOSE_TERMINATE_CAP)
 
     async def _frozen_tool(self, client_id: str, name: str, args: dict, notes: list,
                            shot: "tuple[int, bool] | None") -> dict | None:

@@ -1,635 +1,243 @@
-"""Tapwright 2.0, worker H: latency and correctness after the phone tests (2026-11-26). The settle after a hands touch,
-`back` without a needless read, no tree reads on a screen that doesn't answer (runner route version 11's `front`), the
-settle cap from the first action, pictures by the runner's JPEG route, and a wording fix."""
+"""2.0 latency, measured on the phone 2026-11-26: the phone's list of installed apps takes about a second to ask for, and
+open_app, close_app, the first look at a built-in app and the call after a close_app each asked for it; close_app waited a
+second for the runner's own terminate of an app iOS had already ended; and the call after the agent's own close_app looked
+for a crash of the app it had closed."""
 import asyncio
-import time
 
 import pytest
+from test_daemon import finish, make, run, started
+from test_diagnostics import die, opened, tuned
+from test_session import SETTINGS_TREE, Recorder, with_answers
 
-from test_daemon import make, on_loop_clock, run_virtual
+from tapwright import daemon as daemon_module, session as session_module, ui as ui_module
+from tapwright.session import Session
 
-from tapwright import daemon as daemon_module
 
+class Apps(Recorder):
+    """A phone whose list of installed apps counts how often it is asked, and can take a while."""
 
-# ---- 1. a settle after a hands touch can't end on the first flicker ----
-
-async def _settings_push(d, began: float) -> None:
-    """A tap on a Settings row as the stream shows it, from `began` (loop time): the row's highlight at 50 ms, still
-    until 250 ms, the push animation from 250 to 800 ms, then still."""
-    loop = asyncio.get_running_loop()
-    step = 0
-    while True:
-        t = loop.time() - began
-        if t < 0.05:
-            frame = b"A"
-        elif t < 0.25:
-            frame = b"highlight"
-        elif t < 0.8:
-            step += 1
-            frame = b"push%d" % step
-        else:
-            frame = b"General"
-        d.hub.publish(frame)
-        await asyncio.sleep(0.02)
-
-
-def _settle_after_tap(hands: bool) -> tuple[float, bool]:
-    out = {}
-
-    async def go():
-        d = make(settle_still=daemon_module.STILL, settle_quiet=daemon_module.MIN_QUIET)
-        on_loop_clock(d)
-        d.hub.publish(b"A")
-        seq, since = d._mark()
-        if hands:
-            d.session.hands_at = time.monotonic()  # the hands' tap just ended (acked at once)
-        feeder = asyncio.create_task(_settings_push(d, asyncio.get_running_loop().time()))
-        out["done"] = await d.settle(seq, cap=2.0, since=since)
-        feeder.cancel()
-    run_virtual(go)
-    return out["done"]
-
-
-def test_a_settle_after_a_hands_tap_waits_out_the_highlight_and_ends_after_the_push():
-    seconds, changed = _settle_after_tap(hands=True)
-    assert changed and seconds >= 0.8 + daemon_module.STILL - 0.03  # after the animation, not on the highlight
-
-
-def test_without_a_hands_touch_the_settle_still_ends_on_the_first_still_run():
-    seconds, changed = _settle_after_tap(hands=False)
-    # (the runner's tap answers ~200 ms after its effect: a still run then is the end, as before)
-    assert changed and seconds < 0.25
-
-
-def test_the_floor_doesnt_hold_a_change_that_ends_after_it():
-    async def go():
-        d = make(settle_still=daemon_module.STILL, settle_quiet=daemon_module.MIN_QUIET)
-        on_loop_clock(d)
-        d.hub.publish(b"A")
-        seq, since = d._mark()
-        d.session.hands_at = time.monotonic()
-        loop = asyncio.get_running_loop()
-        began = loop.time()
-
-        async def feed():
-            while True:
-                d.hub.publish(b"A" if loop.time() - began < 0.05 else b"B")
-                await asyncio.sleep(0.02)
-        feeder = asyncio.create_task(feed())
-        seconds, changed = await d.settle(seq, cap=2.0, since=since)
-        feeder.cancel()
-        # changed at 50 ms and still since: it ends at the first frame past the floor, not later
-        assert changed and daemon_module.HANDS_SETTLE_MIN <= seconds < daemon_module.HANDS_SETTLE_MIN + 0.05
-    run_virtual(go)
-
-
-def test_no_change_after_a_hands_tap_is_still_believed_only_after_hands_quiet():
-    async def go():
-        d = make(settle_still=daemon_module.STILL, settle_quiet=daemon_module.MIN_QUIET)
-        on_loop_clock(d)
-        d.hub.publish(b"A")
-        seq, since = d._mark()
-        d.session.hands_at = time.monotonic()
-
-        async def feed():
-            while True:
-                d.hub.publish(b"A")
-                await asyncio.sleep(0.02)
-        feeder = asyncio.create_task(feed())
-        seconds, changed = await d.settle(seq, cap=2.0, since=since)
-        feeder.cancel()
-        assert not changed and seconds == pytest.approx(daemon_module.HANDS_QUIET, abs=0.03)  # (unchanged rule)
-    run_virtual(go)
-
-
-def test_frames_seen_during_a_hands_call_dont_end_the_settle_before_the_floor():
-    async def go():
-        d = make(settle_still=daemon_module.STILL, settle_first_frame=1.0)
-        on_loop_clock(d)
-        d.hub.publish(b"A")
-        early, since = d._mark()
-        for _ in range(8):  # a highlight, then still, while the call ran
-            d.hub.publish(b"B")
-            await asyncio.sleep(0.03)
-        returned = d._mark()[0]
-        d.session.hands_at = time.monotonic()
-        loop = asyncio.get_running_loop()
-
-        async def feed():
-            while True:
-                d.hub.publish(b"B")
-                await asyncio.sleep(0.02)
-        feeder = asyncio.create_task(feed())
-        began = loop.time()
-        seconds, changed = await d.settle(returned, cap=2.0, since=since, early=early)
-        feeder.cancel()
-        assert changed and seconds >= daemon_module.HANDS_SETTLE_MIN - 0.01 and loop.time() - began < 0.45
-    run_virtual(go)
-
-
-# ---- 6. the app another came in front of is named once ----
-
-def test_the_stale_typing_refusal_names_the_opened_app_with_its_bundle_id_once():
-    from fakes import el
-    from test_daemon import finish, run, started
-
-    from tapwright.control import Refused
-
-    async def go():
-        d = make()
-        s = d.session
-        stop, task = await started(d)
-        await d.run_tool("a", "open_app", {"app": "com.example.app"})
-        assert d.control.client("a").aimed_app == ("Example", "com.example.app")
-        s.app = ("Spotlight", "com.apple.Spotlight")  # Spotlight came in front after the launch
-        s.tree = [el("e1", "input", "Search", "search", rect=(20, 67, 259, 48))]
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "type_text", {"text": "x"})
-        assert e.value.code == "stale"
-        assert str(e.value).startswith("Spotlight (com.apple.Spotlight) is in front now, not Example (com.example.app), "
-                                       "where your last touch went.")
-        assert s.typed == []
-        await finish(stop, task)
-    run(go)
-
-
-def test_an_app_named_only_by_its_bundle_id_is_said_once():
-    assert daemon_module._app_words(("com.example.x", "com.example.x")) == "com.example.x"
-    assert daemon_module._app_words(("Wayfare (com.example.w)", "com.example.w")) == "Wayfare (com.example.w)"
-    assert daemon_module._bare_name("Wayfare (com.example.w)", "com.example.w") == "Wayfare"
-    assert daemon_module._bare_name("Wayfare", "com.example.w") == "Wayfare"
-
-
-# ---- 4. the settle cap from the first action ----
-
-def test_one_settle_still_moving_past_the_short_cap_on_a_screen_that_doesnt_read_switches():
-    from tapwright.session import SettleCap
-    caps = SettleCap(short=0.5)
-    # the phone, 2026-11-26: the first swipe's settle ended still after 0.77 s (the next video starting), the tree root
-    assert caps.settled("tt", capped=False, cut=True, seconds=0.77) and caps.cap("tt", 2.0) == 0.5
-    caps.forget()
-    assert not caps.settled("tt", capped=False, cut=True, seconds=0.4)  # it stood still within the short cap
-    assert not caps.settled("tt", capped=False, cut=False, seconds=0.9)  # a long animation on a screen that reads
-    assert caps.cap("tt", 2.0) == 2.0
-
-
-def test_the_daemon_switches_on_the_first_swipe_of_the_feed_and_a_launch_uses_the_apps_cap():
-    from test_vision_200 import TIKTOK, feed_session
-
-    from tapwright import session as session_module
-    from tapwright.daemon import Settled
-
-    async def go():
-        s = feed_session()
-        s.settles = session_module.SettleCap()
-        s.read_app = ("TikTok", TIKTOK)
-        s.last_tier = "root"
-        logged = []
-        d = make(s, log=logged.append)
-        caps_asked, ends = [], [Settled(0.77, True, False, True), Settled(0.5, True, True), Settled(0.4, True, False, True)]
-
-        async def frames(after_seq, still=None, cap=2.0, since=None, early=None):
-            caps_asked.append(cap)
-            return ends.pop(0)
-        d._settle_frames = frames
-        await d._settle(0, cap=2.0)  # the first swipe
-        await d._settle(0, cap=2.0)  # the second: already short
-        # Settings is read now; TikTok is launched again: its launch settle waits the short cap, and teaches nothing
-        s.read_app, s.last_tier = ("Settings", "com.apple.Preferences"), "full"
-        await d._settle(0, cap=4.0, bundle=TIKTOK)
-        assert caps_asked == [2.0, 0.5, 0.5]
-        assert s.settles.restless(TIKTOK) and not s.settles.restless("com.apple.Preferences")
-        assert sum("never stands still" in str(x) for x in logged) == 1
-    run_virtual(go)
-
-
-# ---- 2. back without a needless read ----
-
-def _listing_session():
-    """A FakeSession whose reads keep their tree as `last_tree` with the bar's back button in it (as Session's do), and
-    which counts back_point's reads."""
-    from fakes import FakeSession
-
-    from tapwright import ui
-    from tapwright.session import Snapshot
-
-    class Listing(FakeSession):
-        def __init__(self):
-            super().__init__()
-            self.back_at = (20.0, 60.0)
-            self.back_reads = 0
-            self.last_tree = None
-
-        def _tree(self):
-            tree = ui.Tree(list(self.tree), 0, self.last_alert, self.last_keyboard, tier=self.tier,
-                           back=ui.Back(True, self.back_at))
-            self.last_tree = tree
-            return tree
-
-        async def look(self, screenshot=True):
-            text, image = await super().look(screenshot)
-            self._tree()
-            return text, image
-
-        async def snapshot(self, keyboard=False, timeout=None):
-            self._record("snapshot")
-            tree = self._tree()
-            self.items, self.read_app = list(tree.items), self.app
-            self.last_tier = self.tier
-            return Snapshot(tree, self.app, 3.0)
-
-        async def refresh(self, timeout=None):
-            tree = await super().refresh(timeout)
-            self.last_tree = tree
-            return tree
-
-        async def back_point(self):
-            self.back_reads += 1
-            return await super().back_point()
-    return Listing()
-
-
-def _back_after_look(between=None, frame_after=b"A", look=True):
-    from fakes import FrameFeeder
-    from test_daemon import finish, run, started
-    out = {}
-
-    async def go():
-        s = _listing_session()
-        d = make(s)
-        stop, task = await started(d)
-        feeder = FrameFeeder(d.hub).start(then=b"A")
-        await asyncio.sleep(0.1)
-        await d.run_tool("a", "look", {"screenshot": False})
-        if between is not None:
-            await between(d)
-        feeder.then = frame_after
-        await asyncio.sleep(0.1)  # the stream shows the screen still for a while
-        reads = s.back_reads
-
-        def moved(*_):
-            feeder.then = b"B"  # the back button pops the page
-        s.taken_by = None
-        real_tap = s.tap
-
-        async def tap(target, hold_ms=60):
-            moved()
-            return await real_tap(target, hold_ms)
-        s.tap = tap
-        r = await d.run_tool("a", "back", {"look": look})
-        out["reads"], out["text"], out["taps"] = s.back_reads - reads, r["text"], list(s.tap_points)
-        await feeder.stop()
-        await finish(stop, task)
-    run(go)
-    return out
-
-
-def test_back_on_a_current_list_and_a_still_screen_reads_nothing_before_its_touch():
-    out = _back_after_look()
-    assert out["reads"] == 0 and out["text"].startswith("Tapped the back button.")
-    assert out["taps"][-1] == (20.0, 60.0)
-
-
-def test_back_reads_when_the_picture_changed_since_the_list():
-    out = _back_after_look(frame_after=b"C")  # something moved in after the look
-    assert out["reads"] == 1 and out["text"].startswith("Tapped the back button.")
-
-
-def test_back_reads_when_another_read_came_after_the_agents_list():
-    async def peek(d):
-        await d.session.refresh()  # (another agent's read, say: the session's newest tree isn't the agent's list)
-    out = _back_after_look(between=peek)
-    assert out["reads"] == 1
-
-
-def test_back_reads_after_an_action_with_look_false():
-    async def unlooked(d):
-        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
-    out = _back_after_look(between=unlooked)
-    assert out["reads"] == 1
-
-
-def test_back_with_look_false_takes_its_before_state_from_the_list_it_proved():
-    out = _back_after_look(look=False)
-    assert out["reads"] == 0 and out["text"].splitlines()[0] == "Tapped the back button."
-
-
-# ---- 3. no tree reads on a screen that doesn't answer and keeps moving (route version 11) ----
-
-class _Clock:
     def __init__(self):
-        self.t = 100.0
+        super().__init__()
+        self.reads, self.takes = 0, 0.0
+        self.listed = [{"bundle_id": "app.example.one", "name": "One", "version": "1", "build": "1"}]
 
-    def __call__(self):
-        return self.t
-
-
-def test_the_read_plan_leaves_a_read_unasked_only_on_a_moving_screen_read_moments_ago():
-    from tapwright.session import ReadBudget
-    clock = _Clock()
-    b = ReadBudget(normal_ms=3000, short_ms=1500, memory=20.0, clock=clock, unasked_for=8.0)
-    assert b.plan("tt") == (3000, False) and b.plan(None) == (3000, False)
-    b.tried("tt")
-    b.answered("tt", True, 3000)  # its first read was cut short
-    assert b.plan("tt") == (1500, True)  # moving (no `still`), read 0 s ago
-    assert b.plan("tt", still=lambda: True) == (3000, False)  # a still screen: read whole, as before
-    assert b.plan("other") == (3000, False)
-    clock.t += 8.0
-    assert b.plan("tt") == (1500, False)  # one real short read every 8 s
-    b.tried("tt")
-    clock.t += 7.9
-    assert b.plan("tt") == (1500, True) and b.tried_ago("tt") == pytest.approx(7.9)
-    clock.t += 4.2  # 20 s since the normal read was cut: the memory is gone, a normal read goes out
-    assert b.plan("tt") == (3000, False)
-    b.answered("tt", False, 3000)
-    b.forget()
-    assert b.tried_ago("tt") is None
+    async def user_apps(self):
+        self.reads += 1
+        if self.takes:
+            await asyncio.sleep(self.takes)
+        return list(self.listed)
 
 
-TT = "com.zhiliaoapp.musically"
-
-
-def _v11(version=11, front=None):
-    from test_vision_200 import V9Runner, _app
-
-    class V11Runner(V9Runner):
-        """V9Runner with route version 11's `front` (what it answers: `front`, an Exception is raised) and `shot`."""
-
-        def __init__(self):
-            super().__init__(version=version)
-            self.front = {"b": TT, "pid": 8496, "ms": 6} if front is None else front
-            self.trees = [{"token": "r1", "tree": _app(TT, "TikTok"), "tier": "root", "truncated": True,
-                           "why": "full: timeout"}]
-
-        async def http(self, method, path, payload=None, timeout=30.0):
-            bare = path.replace("/session/S", "")
-            if bare.startswith("/wda/tw/front"):
-                self.requests.append((method, path, payload))
-                if version < 11:
-                    raise daemon_module.DeviceError("WebDriverAgent: unknown command: Unhandled endpoint")
-                if isinstance(self.front, Exception):
-                    raise self.front
-                return {"value": dict(self.front)}
-            if bare.startswith("/wda/activeAppInfo"):
-                self.requests.append((method, path, payload))
-                return {"value": {"bundleId": TT, "name": "TikTok"}}
-            return await super().http(method, path, payload, timeout)
-    return V11Runner()
-
-
-@pytest.fixture
-def state(monkeypatch):
-    from tapwright import session as session_module
+@pytest.fixture(autouse=True)
+def set_up(monkeypatch):
     monkeypatch.setattr(session_module.store, "load_state", lambda: {"runner_id": "runner"})
 
 
-def _feed_reads(runner, clock=None, reads=2):
-    from tapwright.session import ReadBudget, Session
-    s = Session(runner)
-    if clock is not None:
-        s.budgets = ReadBudget(clock=clock)
-    s.read_app = ("TikTok", TT)
-    trees = [asyncio.run(s.refresh()) for _ in range(reads)]
-    return s, trees
+def a_session(front: str = "com.apple.springboard") -> tuple[Session, Apps, dict]:
+    phone = Apps()
+    answers = {ui_module.SOURCE_PATH: {"value": SETTINGS_TREE},
+               "/wda/activeAppInfo": {"value": {"bundleId": front, "name": front}}}
+    with_answers(phone, answers)
+    return Session(phone), phone, answers
 
 
-def test_a_moving_screen_read_moments_ago_is_answered_as_root_without_asking_for_the_tree(state):
-    runner = _v11()
-    s, (first, second) = _feed_reads(runner)
-    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=direct&attrs=lean"]  # the first only
-    assert runner.paths("/wda/tw/front") == ["/wda/tw/front"]
-    assert second.tier == "root" and second.items == [] and second.app == ("TikTok", TT)
-    assert s.last_tier == "root" and s.last_why.startswith(f"not asked: {TT} is still in front")
-    assert 'processId="8496"' in s.last_source and s.budget_app == TT and s.last_compact is None
-
-
-def test_a_snapshot_of_the_unasked_root_asks_nothing_slow(state):
-    runner = _v11()
-    s, _ = _feed_reads(runner, reads=1)
-    snap = asyncio.run(s.snapshot())
-    assert snap.tree.tier == "root" and s.app == ("TikTok", TT)
-    assert runner.paths("/wda/activeAppInfo") == [] and len(runner.paths("/wda/tw/tree")) == 1
-
-
-def test_another_app_in_front_or_no_answer_or_an_older_runner_reads_as_before(state):
-    for runner in (_v11(front={"b": "com.apple.Preferences", "pid": 3, "ms": 4}), _v11(front={"ms": 512}),
-                   _v11(front=daemon_module.DeviceError("boom")), _v11(version=10)):
-        _feed_reads(runner)
-        assert len(runner.paths("/wda/tw/tree")) == 2, runner.front
-        assert runner.paths("/wda/tw/tree")[1].startswith("/wda/tw/tree?budget=1500")
-    runner = _v11(version=10)  # (a v10 runner is never asked which app is in front)
-    _feed_reads(runner)
-    assert runner.paths("/wda/tw/front") == []
-
-
-def test_one_real_short_read_goes_out_every_eight_seconds_and_a_still_screen_is_read_whole(state):
-    clock = _Clock()
-    runner = _v11()
-    s, _ = _feed_reads(runner, clock=clock, reads=2)
-    assert len(runner.paths("/wda/tw/tree")) == 1
-    clock.t += 8.0
-    asyncio.run(s.refresh())  # 8 s on: a real short read, in case a screen of the app that reads came up
-    assert runner.paths("/wda/tw/tree")[-1].startswith("/wda/tw/tree?budget=1500")
-    clock.t += 1.0
-    asyncio.run(s.refresh())
-    assert len(runner.paths("/wda/tw/tree")) == 2  # unasked again
-    s.screen_still = lambda: True  # the stream shows the screen still: the normal budget, asked
-    asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree")[-1].startswith("/wda/tw/tree?budget=3000")
-
-
-def test_a_root_naming_no_app_on_a_v11_runner_asks_front_not_active_app_info(state):
-    from test_vision_200 import _app
-    runner = _v11()
-    bare = _app(TT, "TikTok")
-    del bare["b"], bare["pid"], bare["l"]
-    runner.trees = [{"token": "r1", "tree": bare, "tier": "root", "truncated": True}]
-    from tapwright.session import Session
-    s = Session(runner)
-    snap = asyncio.run(s.snapshot())
-    assert snap.app == (TT, TT) and runner.paths("/wda/activeAppInfo") == []
-    runner.front = {"ms": 512}  # it can't say either: the app isn't known, and activeAppInfo still isn't asked
-    snap = asyncio.run(s.snapshot())
-    assert snap.app is None and runner.paths("/wda/activeAppInfo") == []
-
-
-def test_a_session_whose_runner_gave_the_scale_needs_no_wda_screen_read(state):
-    from test_session import Recorder
-
-    from tapwright.session import Session
-    s = Session(_v11())
-    asyncio.run(s.ensure())
-    assert s.scale_by_runner and s.scale == 3
-    asyncio.run(s.read_scale(refresh=not s.scale_by_runner))
-    assert s.device.paths("/wda/screen") == []
-    old = Session(Recorder())  # (Appium's build: no screen route; the connect reads /wda/screen as before)
-    asyncio.run(old.ensure())
-    assert not old.scale_by_runner
-
-
-# ---- 5. pictures: the runner's JPEG shot, and a cut-short look's picture with its text in one request ----
-
-def _jpeg(width=400, height=868) -> bytes:
-    import io
-
-    from PIL import Image
-    out = io.BytesIO()
-    Image.new("RGB", (width, height), (0, 0, 255)).save(out, "JPEG")
-    return out.getvalue()
-
-
-def test_the_session_takes_jpeg_shots_and_reads_text_with_its_picture_on_a_v11_runner(state):
-    import base64
-
-    from tapwright.session import Session
-    runner = _v11()
-    picture = _jpeg()
-    real = runner.http
-
-    async def http(method, path, payload=None, timeout=30.0):
-        bare = path.replace("/session/S", "")
-        if bare.startswith("/wda/tw/shot"):
-            runner.requests.append((method, path, payload))
-            return {"value": {"jpeg": base64.b64encode(picture).decode(), "size": [400, 868], "screen": [430, 932],
-                              "ms": {"shot": 35, "encode": 22}}}
-        if bare.startswith("/wda/tw/ocr") and "image=1" in bare:
-            runner.requests.append((method, path, payload))
-            return {"value": {"screen": [430, 932], "lines": [{"text": "For You", "rect": [170, 60, 70, 20],
-                                                                "confidence": 1}],
-                              "jpeg": base64.b64encode(picture).decode(), "size": [400, 868]}}
-        return await real(method, path, payload, timeout)
-    runner.http = http
-    s = Session(runner)
-    assert asyncio.run(s.screen_picture(400)) == picture
-    assert runner.paths("/wda/tw/shot") == ["/wda/tw/shot?width=400&quality=80"] and runner.paths("/screenshot") == []
-    seen, jpeg = asyncio.run(s.read_text_and_picture("accurate", 400))
-    assert [x.text for x in seen] == ["For You"] and jpeg == picture
-    assert runner.paths("/wda/tw/ocr") == ["/wda/tw/ocr?level=accurate&image=1&width=400&quality=80"]
-
-
-def test_an_older_runner_or_a_failed_shot_takes_the_png_as_before(state):
-    from tapwright.session import Session
-    for runner in (_v11(version=10), _v11()):
-        runner.fail["/wda/tw/shot"] = daemon_module.DeviceError("unable to capture screen")
-        s = Session(runner)
-        asyncio.run(s.ensure())
-        with pytest.raises(Exception):  # (the fake's /screenshot answers no PNG: what matters is that it was asked)
-            asyncio.run(s.screen_picture(400))
-        assert runner.paths("/screenshot") == ["/screenshot"]
-        assert len(runner.paths("/wda/tw/shot")) == (1 if runner.version >= 11 else 0)
-    with pytest.raises(daemon_module.DeviceError):
-        asyncio.run(Session(_v11(version=10)).read_text_and_picture())
-
-
-def _shooting_feed(d_box):
-    """The feed's fake session (no stream frames: the look's picture comes from the phone) on a v11 runner."""
-    from test_vision_200 import feed_session
-    s = feed_session()
-    s.pictures = []  # what each phone picture was asked as
-
-    def shoots():
-        return True
-
-    async def read_text_and_picture(level="accurate", width=None):
-        s._record("read_text_and_picture")
-        s.pictures.append(("ocr+image", width))
-        if d_box.get("unlock_during"):
-            d_box["d"]._unlock_spans = [(d_box["d"].hub.mono(), None)]
-        return list(s.runner_text), _jpeg()
-
-    async def screen_picture(width=None):
-        s._record("screen_picture")
-        s.pictures.append(("shot", width))
-        return _jpeg()
-    s.shoots, s.read_text_and_picture, s.screen_picture = shoots, read_text_and_picture, screen_picture
-    return s
-
-
-def test_a_cut_short_look_without_a_stream_frame_gets_picture_and_text_in_one_request(monkeypatch):
-    from test_daemon import finish, run, started
-
-    from tapwright import ocr, ui
-    from tapwright import shot as shotlib
-    monkeypatch.setattr(ocr, "available", lambda: False)
-
+def test_the_installed_apps_are_asked_for_once_and_kept():
     async def go():
-        box = {}
-        s = _shooting_feed(box)
-        d = box["d"] = make(s)
+        s, phone, _ = a_session()
+        first = await s.apps()
+        assert await s.apps() == first and phone.reads == 1  # the second answer costs nothing
+        phone.listed.append({"bundle_id": "app.example.two", "name": "Two", "version": "1", "build": "1"})
+        assert len(await s.apps()) == 1  # (the kept list, until it is stale or a fresh one is asked for)
+        assert len(await s.apps(fresh=True)) == 2 and phone.reads == 2 and s.app_names["app.example.two"] == "Two"
+    asyncio.run(go())
+
+
+def test_a_stale_list_is_given_at_once_and_read_again_behind_the_call(monkeypatch):
+    async def go():
+        s, phone, _ = a_session()
+        await s.apps()
+        monkeypatch.setattr(session_module, "APPS_STALE", 0.0)
+        phone.listed.append({"bundle_id": "app.example.two", "name": "Two", "version": "1", "build": "1"})
+        phone.takes = 0.05
+        began = asyncio.get_running_loop().time()
+        assert len(await s.apps()) == 1 and asyncio.get_running_loop().time() - began < 0.04  # nothing was waited for
+        assert len(await s.apps()) == 1
+        await s._apps_task
+        assert phone.reads == 2  # one read behind, not one for each call
+        assert len(await s.apps()) == 2 and "app.example.two" in s.app_names
+    asyncio.run(go())
+
+
+def test_a_failed_read_behind_a_call_fails_nothing(monkeypatch):
+    async def go():
+        s, phone, _ = a_session()
+        kept = await s.apps()
+        monkeypatch.setattr(session_module, "APPS_STALE", 0.0)
+
+        async def broken():
+            raise RuntimeError("the phone's app list can't be had")
+        phone.user_apps = broken
+        assert await s.apps() == kept
+        await asyncio.wait({s._apps_task})
+        assert await s.apps() == kept  # the kept list stays
+    asyncio.run(go())
+
+
+def test_the_first_look_at_a_built_in_app_does_not_wait_for_the_list():
+    """Calculator, Settings, the Clock: no list of installed apps holds them, and each first look paid a second to learn it."""
+    async def go():
+        s, phone, answers = a_session()
+        await s.read_app_names()
+        answers["/wda/activeAppInfo"] = {"value": {"bundleId": "com.apple.calculator", "name": "Calculator"}}
+        phone.takes = 0.2
+        began = asyncio.get_running_loop().time()
+        assert (await s.snapshot()).app == ("Calculator", "com.apple.calculator")  # WebDriverAgent's own name
+        assert asyncio.get_running_loop().time() - began < 0.15
+        await s._apps_task
+        assert phone.reads == 2  # read once more, behind the answer
+        await s.snapshot()
+        assert phone.reads == 2  # and not asked for again
+    asyncio.run(go())
+
+
+def test_an_apple_app_installed_since_has_its_name_from_the_next_answer():
+    async def go():
+        s, phone, answers = a_session()
+        await s.read_app_names()
+        phone.listed.append({"bundle_id": "com.apple.Pages", "name": "Pages", "version": "1", "build": "1"})
+        answers["/wda/activeAppInfo"] = {"value": {"bundleId": "com.apple.Pages", "name": "com.apple.Pages"}}
+        await s.snapshot()
+        await s._apps_task
+        assert (await s.snapshot()).app == ("Pages", "com.apple.Pages")
+    asyncio.run(go())
+
+
+def test_open_app_by_a_built_in_bundle_id_asks_for_no_new_list():
+    async def go():
+        d = make()
         stop, task = await started(d)
-        r = await d.run_tool("a", "look", {})
-        assert s.pictures == [("ocr+image", shotlib.DEFAULT_WIDTH)] and "read_text" not in s.calls and "screenshot" not in s.calls
-        assert r["image"] is not None and ui.ELEMENTS_NONE + "; text read from the picture:" in r["text"]
-        # an action's picture on the cut-short screen: the JPEG shot, never the PNG
-        r = await d.run_tool("a", "swipe", {"x0": 200, "y0": 700, "x1": 200, "y1": 200})
-        assert s.pictures[-1] == ("shot", shotlib.DEFAULT_WIDTH) and "screenshot" not in s.calls and r["image"] is not None
+        asked = []
+        real = d.session.apps
+
+        async def apps(fresh=False):
+            asked.append(fresh)
+            return await real(fresh)
+        d.session.apps = apps
+        await d.run_tool("a", "open_app", {"app": "com.apple.calculator", "look": False})
+        assert d.session.launched[-1] == "com.apple.calculator" and True not in asked
         await finish(stop, task)
     run(go)
 
 
-def test_a_paired_look_during_an_unlock_shows_no_picture(monkeypatch):
-    from test_daemon import finish, run, started
-
-    from tapwright import ocr
-    from tapwright.control import Refused
-    monkeypatch.setattr(ocr, "available", lambda: False)
-
+def test_a_name_the_kept_list_lacks_is_looked_for_in_a_fresh_one():
+    """An app installed since the list was read is found by its name; one that isn't there is still refused."""
     async def go():
-        box = {"unlock_during": True}
-        s = _shooting_feed(box)
-        d = box["d"] = make(s)
+        d = make()
         stop, task = await started(d)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "look", {})
-        assert e.value.code == "busy" and "unlocked" in str(e.value)
-        d._unlock_spans = []
+        real = d.session.apps
+        asked = []
+
+        async def apps(fresh=False):
+            asked.append(fresh)
+            if fresh:
+                d.session.installed.append({"bundle_id": "app.example.fresh", "name": "Freshly", "version": "1", "build": "1"})
+            return await real(fresh)
+        d.session.apps = apps
+        r = await d.run_tool("a", "open_app", {"app": "Freshly", "look": False})
+        assert r["text"].startswith("Opened Freshly (app.example.fresh).") and asked == [False, True]
         await finish(stop, task)
     run(go)
 
 
-def test_a_whole_look_or_a_stream_frame_keeps_the_picture_and_the_text_apart(monkeypatch):
-    from fakes import FrameFeeder
-    from test_daemon import finish, run, started
-
-    from tapwright import ocr
-    monkeypatch.setattr(ocr, "available", lambda: False)
-
+def test_a_bundle_id_looked_for_once_and_not_found_is_not_looked_for_again():
     async def go():
-        box = {}
-        s = _shooting_feed(box)
-        d = box["d"] = make(s)
+        d = make()
         stop, task = await started(d)
-        feeder = FrameFeeder(d.hub).start(then=_jpeg())
-        await asyncio.sleep(0.05)
-        await d.run_tool("a", "look", {})  # the stream's fresh frame is the picture: only the text is asked
-        assert s.pictures == [] and "read_text" in s.calls
-        await feeder.stop()
+        real = d.session.apps
+        asked = []
+
+        async def apps(fresh=False):
+            asked.append(fresh)
+            return await real(fresh)
+        d.session.apps = apps
+        await d.run_tool("a", "open_app", {"app": "org.example.elsewhere", "look": False})
+        assert asked == [False, True]
+        await d.run_tool("a", "close_app", {"app": "org.example.elsewhere"})
+        assert asked == [False, True, False]
         await finish(stop, task)
     run(go)
 
 
-def test_the_app_in_front_is_asked_by_front_on_a_v11_runner_and_by_active_app_info_before(state):
-    from tapwright.session import Session
-    runner = _v11()
-    s = Session(runner)
-    assert asyncio.run(s.foreground_bundle_id()) == TT
-    assert asyncio.run(s._app())[1] == TT  # (a root naming no app is told the same way)
-    assert runner.paths("/wda/activeAppInfo") == []
-    runner.front = {"ms": 512}  # it can't say: activeAppInfo, as before
-    assert asyncio.run(s.foreground_bundle_id()) == TT and len(runner.paths("/wda/activeAppInfo")) == 1
-    old = _v11(version=10)
-    assert asyncio.run(Session(old).foreground_bundle_id()) == TT
-    assert old.paths("/wda/tw/front") == [] and len(old.paths("/wda/activeAppInfo")) == 1
+def test_close_app_answers_without_waiting_for_the_runners_terminate(monkeypatch):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.terminate_hangs = True  # the runner's terminate never answers
+        r = await asyncio.wait_for(d.run_tool("a", "close_app", {"app": "Example"}), 2)
+        assert r["text"] == "Closed Example (com.example.app)." and d.session.device.killed == ["com.example.app"]
+        assert d._closing  # still going, behind the answer
+        monkeypatch.setattr(daemon_module, "CLOSE_TERMINATE_CAP", 0.05)
+        await asyncio.wait_for(d.run_tool("a", "open_app", {"app": "Example", "look": False}), 2)
+        assert d.session.launched[-1] == "com.example.app"  # the launch waited its cap for it, then went on
+        await finish(stop, task)
+    run(go)
 
 
-def test_a_root_made_here_asks_no_rotation_in_landscape(state):
-    from tapwright.session import Session
-    runner = _v11()
-    s = Session(runner)
-    asyncio.run(s.ensure())
-    s.screen, s.turn, s._turn_asked = (932.0, 430.0), 90, -float("inf")  # landscape, the side not asked lately
-    s.read_app = ("TikTok", TT)
-    asyncio.run(s.refresh())  # the real read (its root is 430x932 in the fake: it asks nothing either way)
-    s.screen, s.turn = (932.0, 430.0), 90
-    asyncio.run(s.refresh())  # made here
-    assert s.last_why.startswith("not asked") and runner.paths("/rotation") == [] and s.turn == 90
+def test_an_open_app_after_a_close_app_comes_after_the_runners_terminate():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        order = []
+        real_terminate, real_launch = d.session.terminate, d.session.launch
+
+        async def terminate(bundle_id):
+            await asyncio.sleep(0.05)
+            order.append("terminate")
+            return await real_terminate(bundle_id)
+
+        async def launch(bundle_id, arguments=None):
+            order.append("launch")
+            return await real_launch(bundle_id, arguments)
+        d.session.terminate, d.session.launch = terminate, launch
+        await d.run_tool("a", "close_app", {"app": "Example"})
+        assert order == []
+        await d.run_tool("a", "open_app", {"app": "Example", "look": False})
+        assert order == ["terminate", "launch"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_call_after_the_agents_own_close_app_looks_for_no_crash():
+    async def go():
+        d = tuned(make())
+        d.crash_polls = 1
+        stop, task = await started(d)
+        await opened(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "close_app", {"app": "Example"})
+        die(d)  # the next call finds what closing it leaves: the home screen in front, no process of the app
+        asks = d.session.device.crash_asks
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "crashed" not in r["text"] and not d._crash_pending
+        assert d.session.device.crash_asks == asks  # no report was looked for
+        assert d._closed_on_purpose is None  # it held for that one call
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_app_opened_again_after_a_close_app_is_watched_for_crashes_again():
+    async def go():
+        d = tuned(make())
+        d.crash_polls = 1
+        stop, task = await started(d)
+        await opened(d)
+        await d.run_tool("a", "close_app", {"app": "Example"})
+        await d.run_tool("a", "open_app", {"app": "Example", "look": False})
+        assert d._closed_on_purpose is None
+        await d.run_tool("a", "look", {"screenshot": False})
+        die(d)  # it goes away by itself
+        before = d.session.device.crash_asks
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert d.session.device.crash_asks > before and d._crash_pending  # looked for, and looked for again later
+        await finish(stop, task)
+    run(go)
