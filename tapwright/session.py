@@ -571,6 +571,35 @@ def pinch_spread(x: float, y: float, scale: float, screen: tuple[float, float]) 
     return (narrow, wide) if scale >= 1 else (wide, narrow)
 
 
+# (2.0.3, review RP) what is in front, as an answer showed it to the agent or as a touch finds it: the runner's front route,
+# and iOS's process list when that names SpringBoard. Never a tree's root: a read during a banner names SpringBoard.
+FRONT_APP = "app"  # an app in front
+FRONT_HOME = "home"  # SpringBoard's own screen, no app in the foreground (the home screen)
+FRONT_OVER = "over"  # SpringBoard over an app: a banner, an alert, Notification or Control Center, an expanded notification
+FRONT_UNKNOWN = "unknown"  # the route or the process list couldn't say
+
+
+@dataclass(frozen=True)
+class Front:
+    """One of the states above; `app` is the app in front (FRONT_APP) or under SpringBoard (FRONT_OVER)."""
+    kind: str
+    app: str | None = None
+
+
+@dataclass(frozen=True)
+class TouchRules:
+    """(2.0.3) What an agent's touches in one action are checked against (Session._front_rules): `seen`, the front state
+    the agent's last answer showed it (None: none was recorded), and `element`, whether the action aims at an element by
+    ref, id or label from the agent's list (it may then touch SpringBoard's own UI it saw, a banner's row included)."""
+    seen: Front | None
+    element: bool = False
+
+
+UNKNOWN_FRONT = ("couldn't tell which app is in front of the phone, so nothing was touched; look, then try again.")
+UNSEEN_FRONT = ("your last look couldn't tell which app was in front, so nothing was touched; look again, then try "
+                "again.")
+
+
 class FrontUnchecked(Refused):
     """A tap whose app-in-front check was left to the fork's tap (`front_apps`) wasn't made: the runner said another
     app is in front, or the touch couldn't go by that route, or something else was about to act first. Nothing was
@@ -715,10 +744,10 @@ class Session:
         self.execution_guard = None  # persistent ownership check for every mutation in an agent turn
         self.input_point: tuple[float, float] | None = None
         self.banner_guard = False  # set by the daemon for the agent's actions: see _clear_of_banner
-        # (2.0.3, safety) set by the daemon for an agent's action: the apps ((name, bundle id), the one the agent's last
-        # look or answer showed first) its touches may go to (_seen_check); None: no check (a person's input, an action
-        # that changes the app in front on purpose, or no app was ever shown)
-        self.seen_app: tuple[tuple[str, str], ...] | None = None
+        # (2.0.3, safety, review RP) set by the daemon for an agent's action: what its touches are checked against, right
+        # before each one goes out (_gate); None: no check (a person's input, an action that changes the app on purpose)
+        self.touch_rules: TouchRules | None = None
+        self._gate_at: tuple[float, float] | None = None  # the point of the touch whose check is still to come
         # whether one of the agent's touches since the daemon last cleared it began where a banner comes down: a
         # banner landing between the check and the touch takes it (Daemon._taken_away)
         self.top_touch = False
@@ -960,6 +989,8 @@ class Session:
             "/session/{sid}/actions", "/session/{sid}/wda/keys", "/session/{sid}/alert/accept",
             "/session/{sid}/alert/dismiss") or path.endswith("/clear"))
         validate = getattr(self, "before_input", None) if input_request else None
+        if input_request and getattr(self, "_gate_at", None) is not None:
+            await self._gate()  # (2.0.3) the app in front, right before the touch request goes to the runner
         if validate is not None:
             await validate(self.input_point)
         pending = None if QUIET.get() else trace.request(method, path)
@@ -1712,47 +1743,119 @@ class Session:
         touch hook (Tapline's notice) and the hands' or the runner's own start. A banner or an app that comes to the
         front inside that window isn't caught: the window is made small, not closed."""
         self.input_point = at
-        front: tuple[str, int | None] | None | bool = False  # (False: not asked yet)
-        if self.banner_guard and at is not None:
-            front = await self._clear_of_banner(at)
+        if self.banner_guard and at is not None and self.touch_rules is None:
+            await self._clear_of_banner(at)  # (a touch without the agent's rules: the banner wait as before 2.0.3)
+        if at is not None:
             self.top_touch = self.top_touch or at[1] < BANNER_ZONE
-        if self.seen_app is not None and at is not None:
-            await self._seen_check(front)
         if self.touch_hook is not None:
             await self.touch_hook(ms)
+        # (review RP M3) the check of the app in front comes after the hook and right before the touch: the hands' `before`
+        # (just before the first HID report) or the runner's touch request (_timed), never earlier
+        self._gate_at = at if self.touch_rules is not None and at is not None else None
         trace.mark("guard")
 
-    async def _seen_check(self, front: "tuple[str, int | None] | None | bool") -> None:
-        """(2.0.3, safety: the owner's phone, 2026-11-26) An agent's touch goes only to an app its last look or answer
-        showed it (`seen_app`). Two point taps on a screen whose elements weren't read went, the first to a banner that
-        opened another app on a chat with a person, the second to that chat's call button: a call was started. Refused
-        `stale` when another app is in front. `front`: the banner wait's answer when it asked (False: not asked).
-        SpringBoard in front over the app the agent saw (a banner below the banner zone, an alert, a permission
-        prompt: iOS's process list still has the app) is no other app. When the runner can't say in a few ms (an
-        older runner, no answer): the touch goes out, as before."""
-        seen = self.seen_app
-        if not seen:
+    async def _gate(self) -> None:
+        """(2.0.3) The check of a touch that _touching left to the last moment, once: _front_rules for its point. What is
+        left between this answer and the finger: on the hands path, the HID report itself (the next statement after
+        `before`, a few ms); on the runner path, the touch request's way to the runner and its own start (one request,
+        a few ms on USB). Not closed, only made as small as the code can make it."""
+        at, self._gate_at = self._gate_at, None
+        if at is not None and self.touch_rules is not None:
+            await self._front_rules(at)
+
+    async def front_state(self) -> "Front | None":
+        """(2.0.3) What is in front now (FRONT_*): one question to the front route, and iOS's process list only when it
+        names SpringBoard. None on a runner older than route version 11 (it can't say in a few ms: no check)."""
+        if self.tw_version < FRONT_VERSION:
+            return None
+        front = await self.front_app()
+        if front is None:
+            return Front(FRONT_UNKNOWN)
+        if front[0] != SPRINGBOARD:
+            return Front(FRONT_APP, front[0])
+        try:
+            in_front = list(await asyncio.wait_for(self.device.foreground_apps(), 5))
+        except Exception:
+            return Front(FRONT_UNKNOWN)  # (review RP M2b: the process list failing never lets a touch through)
+        under = next((b for b in in_front if b != SPRINGBOARD), None)
+        return Front(FRONT_OVER, under) if under else Front(FRONT_HOME)
+
+    def _words(self, front: "Front") -> str:
+        """How an answer names a front state."""
+        def app(bundle: str | None) -> str:
+            name = self.app_names.get(bundle or "") if bundle else None
+            return f"{name} ({bundle})" if name and name != bundle else (bundle or "an app")
+        if front.kind == FRONT_HOME:
+            return "the home screen"
+        if front.kind == FRONT_OVER:
+            return f"something of the system over {app(front.app)}"
+        return app(front.app)
+
+    async def _front_rules(self, at: tuple[float, float]) -> None:
+        """(2.0.3, safety; review RP) May an agent's touch at `at` go out? The owner's phone, 2026-11-26: two point taps
+        on a screen whose elements weren't read went, the first to a notification banner that opened another app on a
+        chat with a person, the second to that chat's call button: a call was started. When Tapwright can't tell that a
+        touch is safe, it doesn't touch. Against what the agent's last answer showed (`touch_rules.seen`):
+        - the same app in front (or that app, after a banner the agent saw over it has gone): yes;
+        - the home screen, seen as the home screen: yes;
+        - SpringBoard over the app: yes when the agent's last answer showed that state, below the banner zone or aimed at
+          an element of its list; a point, an `o` ref or a text of the picture in the banner zone waits a banner out
+          and is refused `covered` if it stays. When the agent saw the app alone: in the banner zone the same wait;
+          below it `stale` (something of the system came over the app since);
+        - anything else (another app, the home screen where the agent saw an app, an app where it saw the home screen):
+          `stale`;
+        - the route or the process list can't say (asked twice, 0.2 s apart), or the agent's last answer couldn't:
+          `not_actionable`, nothing touched.
+        A runner older than route version 11 can't say in a few ms: no check (no protection; the docs say so)."""
+        rules = self.touch_rules
+        if rules is None:
             return
-        if front is False:
-            front = await self.front_app() if self.tw_version >= FRONT_VERSION else None
-        if not isinstance(front, tuple):
+        now = await self.front_state()
+        if now is None:
             return
-        bundles = [b for _, b in seen]
-        if front[0] in bundles:
-            return
-        if front[0] == SPRINGBOARD:
-            try:
-                in_front = await asyncio.wait_for(self.device.foreground_apps(), 5)
-            except Exception:
-                return  # the phone can't say whether SpringBoard lies over the app: the touch goes out, as before
-            if any(b in in_front for b in bundles):
-                return
-        name = self.app_names.get(front[0]) or ("Home screen" if front[0] == SPRINGBOARD else front[0])
-        now = front[0] if name == front[0] else f"{name} ({front[0]})"
-        was_name, was_bundle = seen[0]
-        was = was_bundle if not was_name or was_name == was_bundle else f"{was_name} ({was_bundle})"
-        raise Refused("stale", f"{now} is in front now, not {was}, where your last look was. Nothing was touched; "
-                               "look again.")
+        if now.kind == FRONT_UNKNOWN:
+            await asyncio.sleep(0.2)
+            now = await self.front_state()
+            if now is None or now.kind == FRONT_UNKNOWN:
+                raise Refused("not_actionable", UNKNOWN_FRONT)
+        seen = rules.seen
+        if seen is None or seen.kind == FRONT_UNKNOWN:
+            raise Refused("not_actionable", UNSEEN_FRONT)
+        zone = at[1] < BANNER_ZONE
+        waited = 0.0
+        while True:
+            if now.kind == FRONT_APP:
+                if seen.kind in (FRONT_APP, FRONT_OVER) and seen.app == now.app:
+                    return
+                break
+            if now.kind == FRONT_HOME:
+                if seen.kind == FRONT_HOME:
+                    return
+                break
+            if now.kind != FRONT_OVER:  # (unknown while a banner was being waited out)
+                raise Refused("not_actionable", UNKNOWN_FRONT)
+            if seen.app != now.app or seen.kind == FRONT_HOME:
+                break
+            if seen.kind == FRONT_OVER and (not zone or rules.element):
+                return  # it saw SpringBoard over the app, and aims at what it saw
+            if seen.kind == FRONT_APP and not zone:
+                raise Refused("stale", f"{self._words(now)} now, not {self._words(seen)} as your last look showed. "
+                                       "Nothing was touched; look again.")
+            # in the banner zone, SpringBoard over the app: a banner may be there; wait it out (rule A)
+            if waited >= BANNER_WAIT:
+                raise Refused("not_actionable", "covered: a notification is over the top of the screen, so nothing "
+                                                "was touched; wait a few seconds, then look and try again.")
+            await asyncio.sleep(BANNER_POLL)
+            waited += BANNER_POLL
+            now = await self.front_state() or Front(FRONT_UNKNOWN)
+        raise Refused("stale", f"{self._words(now)} is in front now, not {self._words(seen)}, where your last look was. "
+                               "Nothing was touched; look again.")
+
+    async def see_front(self, element: bool = False) -> None:
+        """(2.0.3) A tool's own read just showed it the screen (Notification Center opened by the tool itself): its
+        next touches in this action are checked against what is in front now, not the agent's older answer."""
+        if self.touch_rules is not None:
+            self.touch_rules = TouchRules(await self.front_state(), element or self.touch_rules.element)
 
     async def _clear_of_banner(self, at: tuple[float, float]) -> "tuple[str, int | None] | None | bool":
         """A touch near the top of the screen while a notification banner is there lands on the banner: a tap opens
@@ -1860,6 +1963,8 @@ class Session:
             guard = getattr(self, "execution_guard", None)
             if guard is not None:
                 await guard()
+            if input_:
+                await self._gate()  # (2.0.3) the app in front, right before the first HID report
             if validate is not None:
                 await validate(self.input_point)
             pending.append(None if QUIET.get() else trace.request("POST", f"{HANDS_PATH}/{what}"))

@@ -3791,6 +3791,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     else:
                         missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
                                   if "expect" in step else None)
+                        if "expect" in step and missed is None:
+                            await self._record_front(view)  # (review RP M4: its read showed the screen it expected)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
                 if ran and step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
@@ -4645,7 +4647,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # (2.0.3) every touch in the top of the screen waits a banner out (_guards_banners), and no touch goes to an
             # app the agent's last look or answer didn't show it (Session._seen_check)
             self.session.banner_guard = self._guards_banners(name, target)
-            self.session.seen_app = self._seen_apps(view, name)
+            self.session.touch_rules = self._touch_rules(view, name, target)
             touched_token = _SCOPE_TOUCHED.set([])
             try:
                 return await act()
@@ -4658,13 +4660,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     box["hands"] = (getattr(self.session, "hands_at", None),
                                     getattr(self.session, "hands_connection", None))
                     self.session.touch_hook, self.session.banner_guard = None, False
-                    self.session.seen_app = None
+                    self.session.touch_rules = None
                     self.session.before_input = None
                     self.session.execution_guard = None
                     self.session.front_apps = None  # (a tap that checked the app in front cleared it already)
 
         try:
             result = await self.control.agent(act_as_agent)
+            if name in ("open_app", "open_url") and not dry:
+                await self._record_front(view)  # (review RP M4: where it went, as the agent's, `look: false` too)
         except Unanswered as e:
             # the line is alive and the session stays; the screen may or may not have changed under the agent's list
             view.moved = True
@@ -6430,17 +6434,52 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         since 1.7.5); when that route can't say, the touch goes out (Session._clear_of_banner)."""
         return getattr(self.session, "tw_version", 0) >= session_module.FRONT_VERSION
 
-    def _seen_apps(self, view, name: str) -> "tuple[tuple[str, str], ...] | None":
-        """(2.0.3, safety) The apps an agent's touches in this action may go to (Session.seen_app): the app its last look
-        or action's answer showed it (`view.app`), and the one its last touch, `open_app` or `open_url` was meant for
-        (`view.aimed_app`: an `open_app` answered with `look: false` still shows where the agent went). None (no check)
-        for the tools that change the app in front on purpose or touch no screen (SEEN_EXEMPT), and when no app was
-        ever shown (as before)."""
+    def _touch_rules(self, view, name: str, target: "ui.Target | None") -> "session_module.TouchRules | None":
+        """(2.0.3, safety, review RP) What an agent's touches in this action are checked against (Session._front_rules):
+        the front state its newest answer showed it (`view.seen_front`, recorded by _front_answer), and whether the
+        action aims at an element of its list by ref, id or label. None (no check) for the tools that change the app in
+        front on purpose or touch no screen (SEEN_EXEMPT)."""
         if name in SEEN_EXEMPT:
             return None
-        apps = [a for a in (getattr(view, "app", None), getattr(view, "aimed_app", None)) if isinstance(a, tuple)]
-        unique = tuple(dict.fromkeys(apps))
-        return unique or None
+        front = getattr(view, "seen_front", None)
+        element = (target is not None and target.kind in ("ref", "id", "label") and not _PICTURE_TEXT.get())
+        return session_module.TouchRules(front if isinstance(front, session_module.Front) else None, element)
+
+    async def _front_answer(self, alert: bool) -> "tuple[session_module.Front | None, bool]":
+        """(2.0.3, review RP) What is in front as an answer shows the agent the screen (Session.front_state: the front
+        route, the process list when it names SpringBoard), inside the read's turn. While SpringBoard is over an app
+        and the tree is no alert's (a banner, also on a read cut short: H1), it is waited out as the banner wait does;
+        (the state, whether it left: the caller reads again). None: the runner can't say in a few ms (no check)."""
+        front_state = getattr(self.session, "front_state", None)
+        if not callable(front_state):
+            return None, False
+        state = await front_state()
+        waited, polled = 0.0, False
+        while (isinstance(state, session_module.Front) and state.kind == session_module.FRONT_OVER and not alert
+               and waited < session_module.BANNER_WAIT):
+            await asyncio.sleep(session_module.BANNER_POLL)
+            waited += session_module.BANNER_POLL
+            state, polled = await front_state(), True
+        left = polled and isinstance(state, session_module.Front) and state.kind != session_module.FRONT_OVER
+        return (state if isinstance(state, session_module.Front) else None), left
+
+    def _over_line(self, view) -> str | None:
+        """(2.0.3) The first line of an answer whose screen SpringBoard is over (a notification that stayed, Notification or
+        Control Center), the tree no alert's: what the agent saw is that state, never the home screen."""
+        front = getattr(view, "seen_front", None)
+        if (isinstance(front, session_module.Front) and front.kind == session_module.FRONT_OVER
+                and getattr(view, "alert", None) is None):
+            return ("Note: something of the system (a notification, Notification Center or Control Center) is over the "
+                    "app; a touch near the top waits for it to go.")
+        return None
+
+    async def _record_front(self, view) -> None:
+        """(2.0.3, review RP M4) What is in front now, as the agent's: after `open_app` and `open_url` (where they went,
+        `look: false` too) and a run's step whose `expect` held (its read found what the agent expected)."""
+        front_state = getattr(self.session, "front_state", None)
+        if callable(front_state):
+            state = await self._read(front_state)
+            view.seen_front = state if isinstance(state, session_module.Front) else None
 
     async def _banner_shown(self) -> bool:
         """Is a notification banner over the app now (the runner names SpringBoard in front while the newest read is of
@@ -8604,14 +8643,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             await wait()
             return
         kept = (s.touch_hook, s.banner_guard, s.front_apps, getattr(s, "before_input", None),
-                getattr(s, "execution_guard", None), getattr(s, "seen_app", None))
+                getattr(s, "execution_guard", None), getattr(s, "touch_rules", None))
         s.touch_hook, s.banner_guard, s.front_apps, s.before_input, s.execution_guard = None, False, None, None, None
-        s.seen_app = None
+        s.touch_rules = None
         try:
             await self.control.aside(wait)
         finally:
             if self.control.holds_turn():  # (when the turn wasn't taken back, another action may hold it now)
-                s.touch_hook, s.banner_guard, s.front_apps, s.before_input, s.execution_guard, s.seen_app = kept
+                s.touch_hook, s.banner_guard, s.front_apps, s.before_input, s.execution_guard, s.touch_rules = kept
 
 
     def dialog_channel(self, client_id: str) -> dialog.Channel:
@@ -9861,6 +9900,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         async def read():
             self._mark_read(view)
             text, image = await self.session.look(screenshot=False)
+            front, left = await self._front_answer(self.session.last_alert is not None)
+            if left:  # a banner was over the app as it was read: read again, now that it has gone (review RP H1)
+                text, image = await self.session.look(screenshot=False)
+            view.seen_front = front
             view.items = view.shown = self.session.items
             view.shown_off = self._off_screen_now()
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
@@ -9881,6 +9924,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             view.place = None
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
         text, mapped = self._mapped_look(view, text)
+        if (over := self._over_line(view)) is not None:
+            text = f"{over}\n{text}"
         if paired and self._pairs_text(view, shot):
             return _answer([*lines, text], [*notes, *mapped], image)  # (its picture comes with its text: _with_ocr)
         return await self._add_shot(_answer([*lines, text], [*notes, *mapped], image), view, shot)
@@ -9902,6 +9947,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         async def read():
             self._mark_read(view)
             read_now = snap or await s.snapshot()  # `snap`: a read the caller already made (wait_for's last poll)
+            front, left = await self._front_answer(read_now.tree.alert is not None)
+            if left and snap is None:  # a banner was over the app as it was read: read again (review RP H1)
+                read_now = await s.snapshot()
+            view.seen_front = front
             s.items = read_now.tree.items
             app_changed = read_now.app is not None and view.app is not None and read_now.app != view.app
             head = _furniture(view, read_now.tree.alert, read_now.tree.keyboard)
@@ -9917,6 +9966,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             view.moved = True  # no list came back: the screen has probably changed
             return _answer([result, *tail], [*notes, f"couldn't look afterwards: {e}."])
         cut = _cut_short(snap.tree)
+        over = [o] if (o := self._over_line(view)) is not None else []  # (2.0.3: SpringBoard over the app, said first)
         covered = not snap.tree.items and bool(view.shown) and not cut  # the agent saw elements; now there are none
         view.tree, view.place = snap.tree, None  # where the app is now is worked out by _learn, after this answer
         s.items = view.items = view.shown = up.items
@@ -9957,7 +10007,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if cut:
                 view.ocr = {}  # (the last reading's o refs are of the screen before the action)
                 beyond = [*beyond, AFTER_CUT]
-            return _answer([result, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
+            return _answer([result, *over, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
         if changes.NO_CHANGE in up.lines and _health_sheet(snap.tree.items):
             # iOS's own Health access sheet takes touches and changes nothing. With a host dialog, a person is asked to
             # choose, and this waits for the sheet to go (§11.5); the agent's list is then from before
@@ -9969,7 +10019,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         elif changes.NO_CHANGE in up.lines and hint and seconds is not None:
             notes = [*notes, NOTE_DELIVERED.format(touch=touch, seconds=seconds if watched is None else watched, hint=hint)]
         # (a Place: line goes here, after the first line, when places exist: AGENT-TOOLS §18.1, §13.4)
-        return _answer([result, *(briefing.cut(up.lines) if shorter else up.lines), *tail], notes)
+        return _answer([result, *over, *(briefing.cut(up.lines) if shorter else up.lines), *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:
         """What the session's last read found off screen, without what an open sheet hides (as in the header's

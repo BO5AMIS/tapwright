@@ -726,6 +726,7 @@ class DescribingSession(FakeSession):
         self._record("look")
         self.items = list(self.tree)
         self.last_tier = self.tier
+        self.read_app = self.app  # (as the real Session's look: its read names the app, review RP)
         text = ui.describe(self.items, self.screen, 3.0, self.app, self.last_alert, self.last_keyboard, 0,
                            (self.above, self.below), tier=self.tier)
         return text, (b"JPEG" if screenshot else None)

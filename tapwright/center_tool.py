@@ -223,6 +223,11 @@ class CenterTools:
             source = await s.read_center()
             if not notes_lib.is_center(source):
                 raise Refused("not_found", NOT_OPENED)
+            see = getattr(s, "see_front", None)
+            if callable(see):
+                # (2.0.3, review RP L3) the tool's own touches here (a notification's row, the closing swipe) are checked
+                # against what it just opened and read, not the agent's older answer: it can close what it opened
+                await see(element=True)
             found = notes_lib.parse(source, names, keep)
             del source  # (every other app's notification goes with it)
             # (2.0, R200v L4) the runner may have cut the read short: what it left out may hold notifications
