@@ -496,6 +496,36 @@ def test_explore_files_no_way_back_from_a_screen_it_couldnt_read(tmp_path):
     assert any("couldn't be read" in n for n in explorer.notes)
 
 
+def test_explore_judges_a_way_back_by_the_newest_read_not_the_one_before_the_link(tmp_path):
+    # (CodeRabbit, PR #26) from a screen that read whole the place's link opened one that couldn't be read: the "no way
+    # back" was filed by the whole read before the link, and from _search's and a crash's recovery regardless of the read
+    import dataclasses
+    from explorefakes import FakePhone, build, grid
+    from mapfakes import screen
+    from tapwright import ui as ui_module
+    screens = {"home": grid("Home", buttons=(("go-trip", "Trip"),)), "trip": grid("Trip", buttons=(("t-1", "Notes"),)),
+               "feed": dataclasses.replace(screen("Feed", ids=("feed-video",)), tier="root")}
+    phone_ = FakePhone(screens, "home", {("home", "go-trip"): "trip"})
+    phone_.links["wayfare://trip"] = "feed"
+    explorer, maps = build(tmp_path, phone_)
+
+    async def go():
+        explorer.t0, explorer.waited0 = phone_.clock(), phone_.waited()
+        await explorer._begin()
+        await phone_.tap(ui_module.Target(id="go-trip"))
+        look = await explorer._look(True)
+        explorer.data["places"][look.place]["link"] = "wayfare://trip"
+        phone_.at = "home"
+        await explorer._look(False)
+        phone_.relaunch_at = "feed"  # (the relaunch lands where nothing can be read either)
+        await explorer._return_to(look.place)
+        assert phone_.urls == ["wayfare://trip"]
+        await explorer._recover(look.place)  # (_search's and a crash's call: the newest read was cut)
+    asyncio.run(go())
+    assert [f for f in explorer.found if f.kind == "dead_end"] == []
+    assert any("couldn't be read" in n for n in explorer.notes)
+
+
 def test_a_move_to_a_screen_that_couldnt_be_read_breaks_the_way(no_pc_ocr, tmp_path):
     from tapwright import autoroute, mapkeeper
 

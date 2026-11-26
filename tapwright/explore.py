@@ -597,7 +597,12 @@ class Explorer:
     async def _look(self, arrived: bool, hold_new: bool = False) -> Look:
         """Read the screen, answer an alert (a permission prompt is never allowed), and say what place it is. `hold_new`: a place
         first seen here is announced (its checks run) only by `_announce`, once the move that reached it is registered, so
-        what is found there has the way to it (CodeRabbit, PR #20)."""
+        what is found there has the way to it (CodeRabbit, PR #20). The newest Look is kept (`_newest`): a recovery judges
+        by it whether the screen it gave up on could be read (CodeRabbit, PR #26)."""
+        self._newest = await self._look_now(arrived, hold_new)
+        return self._newest
+
+    async def _look_now(self, arrived: bool, hold_new: bool) -> Look:
         self._new = None
         tree = await self.phone.read()
         # §29.8 (review R185 M6): the kind of system sheet or prompt in front at the moment, for the findings made from here
@@ -1088,13 +1093,18 @@ class Explorer:
             await self._moved(await self.phone.open_url(link))
             if (await self._look(True)).place == place:
                 return True
-        # (R200v M1) a screen whose elements couldn't be read may well be the place: no "no way back" finding from it
-        return await self._recover(place, finding=not look.cut)
+        # (R200v M1) a screen whose elements couldn't be read may well be the place: no "no way back" finding from it.
+        # The newest read decides (the link's, or the last of a way that failed: CodeRabbit, PR #26)
+        return await self._recover(place)
 
-    async def _recover(self, place: str, finding: bool = True) -> bool:
+    async def _recover(self, place: str, finding: bool | None = None) -> bool:
         """The reset of §25.8: Tapwright's own is a relaunch with `open_app`, which keeps the app's data (the second, `app_command
         reset`, is Tapline's: Tapwright has no such tool, so there the branch ends). At most 3 in a row that don't bring the app
-        to a known place. With `account`, the way to the start place may be a saved route that types that vault account."""
+        to a known place. With `account`, the way to the start place may be a saved route that types that vault account.
+        `finding` (None): a "no way back" is filed unless the newest read was cut short (R200v M1)."""
+        if finding is None:
+            newest = getattr(self, "_newest", None)
+            finding = not (newest is not None and newest.cut)
         if finding:
             await self._find("dead_end", place, "There is a way back.", f"no way back to {place} except a reset", None)
         else:
