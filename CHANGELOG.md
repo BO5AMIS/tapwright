@@ -78,7 +78,17 @@
   no answer. At worst, on a screen that never answers: in an app that never read whole with 8 s, 4 in the first hour
   (at 0, 5, 15 and 35 minutes), then about one an hour, then fewer, down to one every 6 hours; in an app that has, 6
   in the first hour (at 0, 1, 3, 7, 15 and 31 minutes), then about one an hour, then fewer, down to one every 6
-  hours. Each app pays this on its own. While a long read runs, the phone's runner answers
+  hours. Each app pays this on its own. The block holds only on the screen the 8 s read failed on, until three in a row
+  weren't whole: a screen whose picture differs from that one by more than a quarter gets its 8 s read at once (a
+  product page that never read, the app's own timeouts, blocked the whole app for 60, 120, 240 s: its readable pages,
+  the home screen after a relaunch too, answered "0 elements", and the moment the block ran out the home screen read
+  whole in 2.5 to 5.3 s); from the third in a row on, the block is the app's, as above. A long read that comes back
+  partly read (elements, not all of them) is no miss: it starts no block and counts nothing (a home screen's planned
+  long read gave 46 of its 140 elements, blocked the app for 60 s, and the agent's tap by an id that read had listed
+  answered "this screen's elements weren't read"). And a read is planned by the app the runner names in front right
+  before it, not by the app of the newest read: an `open_app` from a slow app planned its answer's read with the long
+  budget of the app that was left (10 s) and counted a miss against it. While a long read runs, the
+  phone's runner answers
   nothing else: the live view's picture stands still for up to its time (the stream may reopen), and a person's touch
   waits for it. `wait_for` uses 8 s only when its own time left covers the read and 5 s more, so not with its default
   10 s timeout.

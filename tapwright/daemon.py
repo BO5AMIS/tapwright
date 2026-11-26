@@ -591,6 +591,10 @@ def _still_box_of(raw: str) -> float:
 # least a second older, before a slow app's planned long read, gives that read 2.0.2's rules (_plays). 0: any change (above the stream's tolerance, outside the left-out
 # strips) stops the try; 1: nothing does. For measuring.
 STILL_BOX = _still_box_of(os.environ.get("TAPWRIGHT_STILL_BOX", ""))
+# (round G2) the share of the picture (by STILL_BOX's measure: the box of what differs) past which the screen is taken for
+# another one than the screen a long read failed on: that read's block doesn't hold there (ReadBudget.block_state)
+OTHER_SCREEN = 0.25
+OTHER_FRESH = 10.0  # seconds: the newest frame older than this says nothing of the screen now (a long read takes up to 8)
 WAIT_FOR_LONG_MARGIN = 0.5  # (2.0.3) seconds of `wait_for`'s deadline a long read leaves unused (its clock is not ours)
 WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up instead of reading again
 SKIP_TEXT_WAIT = 3.0  # (2.0) seconds a step's `if` may spend reading the picture's text on a cut-short screen
@@ -1580,6 +1584,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self.session.screen_still = self._still_for_budget  # (2.0: a still screen's read gets the normal budget)
             self.session.still_mark = self._still_mark  # (2.0.3: stillness across a read, for the long budget)
             self.session.still_across = self._still_across
+            self.session.other_screen = self._other_screen  # (round G2: a long read's block holds on its screen only)
         except AttributeError:
             pass
         # the passcode unlock (§18.6, §11.5; unlock.py): its rules and counts, and the lock screen it types on
@@ -10039,6 +10044,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if session_module.TRACE:
                 self.log(f"trace no long read: the picture before the read couldn't be judged ({type(e).__name__})")
             return StillMark(None), True
+
+    def _other_screen(self, kept: object) -> bool:
+        """(round G2) Does the screen now look like another one than `kept` (the mark a long read that wasn't whole was
+        made on): the newest frame, recent, differs from it inside a box of more than OTHER_SCREEN of the picture (the
+        measure STILL_BOX uses)? False when it can't tell (no picture kept, none recent, or no comparison): blocked."""
+        if not isinstance(kept, StillMark) or kept.frame is None:
+            return False
+        try:
+            latest, age = self.hub.latest, self.hub.age()
+            # (the runner sends no frames while it reads: right after a read the newest frame is the screen it was made
+            # on, seconds old; one older than OTHER_FRESH may be of a stream gone quiet: can't tell)
+            if latest is None or age is None or age > OTHER_FRESH:
+                return False
+            share, said = self._change(kept.frame, latest)
+        except Exception:  # noqa: BLE001 - can't tell: the block holds
+            return False
+        other = share > OTHER_SCREEN
+        if other and session_module.TRACE:
+            self.log(f"trace another screen than the one a long read failed on: {said}, more than "
+                     f"{OTHER_SCREEN * 100:.0f} %")
+        return other
 
     def _plays_now(self) -> bool:
         """(2.0.3, the phone test of 137b583) Does a slow app's screen play, before its planned long read? The read that
