@@ -30,11 +30,16 @@
   - a read that could lead to an 8 s one, made while the picture stream has sent nothing for half a second (it closes
     30 s after the last call and is opening again), waits up to 1.5 s for a picture to compare; never while pictures
     arrive, and no read that can't lead to an 8 s one (a 1.5 s read, a read left unasked, a blocked app) waits for or
-    looks at the stream at all;
+    looks at the stream at all, except in an app that has read whole with 8 s, whose reads first compare two of the
+    stream's pictures (a few ms);
   - an 8 s read answered by another app's screen (a notification banner over the app) counts for neither app: the
     app it was for is read again as if it hadn't happened;
   - `TAPWRIGHT_TREE_LONG_PATH=direct` sends the 8 s read the direct way instead of XCTest's (for measuring).
-  What it costs: the first look at such a screen takes 3 + 3.5-7.3 s instead of 3 s, once. After every cut 3 s read
+  What it costs: the first look at such an app takes 3 s (cut), about 0.3 s for one fresh picture, then the 8 s read
+  (4 to 5 s on the measured screens, 3.5 to 7.3 s cold by XCTest's snapshot), instead of 3 s that read nothing. After
+  that, each screen change in it costs one 8 s read (4 to 5 s on those screens), instead of a 3 s read that is cut,
+  unless the picture is still changing in the 0.3 s before the read (a video, or a read that follows the end of an
+  animation that closely: then the 3 s read, the wait and the 8 s read, as on the first look). After every cut 3 s read
   of an app that isn't blocked, the answer waits for one fresh picture (about 0.3 s on the phone, at most 1 s). A feed
   can now cost 8 s reads too, when its picture happens to change little across a read (a paused video, a photo post,
   a moment between two videos) or no fresh picture comes (a stalled stream). Each costs 8 s, up to 13 s when it gets
