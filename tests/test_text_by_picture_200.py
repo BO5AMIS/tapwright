@@ -67,6 +67,8 @@ def test_several_lines_that_show_it_are_listed_as_o_refs_and_index_picks_one():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"text": "Home", "index": 2}})
         assert e.value.code == "not_found" and "index 2" in str(e.value)
+        # (CodeRabbit, PR #26) a not_found only because the screen wasn't read: no failed route, no break to repair
+        assert daemon_module.cut_refusal(e.value) and daemon_module.HINT_NO_ELEMENTS in str(e.value)
         await finish(stop, task)
     run(go)
 

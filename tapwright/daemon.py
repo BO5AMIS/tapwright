@@ -6408,8 +6408,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                        f'read, so they are what there is). Touch one by its ref, or add "index" '
                                        f"(0-based):\n{listed}")
         if target.index is not None and not 0 <= target.index < len(hits):
+            # (CodeRabbit, PR #26) with the hint every refusal on a screen not read carries: no failed route, no repair
+            hint = HINT_NO_ELEMENTS if self._tier_now() == "root" else HINT_PART_ELEMENTS
             raise Refused("not_found", f'index {target.index} is past the {len(hits)} text(s) in the picture that show '
-                                       f'"{said}" (this screen\'s elements weren\'t read); look, then pick again.')
+                                       f'"{said}" (this screen\'s elements weren\'t read); look, then pick again.\n'
+                                       f"{hint}")
         x, y = hits[target.index or 0].center
         again = {**{k: v for k, v in args.items() if k != "index"}, "target": {"x": round(x, 1), "y": round(y, 1)}}
         token = _PICTURE_AIM.set(aimed_at)

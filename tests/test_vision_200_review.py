@@ -121,6 +121,8 @@ def test_the_daemon_gives_the_session_its_stillness():
 def test_a_root_look_says_only_what_is_known(no_pc_ocr):
     assert "doesn't answer" not in ui.ELEMENTS_NONE and "weren't read within the time given" in ui.ELEMENTS_NONE
     assert "doesn't answer" not in daemon_module.HINT_NO_ELEMENTS
+    for hint in (ui.HINT_NO_ELEMENTS, ui.HINT_PART_ELEMENTS):  # (CodeRabbit, PR #26: o refs only when the text was read)
+        assert "as o refs when it can read it" in hint and "else a point {x, y} of a fresh screenshot" in hint
 
     async def go():
         s = feed_session()
