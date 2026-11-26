@@ -161,6 +161,14 @@ QUICK_CUT = 0.25  # a read that comes back with no elements in under this part o
 #                   app: the app had nothing to answer with yet. It is asked again, RETRY_GAP seconds later, while at
 #                   least RETRY_MIN_MS of the budget is left
 BY_STILL_FOR = 30.0  # seconds a read may take to answer and still count as the one a still screen was given
+BUDGET_GRACE = 3.0  # seconds past its budget a budgeted read's answer is waited for (the runner answers within the
+#                     budget, plus up to 0.5 s for the turn of a root and the time to build and carry the answer)
+
+
+def read_wait(budget_ms: int | None) -> float:
+    """Seconds a tree read's answer is waited for before it is asked again: READ_CUT without a budget; with one, the
+    budget and BUDGET_GRACE, never more than READ_CUT (over Wi-Fi an answer that never came cost 10 s, 2026-11-26)."""
+    return READ_CUT if budget_ms is None else min(READ_CUT, budget_ms / 1000 + BUDGET_GRACE)
 RETRY_GAP = 0.25
 RETRY_MIN_MS = 300
 _AFTER_MS = re.compile(r"\(after (\d+) ms\)")
@@ -967,7 +975,7 @@ class Session:
         path = TREE_PATH + ("?" + "&".join(query) if query else "")
         began = time.monotonic()
         try:
-            value = (await self._call("GET", path, timeout=min(timeout, READ_CUT))).get("value")
+            value = (await self._call("GET", path, timeout=min(timeout, read_wait(budget_ms)))).get("value")
         except ConnectionLost:
             raise
         except DeviceError as e:

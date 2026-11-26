@@ -406,3 +406,11 @@ def test_a_lock_press_the_phone_doesnt_confirm_answers_as_before(monkeypatch):
         assert r["text"].startswith("pressed lock") and d.state == "live"
         await finish(stop, task)
     run(go)
+
+
+# ---- an answer that never comes ----
+
+def test_a_budgeted_read_is_waited_for_its_budget_and_a_grace_not_ten_seconds():
+    assert session_module.read_wait(None) == session_module.READ_CUT
+    assert session_module.read_wait(3000) == 6.0 and session_module.read_wait(1500) == 4.5
+    assert session_module.read_wait(20000) == session_module.READ_CUT  # (never longer than a read without one)
