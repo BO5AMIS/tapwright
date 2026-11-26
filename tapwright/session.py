@@ -173,6 +173,31 @@ BUDGET_GRACE = 5.0  # seconds past its budget a budgeted read's answer is waited
 #                     budget, plus up to 0.5 s for the turn of a root and the time to build and carry the answer)
 
 
+BUDGET_GRACE_MIN = 2.0  # (2.0.3) seconds past the long budget its read is waited for, at least (LONG_BUDGET_MS's cap)
+
+
+def _env_ms_or_off(name: str, default: int) -> int:
+    """As _env_ms, but 0 is kept: it turns off what the variable sizes."""
+    try:
+        if float(os.environ.get(name, default)) == 0:
+            return 0
+    except ValueError:
+        pass
+    return _env_ms(name, default)
+
+
+# (2.0.3) ms a read is given once more when the normal budget cut it on a screen that stands still. A shopping app's home
+# screen (900-1,000 elements, phone 2026-11-26) reads whole every time in about 4 s cold (0.4 s warm), and never within
+# 3 s: on the budgets alone it answered "0 elements" for as long as the agent stayed. 0 (or a value not above the normal
+# budget) turns it off. At most READ_CUT less BUDGET_GRACE_MIN (8 s): a read is never waited for past READ_CUT (read_wait),
+# and the runner's answer takes up to 0.5 s past its budget.
+LONG_BUDGET_MS = min(_env_ms_or_off("TAPWRIGHT_TREE_LONG_BUDGET", 8000), int((READ_CUT - BUDGET_GRACE_MIN) * 1000))
+LONG_MEMORY = 300.0  # seconds no long try is made for an app after a long-budget read of it was cut (a paused video:
+#                      without this every minute cost 3 + 8 s)
+LONG_NOTE = ("this screen took about {seconds:.0f} s to read, longer than the usual time given; its elements are listed, "
+             "and its next reads are given that time")
+
+
 def read_wait(budget_ms: int | None) -> float:
     """Seconds a tree read's answer is waited for before it is asked again: READ_CUT without a budget; with one, the
     budget and BUDGET_GRACE, never more than READ_CUT (over Wi-Fi an answer that never came cost 10 s, 2026-11-26)."""
@@ -239,25 +264,53 @@ class ReadBudget:
     then: a playing feed is never still, and a still screen of the same app (a profile, a settings page) is usually one
     that reads whole (review R200v H1). When such a read is cut short too (the feed showing a photo, a paused video:
     still, and it doesn't answer), stillness gives the normal budget again only after BUDGET_MEMORY seconds: on the phone
-    every read of that screen cost the normal budget, and none was left unasked (lead, 2026-11-26)."""
+    every read of that screen cost the normal budget, and none was left unasked (lead, 2026-11-26).
+    (2.0.3) The long budget, for a screen that is only slow: a normal-budget read cut short on a still screen is asked
+    once more in the same read with `long_ms` (the caller's long_try). An app whose long read came back whole is slow but
+    readable: its reads are planned with the long budget (never the short one, never unasked) until one of them is cut.
+    A cut long read ends that and blocks another long try of the app for `long_memory` seconds."""
 
     def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
                  memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic,
-                 unasked_for: float = UNASKED_FOR) -> None:
+                 unasked_for: float = UNASKED_FOR, long_ms: int = LONG_BUDGET_MS,
+                 long_memory: float = LONG_MEMORY) -> None:
         self.normal_ms, self.short_ms, self.memory, self.clock = normal_ms, short_ms, memory, clock
         self.unasked_for = unasked_for
+        self.long_ms, self.long_memory = long_ms, long_memory
         self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
         self._still_cut: dict[str, float] = {}  # bundle id -> when a read its stillness gave the normal budget was
         # (the app whose next read has the normal budget because its screen is still, when that was decided)
         self._by_still: tuple[str, float] | None = None
         self._tried: dict[str, float] = {}  # bundle id -> when a real read of it last went out
+        self._slow: set[str] = set()  # (2.0.3) bundle ids whose newest long-budget read came back whole
+        self._long_cut: dict[str, float] = {}  # bundle id -> when a long-budget read of it was last cut short
 
-    def plan(self, bundle: str | None, still: Callable[[], bool] | None = None) -> tuple[int, bool]:
+    @property
+    def long_on(self) -> bool:
+        """Is there a long budget (TAPWRIGHT_TREE_LONG_BUDGET above the normal budget)?"""
+        return self.long_ms > self.normal_ms
+
+    def slow(self, bundle: str | None) -> bool:
+        """Is `bundle` slow but readable: its reads are planned with the long budget?"""
+        return self.long_on and bundle is not None and bundle in self._slow
+
+    def long_try(self, bundle: str | None) -> bool:
+        """May a read of `bundle` that the normal budget cut short be asked once more with the long budget? Not for an
+        app already on it, nor within `long_memory` seconds of a long read of it that was cut too. (The caller asks
+        only for a screen that is still.)"""
+        if bundle is None or not self.long_on or bundle in self._slow:
+            return False
+        at = self._long_cut.get(bundle)
+        return at is None or self.clock() - at >= self.long_memory
+
+    def plan(self, bundle: str | None, still: Callable[[], bool] | None = None,
+             long_ok: bool = True) -> tuple[int, bool]:
         """(the budget in ms, whether the read may be left unasked) for a read of `bundle`. (2.0, worker H) Unasked only
         where the short budget applies (the app's memory of a cut read is fresh, and the screen isn't still) and a real
         read of the app went out within `unasked_for` seconds: the caller then asks the runner only which app is in front
-        (route version 11), and makes the `root` answer itself when it is still this app."""
-        budget = self.budget(bundle, still)
+        (route version 11), and makes the `root` answer itself when it is still this app. `long_ok` False: the caller
+        can't wait for a long read (its own deadline is shorter), and a slow app's read is planned as before 2.0.3."""
+        budget = self.budget(bundle, still, long_ok)
         if bundle is None or budget >= self.normal_ms:
             return budget, False
         at = self._tried.get(bundle)
@@ -273,13 +326,16 @@ class ReadBudget:
         at = self._tried.get(bundle) if bundle is not None else None
         return None if at is None else self.clock() - at
 
-    def budget(self, bundle: str | None, still: Callable[[], bool] | None = None) -> int:
+    def budget(self, bundle: str | None, still: Callable[[], bool] | None = None, long_ok: bool = True) -> int:
         """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget). `still` is asked only
-        when the short budget would apply: True gives the normal one."""
+        when the short budget would apply: True gives the normal one. A slow but readable app gets the long one (unless
+        `long_ok` is False)."""
         if still is not None:
             # (CodeRabbit, PR #26) a read's own plan: a mark a read that raised left (answered() never took it) isn't
             # this read's. (`short()` asks without `still` and leaves the planned read's mark alone)
             self._by_still = None
+        if long_ok and self.slow(bundle):
+            return self.long_ms
         if bundle is None or bundle not in self._cut:
             return self.normal_ms
         if self.clock() - self._cut[bundle] >= self.memory:
@@ -304,11 +360,19 @@ class ReadBudget:
         by_still = held[0] if held is not None and self.clock() - held[1] < BY_STILL_FOR else None
         if bundle is None:
             return
+        long = self.long_on and budget_ms >= self.long_ms
+        if long and truncated:
+            self._slow.discard(bundle)  # (2.0.3) not even the long budget does: today's rules again, and no long try
+            self._long_cut[bundle] = self.clock()  # for long_memory seconds
+        elif long:
+            self._slow.add(bundle)
+            self._long_cut.pop(bundle, None)
         if not truncated:
             # (review K-H1) the screen in front reads: the next read is asked for real. Left unasked, it was made up
             # as a root with no elements, for a screen that had just given all of them
             self._tried.pop(bundle, None)
-            if took_ms is None or took_ms >= self.short_ms:
+            # (a long read that came back whole in 0.4 s is a warm read of a screen that took 4 s cold: it reads)
+            if took_ms is None or took_ms >= self.short_ms or long:
                 self._cut.pop(bundle, None)
                 self._still_cut.pop(bundle, None)
         elif budget_ms >= self.normal_ms:
@@ -321,6 +385,8 @@ class ReadBudget:
         self._still_cut.clear()
         self._by_still = None
         self._tried.clear()
+        self._slow.clear()
+        self._long_cut.clear()
 
 
 SHORT_SETTLE = 0.5  # seconds an action's settle may wait on a screen that never stands still (SettleCap)
@@ -590,6 +656,7 @@ class Session:
         # read gets the normal budget even while its app is on the short one (ReadBudget). None: never taken as still.
         self.screen_still: Callable[[], bool] | None = None
         self.budget_app: str | None = None  # the app the newest bounded read was budgeted for or named (L2)
+        self.slow_note: str | None = None  # (2.0.3) LONG_NOTE, for the daemon to add to the next answer once
         self.center_tier = "full"  # how much of Notification Center the newest read_center got (R200v L4)
         self.settles = SettleCap()  # (2.0) which apps' screens never stand still: their settles wait less
         self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
@@ -731,7 +798,7 @@ class Session:
         self.last_source = None
 
     async def _call(self, method: str, path: str, payload: dict | None = None, timeout: float = 30,
-                    again: bool | None = None) -> dict:
+                    again: bool | None = None, again_wait: float = READ_AGAIN) -> dict:
         await self.ensure()
         if self.front_apps is not None and method == "POST" and path != FAST_TAP_PATH:
             # the tap is to check the app in front itself: nothing may act before it has
@@ -764,7 +831,7 @@ class Session:
                         raise Unanswered(f"the phone didn't answer within {timeout:.0f} s") from None
                     raise
                 getattr(self.device, "log", lambda *a: None)(f"no answer to {method} {path.split('?')[0]} in {timeout:.0f} s: asked again")
-                return await self.device.http(method, full, payload, READ_AGAIN)
+                return await self.device.http(method, full, payload, again_wait)
         except ConnectionLost:
             self.sid = None  # the next call starts WebDriverAgent again
             raise
@@ -909,9 +976,12 @@ class Session:
         # (review R200v L2) a root the runner couldn't name an app for (RUNNER-V9-PROTOCOL §1: `b` left out) is kept
         # under the app the read was budgeted for, so the short budget still applies to it; and such a root is never
         # taken for another app's
+        began = time.monotonic()
         bundle = (self.read_app[1] if isinstance(self.read_app, tuple) else None) or self.budget_app
-        normal = self.budgets.normal_ms
-        budget, unasked = self.budgets.plan(bundle, still=self.screen_still)
+        normal, long_ms = self.budgets.normal_ms, self.budgets.long_ms
+        # (2.0.3) a long read only where the caller waits long enough for it (wait_for's reads are capped shorter)
+        long_ok = self.budgets.long_on and timeout >= read_wait(long_ms)
+        budget, unasked = self.budgets.plan(bundle, still=self.screen_still, long_ok=long_ok)
         if unasked and self.tw_version >= FRONT_VERSION and bundle is not None:
             source = await self._unasked_root(bundle)
             if source is not None:
@@ -919,16 +989,47 @@ class Session:
         self.budgets.tried(bundle)
         source = await self._compact_tree(timeout, budget_ms=budget, budget_for=bundle,
                                           read_path=tree_path(budget, normal))
+        asked, kept_for = budget, bundle
         named = _root_bundle(source)
         if (source is not None and self.last_tier != "full" and budget < normal
                 and named is not None and named != bundle):
             self.budgets.tried(named)
             source = await self._compact_tree(timeout, budget_ms=normal, budget_for=named,
                                               read_path=tree_path(normal, normal))
+            asked, kept_for = normal, named
             named = _root_bundle(source)
+        app = named or kept_for  # (the app the answer was kept under: _compact_tree's)
+        if (source is not None and self.last_tier != "full" and asked == normal and self.budgets.long_try(app)
+                and timeout - (time.monotonic() - began) >= read_wait(long_ms) and self._still_now()):
+            # (2.0.3) the normal budget cut a screen that stands still: it may only be slow to read (a shopping app's
+            # home screen, about 1,000 elements: 4 s cold, every time). Asked once more, in this read, with the long
+            # budget. Never on a screen that moves (a playing feed never answers: today's cost there), and not again
+            # for LONG_MEMORY after a long read of the app was cut (ReadBudget.long_try)
+            self.budgets.tried(app)
+            began_long = time.monotonic()
+            longer = await self._compact_tree(timeout, budget_ms=long_ms, budget_for=app,
+                                              read_path=tree_path(long_ms, normal))
+            if longer is not None:
+                source, named = longer, _root_bundle(longer)
+                if self.last_tier == "full":
+                    # the agent hears once why this look took long (a warm read of it later costs 0.4 s, no note)
+                    self.slow_note = LONG_NOTE.format(seconds=max(1.0, time.monotonic() - began_long))
+                    getattr(self.device, "log", lambda *a: None)(
+                        f"tree read whole with the long budget ({long_ms} ms) in "
+                        f"{time.monotonic() - began_long:.1f} s: {named or app} reads slowly")
         if source is not None:
             self.budget_app = named or bundle
         return source
+
+    def _still_now(self) -> bool:
+        """Does the stream show the screen still now (the daemon's `screen_still`)? Without one: no, nothing is proven."""
+        still = self.screen_still
+        return still is not None and bool(still())
+
+    def take_slow_note(self) -> str | None:
+        """(2.0.3) The note for the agent that the long try made a read's answer (LONG_NOTE), once: None after."""
+        note, self.slow_note = self.slow_note, None
+        return note
 
     async def _unasked_root(self, bundle: str) -> str | None:
         """(2.0, worker H) The `root` answer a read of `bundle` would get, made here without asking the runner for the
@@ -1017,7 +1118,12 @@ class Session:
         path = TREE_PATH + ("?" + "&".join(query) if query else "")
         began = time.monotonic()
         try:
-            value = (await self._call("GET", path, timeout=min(timeout, read_wait(budget_ms)))).get("value")
+            # (2.0.3) a long-budget read asked again after a stalled request still gets its budget's time (READ_AGAIN,
+            # 5 s, is shorter than the long budget; today's budgets keep it)
+            long = budget_ms is not None and budget_ms > self.budgets.normal_ms
+            value = (await self._call("GET", path, timeout=min(timeout, read_wait(budget_ms)),
+                                      **({"again_wait": max(READ_AGAIN, read_wait(budget_ms))} if long else {}))
+                     ).get("value")
         except ConnectionLost:
             raise
         except DeviceError as e:

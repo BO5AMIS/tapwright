@@ -4019,10 +4019,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 except Refused as e:
                     # a call the crash cut short ends in an error too: it carries the note as well
                     note = await self._crash_note(client_id, scope, name, before, e, pid_before)
-                    if e.code != "dry_run" and (said.notes or note is not None):
+                    # (2.0.3) why the read this call made took long (a dry run's refusal leaves it for the next answer)
+                    slow = self._take_slow_note() if e.code != "dry_run" else None
+                    if e.code != "dry_run" and (said.notes or note is not None or slow is not None):
                         notes = [*said.notes]  # why a matching grant didn't cover it (§19.3)
                         if note is not None:
                             notes.append(f"Note: {note}")
+                        if slow is not None:
+                            notes.append(f"Note: {slow}")
                         enriched = Refused(e.code, "\n".join([str(e), *notes]), draft=e.draft)
                         enriched.hit_check = e.hit_check
                         e = enriched
@@ -4034,6 +4038,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     answer = {**answer, "text": f"{answer['text']}\nNote: {note}"}
                 elif client_id not in self._crash_pending and name not in DIAG_TOOLS:
                     self._crash_since = self._wall()
+                if (slow := self._take_slow_note()) is not None:
+                    # (2.0.3) the long try made a read's answer: said once, with the answer whose read it was
+                    answer = {**answer, "text": f"{answer['text']}\nNote: {slow}"}
                 if said.notes:  # a grant matched but didn't cover it: said before the person's OK (§19.3)
                     answer = {**answer, "text": "\n".join([answer["text"], *said.notes])}
                 if granted:  # a person's OK let a touch through: the answer ends with where it came from
@@ -7385,8 +7392,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # was on it (the same day: a 5 s wait said a text didn't appear which had been there all along).
             grace = left if seen else max(left, WAIT_FOR_FIRST_READ)
             try:
-                tree = await asyncio.wait_for(
-                    self._read(lambda: self.session.refresh(timeout=WAIT_FOR_READ_MAX)), grace)
+                cap = self._wait_for_read_cap(grace)
+                tree = await asyncio.wait_for(self._read(lambda: self.session.refresh(timeout=cap)), grace)
             except asyncio.TimeoutError:
                 if not seen:
                     raise Refused("timeout", f"The phone didn't answer within {max(timeout, WAIT_FOR_FIRST_READ):g} s, so it "
@@ -7414,6 +7421,22 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         snap = await self._read(lambda: self.session.snapshot_from(tree))
         return await self._add_shot(await self._after(view, result, notes, full, snap=snap), view,
                                     self._cut_shot(args, shot, getattr(tree, "tier", "full")))
+
+    def _wait_for_read_cap(self, grace: float) -> float:
+        """(2.0.3) The longest one of `wait_for`'s reads may take, with `grace` seconds left for it: WAIT_FOR_READ_MAX,
+        or, with the long budget on, as long as the wait has room for, up to a normal read and a long one (the session
+        gives a read the long budget only when its time covers it: a slow but readable app's warm read is 0.4 s)."""
+        budgets = getattr(self.session, "budgets", None)
+        if not isinstance(budgets, session_module.ReadBudget) or not budgets.long_on:
+            return WAIT_FOR_READ_MAX
+        room = session_module.read_wait(budgets.normal_ms) + session_module.read_wait(budgets.long_ms)
+        return max(WAIT_FOR_READ_MAX, min(grace, room))
+
+    def _take_slow_note(self) -> str | None:
+        """(2.0.3) Session.take_slow_note: once, the note that a read took the long budget to answer whole."""
+        take = getattr(self.session, "take_slow_note", None)
+        note = take() if callable(take) else None
+        return note if isinstance(note, str) and note else None
 
     async def _type_text(self, view, a: dict) -> Typed:
         """Type into the target, or into the only input on screen (the fast tree has no focus attribute).
