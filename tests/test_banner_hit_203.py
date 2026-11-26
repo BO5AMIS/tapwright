@@ -141,8 +141,7 @@ def test_the_status_bar_is_springboards_and_no_banner(at, frame, kind):
 
 
 @pytest.mark.parametrize("answer,words", [
-    # (round H) no answer in its wait: the app in front is slow, with words of its own
-    (TimeoutError(), session_module.COVERED_SLOW),
+    # (a silence: "slow", which refuses an element too since round I: test_round_i_203)
     (DeviceError("tapwright hit: busy"), session_module.COVERED_UNSURE),
     ({"t": "XCUIElementTypeOther", "r": [0, 0, 1, 1], "b": SHOP[1]}, session_module.COVERED_UNSURE),  # (not verified)
     ({"nonsense": True}, session_module.COVERED_UNSURE)])

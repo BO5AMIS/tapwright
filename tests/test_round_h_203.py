@@ -204,7 +204,7 @@ def test_never_more_than_one_hit_question_out():
         s = unread()
         out = {"now": 0, "most": 0}
 
-        async def call(method, path, payload=None, timeout=None, again=True):
+        async def call(method, path, payload=None, timeout=None, again=True, once=False):
             out["now"] += 1
             out["most"] = max(out["most"], out["now"])
             await asyncio.sleep(0.02)

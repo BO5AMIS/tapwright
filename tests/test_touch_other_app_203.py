@@ -86,7 +86,7 @@ class PointSession(DescribingSession):
         self.front_questions += 1
         return self.front
 
-    async def _call(self, method, path, payload=None, timeout=None, again=True):
+    async def _call(self, method, path, payload=None, timeout=None, again=True, once=False):
         if not path.startswith(session_module.HIT_PATH):
             raise AssertionError(f"unexpected runner request {method} {path}")
         x, y = (float(p.split("=")[1]) for p in path.split("?")[1].split("&"))
