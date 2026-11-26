@@ -9651,8 +9651,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         seen = where(back)
         if back.dismiss is None and not getattr(s, "behind", []):
             return back  # nothing is open on top: a bar's back button doesn't slide
-        if await self._still_across_read(before):
+        across = await self._still_across_read(before)
+        if across == "alike":
             return back  # (2.0.3) the picture didn't move across the read: one read does (each costs seconds on a heavy page)
+        if across == "late" and getattr(s, "last_tier", "full") == "full":
+            # (round G, phone 2026-11-27) no fresh frame after a whole read (the runner sends none for a while after a
+            # long one): read again and a bottom sheet of a slow app cost two long reads, 5.0 and 6.7 s, the second
+            # shallow (a 60 s block). A frame that came and differs still reads again (a sheet sliding in)
+            return back
         for _ in range(BACK_STILL_TRIES):
             await asyncio.sleep(BACK_STILL_PAUSE)
             back = await s.back_point()
@@ -9662,21 +9668,24 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             seen = now
         raise Refused("not_actionable", "no_action: what is open on top is still moving; call back again in a moment")
 
-    async def _still_across_read(self, before: "Frame | None") -> bool:
+    async def _still_across_read(self, before: "Frame | None") -> str:
         """(2.0.3) Did nothing move across `back`'s read: the first frame that comes after it (waited for up to
         BACK_STILL_PAUSE, the pause a second read would have waited anyway) is like the newest one before it? The runner
         sends no frames while it reads, so a sheet that slid during the read shows only as a different picture after it.
-        False with no stream, on the AirPlay video (a stalled mirror repeats its picture), or with no frame in time:
-        read again, as before."""
+        "alike": yes. "moved": a fresh frame differs. "late" (round G): no frame in time (the runner sends none for a
+        while after a long read): the caller reads again unless its read was whole. "none": no stream, the AirPlay video
+        (a stalled mirror repeats its picture), or no comparison: read again, as before."""
         if before is None or self._fed_by_video():
-            return False
+            return "none"
         try:
             now = self.hub.latest
             after = await self.hub.next_after(max(before.seq, now.seq if now is not None else 0),
                                               timeout=BACK_STILL_PAUSE)
-            return after is not None and self._alike(before, after)
+            if after is None:
+                return "late"
+            return "alike" if self._alike(before, after) else "moved"
         except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: read again as before
-            return False
+            return "none"
 
     async def _sheet_unmoved(self, before: "Frame | None") -> bool:
         """(2.0.3) After a touch meant to close the sheet: did the stream show no change at all once it settled (the

@@ -96,8 +96,10 @@
   corner control (it used to fall back to the agent's older list, possibly of another screen): `back` swipes and says
   the screen's elements weren't read. A layer that is no sheet (a strip along the top) gets no touch: `no_action` in
   about the time of one read; a real sheet is tapped beside only on a point clear of anything that takes a touch.
-  And when nothing qualifies, `back` gives up faster: one read when the picture didn't move across it, and no read
-  after a way out that changed nothing on the stream. Cost: none on screens with a navigation bar.
+  And when nothing qualifies, `back` gives up faster: one read when the picture didn't move across it (or, when that
+  read was whole, when no fresh frame came after it: a bottom sheet of a slow app was read twice, 5.0 and 6.7 s, the
+  second cut, which blocked its long reads for a minute), and no read after a way out that changed nothing on the
+  stream. Cost: none on screens with a navigation bar.
 - An `id` or `label` that an element and its own wrapper share is no longer `ambiguous`. `tap {"target": {"id":
   "closeButton"}}` in a shopping app answered `ambiguous` with `e3 other id=closeButton @16,81 40x40` and `e4 button
   id=closeButton @16,81 40x40`. Now matches that are one thing listed twice (frames alike within 2 pt, or one covering
@@ -133,7 +135,11 @@
   tool only) goes at once: that sent the timer's banner away without opening anything, and `covered`'s words now say
   so (a timer, an alarm or a call stays until answered). The picture-text aim's banner check asks the hit test too, at
   (the screen's middle, 80). Not asked (as before): the phone not upright, a runner below route version 6 or without
-  the route, `TAPWRIGHT_HIT_CHECK=0`. Cost: one hit question (about 20 ms) for each touch, points and elements alike,
+  the route, `TAPWRIGHT_HIT_CHECK=0`. "A banner" has one definition, over an app and over the home screen: SpringBoard's
+  element at the point, not an icon and not its whole screen (the home screen's top edge answers that), reaching below
+  the status bar; "no element answered at the point" (Settings' top corner, 7 ms) is an answer, not a failure. On the
+  home screen the same question now lets a point in the top 200 pt go when it finds no banner (a pull from the top
+  edge for Control Center, a widget), where every such point was refused; when it can't say, it is refused as before. Cost: one hit question (about 20 ms) for each touch, points and elements alike,
   that starts in the top 200 pt of an app the runner names; none lower down.
 - A touch aimed by a point, an `o` ref or a picture text in the top 200 pt is refused `covered` while the only word
   on the app in front is iOS's process list (the runner couldn't name it, and `open_app` had named that app). That

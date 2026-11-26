@@ -243,3 +243,147 @@ def test_banner_shown_asks_the_hit_test_at_the_zones_probe_point():
         banner_up(s)
         assert await d._banner_shown() and s.hit_questions[-1] == (215.0, 80.0)
     run(go)
+
+
+# ---- round G, the phone's additions: one definition of "over", the home screen, "nothing at the point" ----
+
+def test_nothing_at_the_point_is_an_answer_and_the_touch_goes():
+    async def go():
+        s = unread()
+        d, stop, task = await _looked(s)
+        s.hit = lambda x, y: DeviceError(f"unsupported operation: {session_module.HIT_NOTHING}")
+        await d.run_tool("a", "tap", {"target": {"x": 400, "y": 2}, "look": False})
+        assert s.sent == [("tap", (400, 2))]
+        await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("frame,kind", [([0, 0, 430, 54], "XCUIElementTypeOther"),  # the status bar, in an app
+                                        ([370, 21, 31, 15], "XCUIElementTypeOther"),
+                                        ([0, 0, 430, 932], "XCUIElementTypeOther"),  # the home screen's whole screen
+                                        ([209, 91, 110, 111], "XCUIElementTypeIcon")])  # an icon
+def test_what_isnt_over_by_the_one_definition(frame, kind):
+    async def go():
+        s = unread()
+        s.screen = (430.0, 932.0)
+        d, stop, task = await _looked(s)
+        s.hit = lambda x, y: springboard(frame, kind)
+        await d.run_tool("a", "tap", {"target": {"x": 215, "y": 30}, "look": False})
+        assert s.sent == [("tap", (215, 30))]
+        await finish(stop, task)
+    run(go)
+
+
+def _home():
+    from test_touch_other_app_203 import HOME
+    s = unread(HOME)
+    s.screen = (430.0, 932.0)
+    return s
+
+
+def _home_hits(s, banner: bool):
+    """The home screen as the hit test answered it on the phone, with or without the timer's banner."""
+    def hit(x, y):
+        if banner and BANNER[0] <= x <= BANNER[0] + BANNER[2] and BANNER[1] <= y <= BANNER[1] + BANNER[3] and y > 8:
+            return springboard(BANNER)
+        if y <= 8:
+            return springboard([0, 0, 430, 932])  # (the top edge: SpringBoard's whole screen)
+        if y < 50:
+            return springboard([122, 11, 156, 37])  # (the island)
+        return {"t": "XCUIElementTypeButton", "r": [20, 60, 390, 160], "b": "com.example.widgets",
+                "identity": "verified"}  # (a widget)
+    s.hit = hit
+
+
+def test_on_the_home_screen_a_pull_from_the_top_edge_and_a_widget_go():
+    async def go():
+        s = _home()
+        d, stop, task = await _looked(s)
+        _home_hits(s, banner=False)
+        await d.run_tool("a", "swipe", {"x0": 400, "y0": 2, "x1": 400, "y1": 400, "look": False})  # Control Center
+        await d.run_tool("a", "tap", {"target": {"x": 200, "y": 85}, "look": False})  # a widget
+        assert s.sent == [("swipe", (400, 2)), ("tap", (200, 85))]
+        await finish(stop, task)
+    run(go)
+
+
+def test_on_the_home_screen_a_banner_is_waited_out_and_refused_as_over_an_app():
+    async def go():
+        s = _home()
+        d, stop, task = await _looked(s)
+        _home_hits(s, banner=True)
+        e = await refused(d, "tap", {"target": {"x": 200, "y": 85}, "look": False})
+        assert str(e) == session_module.COVERED_BANNER and s.sent == []
+        await d.run_tool("a", "swipe", {"x0": 215, "y0": 70, "x1": 215, "y1": 2, "look": False})  # sent away
+        assert s.sent == [("swipe", (215, 70))]
+        await finish(stop, task)
+    run(go)
+
+
+def test_on_the_home_screen_when_the_hit_test_cant_say_a_point_is_refused_as_before():
+    async def go():
+        s = _home()
+        d, stop, task = await _looked(s)
+        s.hit = lambda x, y: TimeoutError()
+        e = await refused(d, "tap", {"target": {"x": 200, "y": 100}, "look": False})
+        assert str(e) == session_module.COVERED_HOME and s.sent == []
+        await finish(stop, task)
+    run(go)
+
+
+# ---- round G: `back` on a sheet uses its own whole read ----
+
+def _sheet_back(tier: str, frames_after: bool) -> dict:
+    from fakes import FrameFeeder, button, el
+    from test_203q_own_back import UPRIGHT
+    from test_daemon import looked, on_loop_clock, run_virtual
+    out = {}
+
+    async def go():
+        d = make()
+        on_loop_clock(d)
+        stop, task = await started(d)
+        d.session.screen = UPRIGHT
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        sheet = el("e1", "other", "", "lab-sheet", rect=(0, 647, 430, 285))
+        await looked(d, [sheet])
+        d.session.behind = [(button("", "Row", "row", rect=(0, 300, 430, 80)), sheet)]
+        d.session.front_items = [sheet]
+        d.session.tier = tier
+        reads = []
+        point = d.session.back_point
+
+        async def counted():
+            reads.append(1)
+            if not frames_after:
+                await feeder.stop()  # (the runner sends no frames for a while after a long read)
+            return await point()
+        d.session.back_point = counted
+        real = d.session.tap
+
+        async def tap(target, hold_ms=60):
+            d.session.behind = []  # the tap beside it closes the sheet
+            d.hub.publish(b"B")
+            return await real(target, hold_ms)
+        d.session.tap = tap
+        try:
+            r = await d.run_tool("a", "back", {})
+            out["text"] = r["text"]
+        except Refused as e:
+            out["refused"] = str(e)
+        out["reads"], out["taps"] = len(reads), list(d.session.tap_points)
+        await feeder.stop()
+        await finish(stop, task)
+    run_virtual(go)
+    return out
+
+
+def test_back_on_a_sheet_after_a_whole_read_and_no_fresh_frame_reads_once():
+    out = _sheet_back("full", frames_after=False)
+    assert out["reads"] == 1 and len(out["taps"]) == 1 and out.get("text", "").startswith("Closed the sheet.")
+
+
+def test_back_on_a_sheet_after_a_cut_read_and_no_fresh_frame_reads_again_as_before():
+    out = _sheet_back("shallow", frames_after=False)
+    assert out["reads"] >= 2

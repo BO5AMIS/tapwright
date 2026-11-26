@@ -678,6 +678,9 @@ def test_a4_on_the_home_screen_a_point_in_the_banner_zone_is_refused_and_an_elem
         d = make(s)
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
+        # (round G) the hit test can't say what is at the point: refused as before (a clear point now goes, an over
+        # one waits: test_banner_hit_203)
+        s.hit = lambda x, y: TimeoutError()
         e = await refused(d, "long_press", {"target": {"x": 200, "y": 100}, "look": False})
         assert e.code == "not_actionable" and str(e) == session_module.COVERED_HOME
         await d.run_tool("a", "tap", {"target": {"x": 200, "y": 330}, "look": False})  # below the zone: goes
