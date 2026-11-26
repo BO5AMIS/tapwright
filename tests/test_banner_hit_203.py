@@ -140,10 +140,13 @@ def test_the_status_bar_is_springboards_and_no_banner(at, frame, kind):
     run(go)
 
 
-@pytest.mark.parametrize("answer", [TimeoutError(), DeviceError("tapwright hit: busy"),
-                                    {"t": "XCUIElementTypeOther", "r": [0, 0, 1, 1], "b": SHOP[1]},  # (not verified)
-                                    {"nonsense": True}])
-def test_when_the_hit_test_cant_say_a_point_is_refused_and_an_element_goes(answer):
+@pytest.mark.parametrize("answer,words", [
+    # (round H) no answer in its wait: the app in front is slow, with words of its own
+    (TimeoutError(), session_module.COVERED_SLOW),
+    (DeviceError("tapwright hit: busy"), session_module.COVERED_UNSURE),
+    ({"t": "XCUIElementTypeOther", "r": [0, 0, 1, 1], "b": SHOP[1]}, session_module.COVERED_UNSURE),  # (not verified)
+    ({"nonsense": True}, session_module.COVERED_UNSURE)])
+def test_when_the_hit_test_cant_say_a_point_is_refused_and_an_element_goes(answer, words):
     from fakes import button
 
     async def go():
@@ -152,22 +155,20 @@ def test_when_the_hit_test_cant_say_a_point_is_refused_and_an_element_goes(answe
         d, stop, task = await _looked(s)
         s.hit = lambda x, y: answer
         e = await refused(d, "tap", {"target": {"x": 200, "y": 85}, "look": False})
-        assert e.code == "not_actionable" and str(e) == session_module.COVERED_UNSURE
+        assert e.code == "not_actionable" and str(e) == words
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert s.sent == [("tap", (50.0, 85.0))]
         await finish(stop, task)
     run(go)
 
 
-@pytest.mark.parametrize("how", ["landscape", "check_off", "old_runner", "no_route"])
+@pytest.mark.parametrize("how", ["check_off", "old_runner", "no_route"])  # (landscape is asked since round H)
 def test_when_the_hit_test_isnt_asked_everything_is_as_before(how, monkeypatch):
     async def go():
         s = unread()
         d, stop, task = await _looked(s)
         banner_up(s)
-        if how == "landscape":
-            s.screen = (932.0, 430.0)
-        elif how == "check_off":
+        if how == "check_off":
             monkeypatch.setattr(session_module, "HIT_CHECK", "0")
         elif how == "old_runner":
             s.tw_version = 5  # (below the hit test's route version 6; below the front route's 11 too: no check)
@@ -210,7 +211,7 @@ def test_the_flick_is_the_swipe_tools_only():
     assert _flick_up({"x0": 215, "y0": 70, "x1": 230, "y1": 10})
     assert not _flick_up({"x0": 215, "y0": 70, "x1": 215, "y1": 11})
     assert not _flick_up({"x0": 100, "y0": 70, "x1": 400, "y1": 2})
-    assert not _flick_up({"x0": 215, "y0": 5, "x1": 215, "y1": 2}) or True  # (a start in the status bar: the hit says)
+    assert not _flick_up({"x0": 215, "y0": 5, "x1": 215, "y1": 2})  # (3 pt: a tap, not a flick: review RG L3)
     d = make()
     view = d.control.client("a")
     flick = {"x0": 215, "y0": 70, "x1": 215, "y1": 2}
@@ -307,13 +308,14 @@ def test_on_the_home_screen_a_pull_from_the_top_edge_and_a_widget_go():
     run(go)
 
 
-def test_on_the_home_screen_a_banner_is_waited_out_and_refused_as_over_an_app():
+def test_on_the_home_screen_a_point_on_a_banner_is_refused_with_the_home_screens_words():
     async def go():
         s = _home()
         d, stop, task = await _looked(s)
         _home_hits(s, banner=True)
         e = await refused(d, "tap", {"target": {"x": 200, "y": 85}, "look": False})
-        assert str(e) == session_module.COVERED_BANNER and s.sent == []
+        # (round H, review RG M1: SpringBoard's own screen can't be told from a banner's for a point)
+        assert str(e) == session_module.COVERED_HOME and s.sent == [] and len(s.hit_questions) == 1
         await d.run_tool("a", "swipe", {"x0": 215, "y0": 70, "x1": 215, "y1": 2, "look": False})  # sent away
         assert s.sent == [("swipe", (215, 70))]
         await finish(stop, task)
@@ -324,7 +326,7 @@ def test_on_the_home_screen_when_the_hit_test_cant_say_a_point_is_refused_as_bef
     async def go():
         s = _home()
         d, stop, task = await _looked(s)
-        s.hit = lambda x, y: TimeoutError()
+        s.hit = lambda x, y: DeviceError("tapwright hit: busy")  # (round H: a silence is "slow", with its own words)
         e = await refused(d, "tap", {"target": {"x": 200, "y": 100}, "look": False})
         assert str(e) == session_module.COVERED_HOME and s.sent == []
         await finish(stop, task)

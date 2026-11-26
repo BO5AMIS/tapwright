@@ -675,13 +675,21 @@ BANNER_PROBE_Y = 80.0  # (round G) where the zone is asked whether a banner is o
 
 
 def _flick_up(a: dict) -> bool:
-    """(round G) Is this swipe a flick up off the top edge: it ends above its start within FLICK_TOP of the top, moving
-    more up than sideways? On a banner it goes at once (Session._front_rules): that is how a person sends one away."""
+    """(round G, H) Is this swipe a flick up off the top edge: it ends within FLICK_TOP of the top, at least FLICK_MIN
+    above its start, moving more up than sideways, in at most FLICK_SECONDS? On a banner it goes at once
+    (Session._front_rules): that is how a person sends one away."""
     try:
         x0, y0, x1, y1 = (float(a[k]) for k in ("x0", "y0", "x1", "y1"))
     except (KeyError, TypeError, ValueError):
         return False
-    return y1 <= session_module.FLICK_TOP and y1 < y0 and y0 - y1 > abs(x1 - x0)
+    try:
+        seconds = float(a.get("seconds", 0.35))
+    except (TypeError, ValueError):
+        return False
+    # (round H, review RG H1) at least FLICK_MIN up, at most FLICK_SECONDS: shorter is a tap on the banner, slower a
+    # long press on it
+    return (y1 <= session_module.FLICK_TOP and y0 - y1 >= session_module.FLICK_MIN and y0 - y1 > abs(x1 - x0)
+            and seconds <= session_module.FLICK_SECONDS)
 
 
 def touch_name(tool: str) -> str:
@@ -6625,8 +6633,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         front = getattr(view, "seen_front", None)
         element = (target is not None and target.kind in ("ref", "id", "label") and not _PICTURE_TEXT.get())
+        aimed = None
+        if element and target is not None:
+            try:  # (round H, review RG M1) the element's frame as the agent's list has it
+                found = ui.resolve(getattr(view, "items", None) or [], target)
+                aimed = None if isinstance(found, tuple) else found.rect
+            except Refused:
+                aimed = None
         return session_module.TouchRules(front if isinstance(front, session_module.Front) else None, element,
-                                         name == "swipe" and _flick_up(args or {}))
+                                         name == "swipe" and _flick_up(args or {}), aimed)
 
     async def _front_state_now(self) -> "session_module.Front | None":
         """Session.front_state, None without one (a fake, or a runner that answered a version below 11). (Not
@@ -6726,7 +6741,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         banner_at = getattr(s, "banner_at", None)
         if not callable(banner_at):
             return False
-        return await banner_at((s.screen[0] / 2, BANNER_PROBE_Y)) == session_module.BANNER_OVER
+        app = read_app[1] if isinstance(read_app, tuple) else None
+        return await banner_at((s.screen[0] / 2, BANNER_PROBE_Y), app) == session_module.BANNER_OVER
 
     async def _locked_by_press(self) -> bool:
         """After the agent's own `press_button lock`: ask the phone whether it is locked now (it takes a moment), for
@@ -10045,21 +10061,26 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 self.log(f"trace no long read: the picture before the read couldn't be judged ({type(e).__name__})")
             return StillMark(None), True
 
-    def _other_screen(self, kept: object) -> bool:
+    def _other_screen(self, kept: object) -> bool | None:
         """(round G2) Does the screen now look like another one than `kept` (the mark a long read that wasn't whole was
         made on): the newest frame, recent, differs from it inside a box of more than OTHER_SCREEN of the picture (the
-        measure STILL_BOX uses)? False when it can't tell (no picture kept, none recent, or no comparison): blocked."""
+        measure STILL_BOX uses)? None when it can't tell (no picture kept, no frame since the kept one: review RG L4,
+        none recent, or no comparison): blocked."""
         if not isinstance(kept, StillMark) or kept.frame is None:
-            return False
+            return None
         try:
             latest, age = self.hub.latest, self.hub.age()
             # (the runner sends no frames while it reads: right after a read the newest frame is the screen it was made
             # on, seconds old; one older than OTHER_FRESH may be of a stream gone quiet: can't tell)
             if latest is None or age is None or age > OTHER_FRESH:
-                return False
+                return None
+            if latest.seq <= kept.frame.seq:
+                if session_module.TRACE:
+                    self.log("trace no picture since the one a long read failed on: blocked")
+                return None
             share, said = self._change(kept.frame, latest)
         except Exception:  # noqa: BLE001 - can't tell: the block holds
-            return False
+            return None
         other = share > OTHER_SCREEN
         if other and session_module.TRACE:
             self.log(f"trace another screen than the one a long read failed on: {said}, more than "

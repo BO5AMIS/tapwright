@@ -12,6 +12,7 @@ import re
 import secrets
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -268,9 +269,27 @@ UNASKED_WHY = ("not asked: {bundle} is still in front, its screen keeps moving, 
                "elements in time")
 
 
+def _rect_within(inner: tuple[float, ...], outer: tuple[float, ...]) -> bool:
+    """(round H) Does the frame `inner` lie inside `outer` (within a point, as frames are rounded)?"""
+    return (inner[0] >= outer[0] - 1 and inner[1] >= outer[1] - 1 and inner[0] + inner[2] <= outer[0] + outer[2] + 1
+            and inner[1] + inner[3] <= outer[1] + outer[3] + 1)
+
+
+PARTIAL_MIN = 5  # (round H, review RG M3) more elements than this under the root: a shallow answer that gave something
+
+
 def _has_elements(source: str | None) -> bool:
-    """(round G) Does a tree's XML hold an element under its root (a shallow answer that gave something)?"""
-    return isinstance(source, str) and source.count("<XCUIElementType") >= 2
+    """(round G, H) Does a shallow tree's XML hold something the agent can use: an element under the root with a
+    label, a name or a value, or more than PARTIAL_MIN elements? An Application and its Window alone is no answer."""
+    if not isinstance(source, str):
+        return False
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return False
+    under = [n for n in root.iter() if n is not root]
+    return len(under) > PARTIAL_MIN or any(
+        (n.get(k) or "").strip() for n in under for k in ("label", "name", "value"))
 
 
 # (round G, phone 2026-11-27) how recent the runner's answer of the app in front must be for a read to be planned by
@@ -341,7 +360,7 @@ class ReadBudget:
         # (round G2) bundle id -> the picture its newest long read that wasn't whole was made on (the daemon's mark), and
         # `other`, set by the session: does the screen now look like another one than that picture (False: can't tell)?
         self._long_pic: dict[str, object] = {}
-        self.other: Callable[[object], bool] | None = None
+        self.other: Callable[[object], bool | None] | None = None
 
     @property
     def long_on(self) -> bool:
@@ -378,9 +397,12 @@ class ReadBudget:
         if picture is None or other is None:
             return "unseen"
         try:
-            return "other" if other(picture) else "same"
+            said = other(picture)
         except Exception:  # noqa: BLE001 - a picture that can't be compared: blocked, as before
             return "unseen"
+        # (round H, review RG L4) None: no picture since the kept one (the stream sends none for a while after a long
+        # read), or none recent: it can't be told, blocked
+        return "unseen" if said is None else "other" if said else "same"
 
     def slow(self, bundle: str | None) -> bool:
         """Is `bundle` slow but readable now: its reads are planned with the long budget (unless something plays)?"""
@@ -661,10 +683,12 @@ class TouchRules:
     the agent's last answer showed it (None: none was recorded), and `element`, whether the action aims at an element by
     ref, id or label from the agent's list (it may then touch SpringBoard's own UI it saw, a banner's row included).
     `flick` (round G): the action is the agent's `swipe` up off the top edge (FLICK_TOP), the way a person sends a banner
-    away: on a banner it goes at once."""
+    away: on a banner it goes at once. `aimed` (round H): the frame of the element aimed at, as the agent's list has it
+    (a hit inside it is that element, not a banner over it)."""
     seen: Front | None
     element: bool = False
     flick: bool = False
+    aimed: "tuple[float, float, float, float] | None" = None
 
 
 # (round G, phone 2026-11-27, iOS 26.5) the hit test at a point of the banner zone: what is there, by SpringBoard's own
@@ -675,10 +699,27 @@ class TouchRules:
 # the whole screen, reaching below HIT_BANNER_BELOW, where the status bar ends. While that banner showed, the front route
 # and activeAppInfo named the app the whole time: the hit test, 7-32 ms a question (a heavy app too), is the only word.
 HIT_BANNER_BELOW = 64.0
-HIT_NOTHING = "tapwright hit: no element answered at the point"  # (an answer: nothing of SpringBoard's is there)
+HIT_NOTHING = "tapwright hit: no element answered at the point"
+# (round H, review RG M6; phone 2026-11-27) the runner says HIT_NOTHING also when its lookup got no answer in 0.3 s: on a
+# video app's feed it said so at every point, the status bar's included, 309-342 ms each, for two rounds, then three of
+# five points named the app. So it is an answer (nothing there) only above HIT_NOTHING_ABOVE (the screen's top edge,
+# above every status-bar frame measured); below, it is asked again, HIT_TRIES questions in about HIT_TRIES_FOR seconds,
+# and none answering is BANNER_SLOW
+HIT_NOTHING_ABOVE = 11.0
+HIT_TRIES, HIT_TRIES_FOR = 3, 1.0
+# (round H, review RG M5; phone 2026-11-27) after a hit question got no answer in HIT_BANNER_WAIT, no other is sent for
+# this long: the runner is still working on it, and a dozen queued ones held it until the watchdog restarted it (the
+# phone then asked for its passcode)
+HIT_QUIET = 5.0
+IN_CALL = "com.apple.InCallService"  # (review RG H2) a call's banner: over, whatever its frame
+WEB_CONTENT = "com.apple.WebKit."  # (the phone: a web page's content in the zone names WebKit's content process)
 HIT_BANNER_WAIT = 1.5  # seconds the gate waits for the hit test's answer before it can't say
 BANNER_OVER, BANNER_CLEAR, BANNER_UNSURE, BANNER_UNASKED = "over", "clear", "unsure", "unasked"
+BANNER_SLOW = "slow"  # (round H) the app in front is slow to answer: what is at the top can't be told now
 FLICK_TOP = 10.0  # points from the top edge within which a flick up ends
+# (round H, review RG H1) a flick moves at least this far up and lasts at most this long: a 7 pt "flick" is a tap on the
+# banner (SWIPE_IS_TAP), and a slow one a long press (it opens the notification's actions)
+FLICK_MIN, FLICK_SECONDS = 40.0, 0.5
 
 # (review RP2 L2, M4) every refusal of the rules starts with its reason word; a screen where the route can't name the app
 # says how to go on: open_app names it (and is exempt), then look
@@ -688,8 +729,13 @@ UNSEEN_FRONT = ("unknown_front: your last look couldn't tell which app was in fr
                 "(or open_app the app you mean, then look), then try again.")
 NO_LOOK = "no_look: no look yet in this session shows what is in front, so nothing was touched; look first."
 COVERED_BANNER = ("covered: a notification is over the top of the screen, so nothing was touched; wait a few seconds, "
-                  "then look and try again. A timer, an alarm or a call stays until answered: send it away with a swipe "
-                  "from it up off the top edge (swipe {x0: 215, y0: 70, x1: 215, y1: 2}), then look.")
+                  "then look and try again. A timer, an alarm or a call stays until answered: send it away with a quick "
+                  "swipe from it up off the top edge, at least 40 pt long and at most 0.5 s (swipe {x0: 215, y0: 70, "
+                  "x1: 215, y1: 2}), then look.")
+# (round H, review RG M5, M6) the hit test got no answer: the app in front is slow, not a banner
+COVERED_SLOW = ("covered: what is at the top of the screen can't be told right now, because the app in front is slow to "
+                "answer, so nothing was touched; try again in a moment, aim at an element (by ref, id or label), or "
+                "lower.")
 # (round G) the hit test couldn't say what is at the top of the screen, though the route names the app
 COVERED_UNSURE = ("covered: can't tell whether a notification is over the top of the screen (the phone's runner didn't "
                   "answer what is there), so nothing was touched; aim at an element (by ref, id or label), or lower.")
@@ -903,7 +949,7 @@ class Session:
         self.still_across: Callable[[object], Awaitable[bool]] | None = None
         # (round G2) does the screen now look like another one than this kept picture (the daemon's stream)? The long
         # read's block holds only on the screen it failed on (ReadBudget.block_state)
-        self.other_screen: Callable[[object], bool] | None = None
+        self.other_screen: Callable[[object], bool | None] | None = None
         # (round G) the runner's newest answer of the app in front, and when (front_app): a read is planned by it
         self.front_seen: tuple[str, float] | None = None
 
@@ -1341,7 +1387,7 @@ class Session:
         elif (state := self.budgets.block_state(app)) in ("same", "app", "unseen"):
             where = {"same": "on this screen, the one it failed on",
                      "app": f"on every screen of it, {self.budgets.misses(app)} in a row weren't",
-                     "unseen": "(no picture to tell this screen from the one it failed on)"}[state]
+                     "unseen": "(no picture since the one it failed on, or none to compare)"}[state]
             why = (f"{app} is blocked for {self.budgets.blocked_for(app):.0f} s more after a long read that wasn't "
                    f"whole, {where}")
         elif not bundle_long or timeout - (time.monotonic() - began) < long_wait:
@@ -1930,42 +1976,108 @@ class Session:
                 return
             # (round G) the route names the app (or the home screen) while a banner iOS 26.5 shows: then the hit test
             at = self._gate_at
-            if now.kind != FRONT_OVER and (at is None or await self.banner_at(at) != BANNER_OVER):
+            rules = self.touch_rules
+            app = now.app if now.kind == FRONT_APP else None
+            if now.kind != FRONT_OVER and (at is None or await self.banner_at(
+                    at, app, rules.aimed if rules is not None else None) != BANNER_OVER):
                 return  # (the gate runs again in full: the check, then the guard)
         self._gate_at = None
         raise Refused("not_actionable", COVERED_BANNER)
 
-    async def banner_at(self, at: tuple[float, float]) -> str:
-        """(round G) Is something of SpringBoard at this point, over an app: the hit test (HIT_PATH, route version 6),
-        asked once with a short wait. BANNER_OVER: SpringBoard's element there, not an icon nor its whole screen, reaches
-        below the status bar (HIT_BANNER_BELOW); BANNER_CLEAR: any other verified answer, or no element at the point;
-        BANNER_UNSURE: another error, no answer in time, a malformed or unverified answer. BANNER_UNASKED (as before round G): the check is off, the phone isn't upright (the
-        route takes portrait points), or the runner is older or says it has no such route. Not hit_at: its refusals are a
-        touch's, this is a question about the screen. A trace line names the point and the frame only, never a label."""
-        if HIT_CHECK == "0" or self.turn != 0 or self.screen[0] > self.screen[1] or self.tw_version < 6:
+    def _portrait_point(self, at: tuple[float, float]) -> "tuple[float, float] | None":
+        """(round H, review RG M2) The point as the hit route takes it, in portrait points (as Hands maps a turn: to_hid).
+        None when the turn isn't known (landscape, which side up not said yet, or a turn the screen's size contradicts)."""
+        w, h = min(self.screen), max(self.screen)
+        upright = self.screen[0] <= self.screen[1]
+        if self.turn == 0 and upright:
+            return at
+        if self.turn == 90 and not upright:
+            return at[1], h - at[0]
+        if self.turn == 270 and not upright:
+            return w - at[1], at[0]
+        return None
+
+    async def banner_at(self, at: tuple[float, float], app: str | None = None,
+                        aimed: "tuple[float, float, float, float] | None" = None) -> str:
+        """(round G, H) Is something over the app (`app`, the one the agent saw; None: the home screen) at this point:
+        the hit test (HIT_PATH, route version 6), at the point mapped to portrait. BANNER_OVER: a banner (_banner_of);
+        BANNER_CLEAR: the app itself, a web page's or the keyboard's process, SpringBoard's status bar, "no element
+        answered" above y HIT_NOTHING_ABOVE; BANNER_UNSURE: another process over the app, an error, a malformed or
+        unverified answer, a turn not known; BANNER_SLOW (review RG M5, M6; phone 2026-11-27): the app in front is slow
+        to answer: "no element answered" HIT_TRIES times (about a second), no answer in HIT_BANNER_WAIT, or within
+        HIT_QUIET after such a silence (the runner is still on it: no question is sent). BANNER_UNASKED (as before round
+        G): the check is off, or the runner is older or says it has no such route. One question out at a time: a pile of
+        them held the runner on the phone until the watchdog restarted it. Trace lines: the point, the frame and the
+        process, never a label."""
+        if HIT_CHECK == "0" or self.tw_version < 6:
             return BANNER_UNASKED
-        try:
-            answer = await self._call("GET", f"{HIT_PATH}?x={at[0]:.2f}&y={at[1]:.2f}", timeout=HIT_BANNER_WAIT,
-                                      again=False)
-        except ConnectionLost:
-            raise
-        except DeviceError as e:
-            said = str(e).lower()
-            if HIT_NOTHING in said:
-                return BANNER_CLEAR  # (Settings' top corner, 7 ms: a banner there would have answered)
-            return BANNER_UNASKED if "unknown command" in said or "unknown method" in said else BANNER_UNSURE
-        except Exception:  # noqa: BLE001 - no answer in time, or any other failure: it can't say
+        point = self._portrait_point(at)
+        if point is None:
+            trace.note("banner_turn", {"at": [round(at[0]), round(at[1])], "turn": self.turn})
             return BANNER_UNSURE
+        lock = getattr(self, "_hit_lock", None)
+        if lock is None:
+            lock = self._hit_lock = asyncio.Lock()
+        async with lock:
+            began = time.monotonic()
+            for n in range(HIT_TRIES):
+                quiet = getattr(self, "_hit_quiet_until", 0.0) - time.monotonic()
+                if quiet > 0:
+                    trace.note("banner_quiet", round(quiet, 1))  # (a hit question got no answer: none is sent)
+                    return BANNER_SLOW
+                try:
+                    answer = await self._call("GET", f"{HIT_PATH}?x={point[0]:.2f}&y={point[1]:.2f}",
+                                              timeout=HIT_BANNER_WAIT, again=False)
+                except ConnectionLost:
+                    raise
+                except Unanswered:
+                    self._hit_quiet_until = time.monotonic() + HIT_QUIET
+                    trace.note("banner_silent", {"at": [round(at[0]), round(at[1])]})
+                    return BANNER_SLOW
+                except DeviceError as e:
+                    said = str(e).lower()
+                    if HIT_NOTHING in said:
+                        if at[1] < HIT_NOTHING_ABOVE:
+                            return BANNER_CLEAR  # (the screen's top edge, 7 ms: a banner there would have answered)
+                        if n + 1 < HIT_TRIES and time.monotonic() - began < HIT_TRIES_FOR:
+                            trace.note("banner_nothing", n + 1)  # (the lookup got no answer in its 0.3 s: again)
+                            continue
+                        trace.note("banner_slow", {"at": [round(at[0]), round(at[1])], "tries": n + 1})
+                        return BANNER_SLOW
+                    return BANNER_UNASKED if "unknown command" in said or "unknown method" in said else BANNER_UNSURE
+                except Exception:  # noqa: BLE001 - no answer in time (or the wait failed): the runner may be on it still
+                    self._hit_quiet_until = time.monotonic() + HIT_QUIET
+                    trace.note("banner_silent", {"at": [round(at[0]), round(at[1])]})
+                    return BANNER_SLOW
+                return self._banner_of(answer, at, app, aimed, point is not at)
+            return BANNER_SLOW
+
+    def _banner_of(self, answer: object, at: tuple[float, float], app: str | None,
+                   aimed: "tuple[float, float, float, float] | None", turned: bool) -> str:
+        """(round G, H) What a hit answer says is at the point (see banner_at)."""
         value = answer.get("value") if isinstance(answer, dict) else None
         hit = ui.hit_of(value)
         if hit is None or not isinstance(value, dict) or value.get("identity") != "verified":
             return BANNER_UNSURE
         x, y, w, h = hit.rect
-        whole = x <= 1 and y <= 1 and w >= self.screen[0] - 1 and h >= self.screen[1] - 1
-        if hit.bundle == SPRINGBOARD and hit.type != "Icon" and y + h > HIT_BANNER_BELOW and not whole:
-            trace.note("banner_hit", {"at": [round(at[0]), round(at[1])], "frame": [round(v) for v in hit.rect]})
+        pw, ph = min(self.screen), max(self.screen)
+        if aimed is not None and not turned and (ui._same_rect(hit.rect, aimed) or _rect_within(hit.rect, aimed)):
+            return BANNER_CLEAR  # (review RG M1) the element the agent aimed at, as it saw it: no banner over it
+        where = {"at": [round(at[0]), round(at[1])], "frame": [round(v) for v in hit.rect], "b": hit.bundle}
+        if hit.bundle == SPRINGBOARD:
+            whole = x <= 1 and y <= 1 and w >= pw - 1 and h >= ph - 1
+            # (in landscape there is no status bar to keep clear of: any SpringBoard element but an icon or the screen)
+            if hit.type != "Icon" and not whole and (turned or y + h > HIT_BANNER_BELOW):
+                trace.note("banner_hit", where)
+                return BANNER_OVER
+            return BANNER_CLEAR
+        if hit.bundle == IN_CALL:
+            trace.note("banner_hit", where)  # (review RG H2) a call's banner, whatever its frame
             return BANNER_OVER
-        return BANNER_CLEAR
+        if app is None or hit.bundle == app or hit.bundle.startswith(WEB_CONTENT) or hit.bundle in ui.KEYBOARD_HOSTS:
+            return BANNER_CLEAR  # (the home screen's widgets; the app itself; a web page's content; the keyboard)
+        trace.note("banner_other", where)  # (review RG H2) another process over the app: it can't be told
+        return BANNER_UNSURE
 
     async def front_state(self) -> "Front | None":
         """(2.0.3) What is in front now (FRONT_*): one question to the front route, and iOS's process list only when it
@@ -2081,12 +2193,14 @@ class Session:
                         raise Refused("not_actionable", COVERED_GUESS.format(app=self._words(now)))
                     # (round G, iOS 26.5) the route names the app while a timer's banner is over it: in the zone, the
                     # hit test at the touch's start says whether SpringBoard is there
-                    said = await self.banner_at(at) if zone else BANNER_UNASKED
+                    said = await self.banner_at(at, now.app, rules.aimed) if zone else BANNER_UNASKED
                     if said == BANNER_OVER and not rules.flick:
                         now = await hold()
                         continue
                     if said == BANNER_UNSURE and not rules.element:
                         raise Refused("not_actionable", COVERED_UNSURE)
+                    if said == BANNER_SLOW and not rules.element:
+                        raise Refused("not_actionable", COVERED_SLOW)
                     self.found_front = now  # (review RP2 M2: what the agent saw over the app has gone)
                     return
                 break
@@ -2096,10 +2210,15 @@ class Session:
                 if zone:
                     # (round G) the hit test tells a banner from the home screen's own top: a banner is waited out as
                     # over an app; the top edge (a pull for Control or Notification Center), the status bar, a widget go
-                    said = await self.banner_at(at)
+                    said = await self.banner_at(at, None, rules.aimed)
                     if said == BANNER_OVER and not rules.flick:
-                        now = await hold()
+                        if not rules.element:
+                            # (review RG M1) a point on SpringBoard's own screen can't be told from a banner's
+                            raise Refused("not_actionable", COVERED_HOME)
+                        now = await hold()  # (an element of the look with something else over it: a banner)
                         continue
+                    if said == BANNER_SLOW and not rules.element:
+                        raise Refused("not_actionable", COVERED_SLOW)
                     if said in (BANNER_UNSURE, BANNER_UNASKED) and not rules.element:
                         raise Refused("not_actionable", COVERED_HOME)  # (review RP2 M3: it can't tell)
                 return
@@ -2118,7 +2237,7 @@ class Session:
                                                 "its elements by ref, or look again.")
             # in the banner zone, SpringBoard over the app: a banner may be there; wait it out (rule A), unless the
             # touch is the agent's flick up from it (round G: how a person sends a banner away)
-            if rules.flick and await self.banner_at(at) == BANNER_OVER:
+            if rules.flick and await self.banner_at(at, now.app) == BANNER_OVER:
                 return
             now = await hold()
         raise Refused("stale", f"{self._words(now)} is in front now, not {self._words(seen)}, where your last look was. "
