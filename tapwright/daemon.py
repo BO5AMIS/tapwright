@@ -4570,8 +4570,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if landed is not None:
             done = Settled(landed[1], True, False)
         else:
+            # (a launch settles with the launched app's cap: one known never to stand still waits SHORT_SETTLE)
             done = await self._settle(self._mark()[0], cap=settle, since=mark[1],
-                                      early=mark[0] if settle == CAP else None)
+                                      early=mark[0] if settle == CAP else None,
+                                      bundle=self._opened if name == "open_app" else None)
         trace.settled()
         if session_module.TRACE:
             self.log(f"trace {name} settle {done.seconds:.2f} s, changed={done.changed}")
@@ -8833,17 +8835,20 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return done.seconds, done.changed
 
     async def _settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
-                      since: Frame | None = None, early: int | None = None) -> Settled:
+                      since: Frame | None = None, early: int | None = None, bundle: str | None = None) -> Settled:
         """_settle_frames, with the cap of a screen that never stands still (Session.settles, SettleCap): shorter while
-        the app in front is known for it, and learned from how this settle ends."""
+        the app in front is known for it, and learned from how this settle ends. `bundle`: the app whose screen this is
+        when the newest read isn't of it (open_app's launch settle: the app launched, known for it from an earlier
+        visit); a settle is learned from only when the newest read is of that app (its tier says whether it reads)."""
         caps = getattr(self.session, "settles", None)
         if caps is None:
             return await self._settle_frames(after_seq, still, cap, since, early)
-        bundle = self._read_bundle()
+        read = self._read_bundle()
+        bundle = bundle or read
         done = await self._settle_frames(after_seq, still, caps.cap(bundle, cap), since, early)
-        if done.still or done.capped:
+        if (done.still or done.capped) and bundle == read:
             cut = self._tier_now() != "full"
-            if caps.settled(bundle, done.capped, cut):
+            if caps.settled(bundle, done.capped, cut, done.seconds):
                 self.log(f"{bundle}'s screen never stands still: actions settle within {caps.short:g} s"
                          if caps.restless(bundle) else f"{bundle}'s screen stood still: actions settle as usual")
         return done

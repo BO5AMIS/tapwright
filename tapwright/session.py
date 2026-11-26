@@ -222,9 +222,15 @@ SHORT_SETTLE = 0.5  # seconds an action's settle may wait on a screen that never
 class SettleCap:
     """(2.0, lead's decision) How long an action's answer waits for the screen of an app to stand still. A screen that
     never does (TikTok's playing feed) made every settle wait its whole cap (2 s, 4 s after a launch): a swipe there took
-    3.2 s. So, per bundle id: when a settle ended by its cap with the picture still changing while the newest tree of that
-    app was cut short, its next settles wait at most `short` seconds; a settle of the app that ends still, or a read of it
-    that comes back whole, gives it the normal cap again. Pure: the daemon says what happened and asks for the cap."""
+    3.2 s. So, per bundle id: when a settle of the app ran past `short` seconds with the picture still changing (it ended
+    by its cap, or stood still only later) while the newest tree of that app was cut short, its next settles wait at most
+    `short` seconds; a settle that ends still while the app's newest tree is whole, or a read of it that comes back whole,
+    gives it the normal cap again. Pure: the daemon says what happened and asks for the cap.
+
+    (Worker H, phone log 2026-11-26) It switched only on the third swipe on the feed: the first two settles ended still
+    (0.77 s and 1.64 s: the feed stands still for a moment while the next video starts), and only a capped settle
+    counted, while a still end cleared the memory again. Now a settle still moving at `short` seconds counts (the short
+    cap would have ended it there), and a still end on a screen that still doesn't read keeps the short cap."""
 
     def __init__(self, short: float = SHORT_SETTLE) -> None:
         self.short = short
@@ -234,15 +240,17 @@ class SettleCap:
         """The cap for a settle of `bundle`'s screen whose normal cap is `cap`."""
         return min(cap, self.short) if bundle is not None and bundle in self._restless else cap
 
-    def settled(self, bundle: str | None, capped: bool, cut: bool) -> bool:
-        """A settle of `bundle` ended: by its cap with frames still changing (`capped`), the newest tree cut short (`cut`).
-        True when the app's cap switched (the caller logs it)."""
+    def settled(self, bundle: str | None, capped: bool, cut: bool, seconds: float = 0.0) -> bool:
+        """A settle of `bundle` ended after `seconds`: by its cap with frames still changing (`capped`), else on frames
+        that stood still; the newest tree of the app cut short (`cut`). True when the app's cap switched (the caller
+        logs it)."""
         if bundle is None:
             return False
-        if capped and cut and bundle not in self._restless:
+        moving = capped or seconds > self.short  # still changing when the short cap would have ended it
+        if moving and cut and bundle not in self._restless:
             self._restless.add(bundle)
             return True
-        if not capped and bundle in self._restless:
+        if not capped and not cut and bundle in self._restless:
             self._restless.discard(bundle)
             return True
         return False

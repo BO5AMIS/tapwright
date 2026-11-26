@@ -159,3 +159,46 @@ def test_an_app_named_only_by_its_bundle_id_is_said_once():
     assert daemon_module._app_words(("Wayfare (com.example.w)", "com.example.w")) == "Wayfare (com.example.w)"
     assert daemon_module._bare_name("Wayfare (com.example.w)", "com.example.w") == "Wayfare"
     assert daemon_module._bare_name("Wayfare", "com.example.w") == "Wayfare"
+
+
+# ---- 4. the settle cap from the first action ----
+
+def test_one_settle_still_moving_past_the_short_cap_on_a_screen_that_doesnt_read_switches():
+    from tapwright.session import SettleCap
+    caps = SettleCap(short=0.5)
+    # the phone, 2026-11-26: the first swipe's settle ended still after 0.77 s (the next video starting), the tree root
+    assert caps.settled("tt", capped=False, cut=True, seconds=0.77) and caps.cap("tt", 2.0) == 0.5
+    caps.forget()
+    assert not caps.settled("tt", capped=False, cut=True, seconds=0.4)  # it stood still within the short cap
+    assert not caps.settled("tt", capped=False, cut=False, seconds=0.9)  # a long animation on a screen that reads
+    assert caps.cap("tt", 2.0) == 2.0
+
+
+def test_the_daemon_switches_on_the_first_swipe_of_the_feed_and_a_launch_uses_the_apps_cap():
+    from test_vision_200 import TIKTOK, feed_session
+
+    from tapwright import session as session_module
+    from tapwright.daemon import Settled
+
+    async def go():
+        s = feed_session()
+        s.settles = session_module.SettleCap()
+        s.read_app = ("TikTok", TIKTOK)
+        s.last_tier = "root"
+        logged = []
+        d = make(s, log=logged.append)
+        caps_asked, ends = [], [Settled(0.77, True, False, True), Settled(0.5, True, True), Settled(0.4, True, False, True)]
+
+        async def frames(after_seq, still=None, cap=2.0, since=None, early=None):
+            caps_asked.append(cap)
+            return ends.pop(0)
+        d._settle_frames = frames
+        await d._settle(0, cap=2.0)  # the first swipe
+        await d._settle(0, cap=2.0)  # the second: already short
+        # Settings is read now; TikTok is launched again: its launch settle waits the short cap, and teaches nothing
+        s.read_app, s.last_tier = ("Settings", "com.apple.Preferences"), "full"
+        await d._settle(0, cap=4.0, bundle=TIKTOK)
+        assert caps_asked == [2.0, 0.5, 0.5]
+        assert s.settles.restless(TIKTOK) and not s.settles.restless("com.apple.Preferences")
+        assert sum("never stands still" in str(x) for x in logged) == 1
+    run_virtual(go)

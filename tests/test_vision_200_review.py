@@ -494,7 +494,9 @@ def test_the_settle_cap_memory():
     assert caps.cap("a", 2.0) == 0.5 and caps.cap("a", 4.0) == 0.5 and caps.cap("a", 0.3) == 0.3
     assert caps.cap("b", 2.0) == 2.0
     assert not caps.settled("a", capped=True, cut=True)  # (already: no second log line)
-    assert caps.settled("a", capped=False, cut=True)  # it stood still: the normal cap again
+    # (worker H) it stood still while its screen still doesn't read (a feed between two videos): the short cap stays
+    assert not caps.settled("a", capped=False, cut=True, seconds=0.3) and caps.cap("a", 2.0) == 0.5
+    assert caps.settled("a", capped=False, cut=False)  # it stood still on a screen that reads: the normal cap again
     assert caps.cap("a", 2.0) == 2.0
     caps.settled("a", capped=True, cut=True)
     assert caps.read_whole("a") and caps.cap("a", 2.0) == 2.0 and not caps.read_whole("a")
@@ -514,17 +516,18 @@ def test_the_daemons_settle_shortens_on_a_feed_and_comes_back_when_it_stands_sti
         logged = []
         d = make(s, log=logged.append)
         caps_asked, ends = [], [Settled(2.0, True, True), Settled(0.5, True, True), Settled(0.3, True, False, True),
-                                Settled(2.0, True, True)]
+                                Settled(0.3, True, False, True), Settled(2.0, True, True)]
 
         async def frames(after_seq, still=None, cap=2.0, since=None, early=None):
             caps_asked.append(cap)
             return ends.pop(0)
         d._settle_frames = frames
-        for _ in range(3):
+        for _ in range(3):  # (the third stood still, but the screen still doesn't read: the short cap stays, worker H)
             await d._settle(0, cap=2.0)
-        s.last_tier = "full"  # a whole tree: capped is only a long animation
+        s.last_tier = "full"  # a whole tree: a still end gives the normal cap back, and capped is only a long animation
+        await d._settle(0, cap=2.0)
         await d._settle(0, cap=4.0)
-        assert caps_asked == [2.0, 0.5, 0.5, 4.0]
+        assert caps_asked == [2.0, 0.5, 0.5, 0.5, 4.0]
         assert sum("never stands still" in str(x) for x in logged) == 1
         assert sum("stood still" in str(x) for x in logged) == 1
     run(go)
