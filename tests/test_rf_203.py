@@ -9,7 +9,7 @@ import threading
 import pytest
 from fakes import FrameFeeder, button, el
 from test_203q_own_back import SEARCH, UPRIGHT
-from test_daemon import finish, looked, make, run, started
+from test_daemon import finish, looked, make, on_loop_clock, run, run_virtual, started
 from test_touch_other_app_203 import SHOP, unread
 
 from tapwright import loopdog, server, ui
@@ -181,6 +181,7 @@ def _layer_back(front_items, layer, behind_items, change_on_tap=False):
 
     async def go():
         d = make()
+        on_loop_clock(d)  # (frames on the virtual clock: the same on every machine)
         stop, task = await started(d)
         d.session.screen = UPRIGHT
         d.hub.publish(b"A")
@@ -204,7 +205,7 @@ def _layer_back(front_items, layer, behind_items, change_on_tap=False):
         out["taps"], out["swiped"] = list(d.session.tap_points), "swipe" in d.session.calls
         await feeder.stop()
         await finish(stop, task)
-    run(go)
+    run_virtual(go)
     return out
 
 

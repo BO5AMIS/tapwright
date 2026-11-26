@@ -2,7 +2,7 @@
 the top-left corner when exactly one qualifies, and the layer path gives up after fewer reads."""
 import pytest
 from fakes import FrameFeeder, button, el
-from test_daemon import finish, looked, make, run, started
+from test_daemon import finish, looked, make, on_loop_clock, run, run_virtual, started
 
 from tapwright import ui
 from tapwright.errors import Refused
@@ -135,6 +135,7 @@ def test_back_taps_its_own_button_under_a_header_strip_read_as_a_layer():
     @0,64 430x54`), and `back` went the sheet's way: 15.7 s, four reads, a tap beside the strip, and no_action."""
     async def go():
         d = make()
+        on_loop_clock(d)  # (the virtual clock: frames every 4 ms as written, on any machine's timer)
         stop, task = await started(d)
         d.session.screen = UPRIGHT
         d.hub.publish(b"A")
@@ -155,7 +156,7 @@ def test_back_taps_its_own_button_under_a_header_strip_read_as_a_layer():
         assert d.session.tap_points == [(36.0, 79.0)] and "swipe" not in d.session.calls
         await feeder.stop()
         await finish(stop, task)
-    run(go)
+    run_virtual(go)
 
 
 def test_back_on_a_layer_it_cant_close_gives_up_after_one_read():
@@ -163,6 +164,7 @@ def test_back_on_a_layer_it_cant_close_gives_up_after_one_read():
     it), and no read after each way out that changed nothing on the stream."""
     async def go():
         d = make()
+        on_loop_clock(d)  # (the virtual clock: frames every 4 ms as written, on any machine's timer)
         stop, task = await started(d)
         d.session.screen = UPRIGHT
         d.hub.publish(b"A")
@@ -186,12 +188,13 @@ def test_back_on_a_layer_it_cant_close_gives_up_after_one_read():
         assert len(d.session.tap_points) == 1 and "swipe" in d.session.calls  # both ways out were still tried
         await feeder.stop()
         await finish(stop, task)
-    run(go)
+    run_virtual(go)
 
 
 def test_back_on_a_moving_layer_reads_again_as_before():
     async def go():
         d = make()
+        on_loop_clock(d)  # (the virtual clock: frames every 4 ms as written, on any machine's timer)
         stop, task = await started(d)
         d.session.screen = UPRIGHT
         d.hub.publish(b"A")
@@ -212,4 +215,4 @@ def test_back_on_a_moving_layer_reads_again_as_before():
         assert len(reads) >= 2
         await feeder.stop()
         await finish(stop, task)
-    run(go)
+    run_virtual(go)
