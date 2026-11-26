@@ -283,11 +283,30 @@ def test_quick_give_ups_that_use_the_whole_budget_end_as_a_cut_read(monkeypatch)
     """An app that never has anything to answer with costs one budget, not a wait without end; then the short one."""
     from test_vision_200 import TIKTOK, V9Runner, _app
 
+    import time as real_time
     monkeypatch.setattr(session_module, "RETRY_GAP", 0.0)
-    monkeypatch.setattr(session_module, "RETRY_MIN_MS", 2998)  # (the fake answers at once: two more asks, then too little is left)
+    monkeypatch.setattr(session_module, "RETRY_MIN_MS", 2998)  # (each read takes 1 ms: two more asks, then too little is left)
     runner = V9Runner()
     runner.trees = [{"token": "r1", "tree": _app(), "tier": "root", "truncated": True,
                      "why": "full: Error getting main window kAXErrorServerNotFound (after 8 ms)"}]
+    # (CodeRabbit, PR #26) the session's clock moves only as the runner answers, 1 ms a read: the count of asks doesn't
+    # hang on how fast this computer is
+    now = [1000.0]
+
+    class Clock:
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        def monotonic(self):
+            return now[0]
+    monkeypatch.setattr(session_module, "time", Clock())
+    answer = runner.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if "/wda/tw/tree" in path:
+            now[0] += 0.001
+        return await answer(method, path, payload, timeout)
+    runner.http = http
     s = Session(runner)
     s.read_app = ("TikTok", TIKTOK)
     assert asyncio.run(s.refresh()).tier == "root"

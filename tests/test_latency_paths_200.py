@@ -33,6 +33,25 @@ async def _settings_push(d, began: float) -> None:
         await asyncio.sleep(0.02)
 
 
+class _LoopTime:
+    """`time` for the daemon whose monotonic() is the running (virtual) loop's clock."""
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def monotonic(self):
+        try:
+            return asyncio.get_running_loop().time()
+        except RuntimeError:
+            return time.monotonic()
+
+
+@pytest.fixture
+def loop_time(monkeypatch):
+    """(CodeRabbit, PR #26) the hands' touch time and its age on the virtual clock the settle runs on: on the real one,
+    a test descheduled between the two had the floor shortened by that delay."""
+    monkeypatch.setattr(daemon_module, "time", _LoopTime())
+
+
 def _settle_after_tap(hands: bool) -> tuple[float, bool]:
     out = {}
 
@@ -42,7 +61,7 @@ def _settle_after_tap(hands: bool) -> tuple[float, bool]:
         d.hub.publish(b"A")
         seq, since = d._mark()
         if hands:
-            d.session.hands_at = time.monotonic()  # the hands' tap just ended (acked at once)
+            d.session.hands_at = asyncio.get_running_loop().time()  # the hands' tap just ended (acked at once)
         feeder = asyncio.create_task(_settings_push(d, asyncio.get_running_loop().time()))
         out["done"] = await d.settle(seq, cap=2.0, since=since)
         feeder.cancel()
@@ -50,24 +69,24 @@ def _settle_after_tap(hands: bool) -> tuple[float, bool]:
     return out["done"]
 
 
-def test_a_settle_after_a_hands_tap_waits_out_the_highlight_and_ends_after_the_push():
+def test_a_settle_after_a_hands_tap_waits_out_the_highlight_and_ends_after_the_push(loop_time):
     seconds, changed = _settle_after_tap(hands=True)
     assert changed and seconds >= 0.8 + daemon_module.STILL - 0.03  # after the animation, not on the highlight
 
 
-def test_without_a_hands_touch_the_settle_still_ends_on_the_first_still_run():
+def test_without_a_hands_touch_the_settle_still_ends_on_the_first_still_run(loop_time):
     seconds, changed = _settle_after_tap(hands=False)
     # (the runner's tap answers ~200 ms after its effect: a still run then is the end, as before)
     assert changed and seconds < 0.25
 
 
-def test_the_floor_doesnt_hold_a_change_that_ends_after_it():
+def test_the_floor_doesnt_hold_a_change_that_ends_after_it(loop_time):
     async def go():
         d = make(settle_still=daemon_module.STILL, settle_quiet=daemon_module.MIN_QUIET)
         on_loop_clock(d)
         d.hub.publish(b"A")
         seq, since = d._mark()
-        d.session.hands_at = time.monotonic()
+        d.session.hands_at = asyncio.get_running_loop().time()
         loop = asyncio.get_running_loop()
         began = loop.time()
 
@@ -83,13 +102,13 @@ def test_the_floor_doesnt_hold_a_change_that_ends_after_it():
     run_virtual(go)
 
 
-def test_no_change_after_a_hands_tap_is_still_believed_only_after_hands_quiet():
+def test_no_change_after_a_hands_tap_is_still_believed_only_after_hands_quiet(loop_time):
     async def go():
         d = make(settle_still=daemon_module.STILL, settle_quiet=daemon_module.MIN_QUIET)
         on_loop_clock(d)
         d.hub.publish(b"A")
         seq, since = d._mark()
-        d.session.hands_at = time.monotonic()
+        d.session.hands_at = asyncio.get_running_loop().time()
 
         async def feed():
             while True:
@@ -102,7 +121,7 @@ def test_no_change_after_a_hands_tap_is_still_believed_only_after_hands_quiet():
     run_virtual(go)
 
 
-def test_frames_seen_during_a_hands_call_dont_end_the_settle_before_the_floor():
+def test_frames_seen_during_a_hands_call_dont_end_the_settle_before_the_floor(loop_time):
     async def go():
         d = make(settle_still=daemon_module.STILL, settle_first_frame=1.0)
         on_loop_clock(d)
@@ -112,7 +131,7 @@ def test_frames_seen_during_a_hands_call_dont_end_the_settle_before_the_floor():
             d.hub.publish(b"B")
             await asyncio.sleep(0.03)
         returned = d._mark()[0]
-        d.session.hands_at = time.monotonic()
+        d.session.hands_at = asyncio.get_running_loop().time()
         loop = asyncio.get_running_loop()
 
         async def feed():
@@ -508,15 +527,30 @@ def test_the_session_takes_jpeg_shots_and_reads_text_with_its_picture_on_a_v11_r
 
 
 def test_an_older_runner_or_a_failed_shot_takes_the_png_as_before(state):
+    # (CodeRabbit, PR #26) the failure is made on the very JPEG request (its query too: the fake's `fail` matched only
+    # the end of the path, so it was never raised), and the PNG the phone gives instead is the answer
+    import base64
+
     from tapwright.session import Session
+    png = b"PNG: a screenshot"
     for runner in (_v11(version=10), _v11()):
-        runner.fail["/wda/tw/shot"] = daemon_module.DeviceError("unable to capture screen")
+        real = runner.http
+
+        async def http(method, path, payload=None, timeout=30.0, runner=runner, real=real):
+            bare = path.replace("/session/S", "")
+            if bare == "/wda/tw/shot?width=400&quality=80":
+                runner.requests.append((method, path, payload))
+                raise daemon_module.DeviceError("WebDriverAgent: unknown error: unable to capture screen")
+            if bare == "/screenshot":
+                runner.requests.append((method, path, payload))
+                return {"value": base64.b64encode(png).decode()}
+            return await real(method, path, payload, timeout)
+        runner.http = http
         s = Session(runner)
         asyncio.run(s.ensure())
-        with pytest.raises(Exception):  # (the fake's /screenshot answers no PNG: what matters is that it was asked)
-            asyncio.run(s.screen_picture(400))
+        assert asyncio.run(s.screen_picture(400)) == png
         assert runner.paths("/screenshot") == ["/screenshot"]
-        assert len(runner.paths("/wda/tw/shot")) == (1 if runner.version >= 11 else 0)
+        assert runner.paths("/wda/tw/shot") == (["/wda/tw/shot?width=400&quality=80"] if runner.version >= 11 else [])
     with pytest.raises(daemon_module.DeviceError):
         asyncio.run(Session(_v11(version=10)).read_text_and_picture())
 
