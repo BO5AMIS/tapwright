@@ -313,3 +313,156 @@ def test_back_reads_after_an_action_with_look_false():
 def test_back_with_look_false_takes_its_before_state_from_the_list_it_proved():
     out = _back_after_look(look=False)
     assert out["reads"] == 0 and out["text"].splitlines()[0] == "Tapped the back button."
+
+
+# ---- 3. no tree reads on a screen that doesn't answer and keeps moving (route version 11) ----
+
+class _Clock:
+    def __init__(self):
+        self.t = 100.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_the_read_plan_leaves_a_read_unasked_only_on_a_moving_screen_read_moments_ago():
+    from tapwright.session import ReadBudget
+    clock = _Clock()
+    b = ReadBudget(normal_ms=3000, short_ms=1500, memory=20.0, clock=clock, unasked_for=8.0)
+    assert b.plan("tt") == (3000, False) and b.plan(None) == (3000, False)
+    b.tried("tt")
+    b.answered("tt", True, 3000)  # its first read was cut short
+    assert b.plan("tt") == (1500, True)  # moving (no `still`), read 0 s ago
+    assert b.plan("tt", still=lambda: True) == (3000, False)  # a still screen: read whole, as before
+    assert b.plan("other") == (3000, False)
+    clock.t += 8.0
+    assert b.plan("tt") == (1500, False)  # one real short read every 8 s
+    b.tried("tt")
+    clock.t += 7.9
+    assert b.plan("tt") == (1500, True) and b.tried_ago("tt") == pytest.approx(7.9)
+    clock.t += 4.2  # 20 s since the normal read was cut: the memory is gone, a normal read goes out
+    assert b.plan("tt") == (3000, False)
+    b.answered("tt", False, 3000)
+    b.forget()
+    assert b.tried_ago("tt") is None
+
+
+TT = "com.zhiliaoapp.musically"
+
+
+def _v11(version=11, front=None):
+    from test_vision_200 import V9Runner, _app
+
+    class V11Runner(V9Runner):
+        """V9Runner with route version 11's `front` (what it answers: `front`, an Exception is raised) and `shot`."""
+
+        def __init__(self):
+            super().__init__(version=version)
+            self.front = {"b": TT, "pid": 8496, "ms": 6} if front is None else front
+            self.trees = [{"token": "r1", "tree": _app(TT, "TikTok"), "tier": "root", "truncated": True,
+                           "why": "full: timeout"}]
+
+        async def http(self, method, path, payload=None, timeout=30.0):
+            bare = path.replace("/session/S", "")
+            if bare.startswith("/wda/tw/front"):
+                self.requests.append((method, path, payload))
+                if version < 11:
+                    raise daemon_module.DeviceError("WebDriverAgent: unknown command: Unhandled endpoint")
+                if isinstance(self.front, Exception):
+                    raise self.front
+                return {"value": dict(self.front)}
+            if bare.startswith("/wda/activeAppInfo"):
+                self.requests.append((method, path, payload))
+                return {"value": {"bundleId": TT, "name": "TikTok"}}
+            return await super().http(method, path, payload, timeout)
+    return V11Runner()
+
+
+@pytest.fixture
+def state(monkeypatch):
+    from tapwright import session as session_module
+    monkeypatch.setattr(session_module.store, "load_state", lambda: {"runner_id": "runner"})
+
+
+def _feed_reads(runner, clock=None, reads=2):
+    from tapwright.session import ReadBudget, Session
+    s = Session(runner)
+    if clock is not None:
+        s.budgets = ReadBudget(clock=clock)
+    s.read_app = ("TikTok", TT)
+    trees = [asyncio.run(s.refresh()) for _ in range(reads)]
+    return s, trees
+
+
+def test_a_moving_screen_read_moments_ago_is_answered_as_root_without_asking_for_the_tree(state):
+    runner = _v11()
+    s, (first, second) = _feed_reads(runner)
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=direct&attrs=lean"]  # the first only
+    assert runner.paths("/wda/tw/front") == ["/wda/tw/front"]
+    assert second.tier == "root" and second.items == [] and second.app == ("TikTok", TT)
+    assert s.last_tier == "root" and s.last_why.startswith(f"not asked: {TT} is still in front")
+    assert 'processId="8496"' in s.last_source and s.budget_app == TT and s.last_compact is None
+
+
+def test_a_snapshot_of_the_unasked_root_asks_nothing_slow(state):
+    runner = _v11()
+    s, _ = _feed_reads(runner, reads=1)
+    snap = asyncio.run(s.snapshot())
+    assert snap.tree.tier == "root" and s.app == ("TikTok", TT)
+    assert runner.paths("/wda/activeAppInfo") == [] and len(runner.paths("/wda/tw/tree")) == 1
+
+
+def test_another_app_in_front_or_no_answer_or_an_older_runner_reads_as_before(state):
+    for runner in (_v11(front={"b": "com.apple.Preferences", "pid": 3, "ms": 4}), _v11(front={"ms": 512}),
+                   _v11(front=daemon_module.DeviceError("boom")), _v11(version=10)):
+        _feed_reads(runner)
+        assert len(runner.paths("/wda/tw/tree")) == 2, runner.front
+        assert runner.paths("/wda/tw/tree")[1].startswith("/wda/tw/tree?budget=1500")
+    runner = _v11(version=10)  # (a v10 runner is never asked which app is in front)
+    _feed_reads(runner)
+    assert runner.paths("/wda/tw/front") == []
+
+
+def test_one_real_short_read_goes_out_every_eight_seconds_and_a_still_screen_is_read_whole(state):
+    clock = _Clock()
+    runner = _v11()
+    s, _ = _feed_reads(runner, clock=clock, reads=2)
+    assert len(runner.paths("/wda/tw/tree")) == 1
+    clock.t += 8.0
+    asyncio.run(s.refresh())  # 8 s on: a real short read, in case a screen of the app that reads came up
+    assert runner.paths("/wda/tw/tree")[-1].startswith("/wda/tw/tree?budget=1500")
+    clock.t += 1.0
+    asyncio.run(s.refresh())
+    assert len(runner.paths("/wda/tw/tree")) == 2  # unasked again
+    s.screen_still = lambda: True  # the stream shows the screen still: the normal budget, asked
+    asyncio.run(s.refresh())
+    assert runner.paths("/wda/tw/tree")[-1].startswith("/wda/tw/tree?budget=3000")
+
+
+def test_a_root_naming_no_app_on_a_v11_runner_asks_front_not_active_app_info(state):
+    from test_vision_200 import _app
+    runner = _v11()
+    bare = _app(TT, "TikTok")
+    del bare["b"], bare["pid"], bare["l"]
+    runner.trees = [{"token": "r1", "tree": bare, "tier": "root", "truncated": True}]
+    from tapwright.session import Session
+    s = Session(runner)
+    snap = asyncio.run(s.snapshot())
+    assert snap.app == (TT, TT) and runner.paths("/wda/activeAppInfo") == []
+    runner.front = {"ms": 512}  # it can't say either: the app isn't known, and activeAppInfo still isn't asked
+    snap = asyncio.run(s.snapshot())
+    assert snap.app is None and runner.paths("/wda/activeAppInfo") == []
+
+
+def test_a_session_whose_runner_gave_the_scale_needs_no_wda_screen_read(state):
+    from test_session import Recorder
+
+    from tapwright.session import Session
+    s = Session(_v11())
+    asyncio.run(s.ensure())
+    assert s.scale_by_runner and s.scale == 3
+    asyncio.run(s.read_scale(refresh=not s.scale_by_runner))
+    assert s.device.paths("/wda/screen") == []
+    old = Session(Recorder())  # (Appium's build: no screen route; the connect reads /wda/screen as before)
+    asyncio.run(old.ensure())
+    assert not old.scale_by_runner

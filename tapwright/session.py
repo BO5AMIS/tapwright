@@ -162,6 +162,22 @@ BUDGET_MEMORY = 20.0  # seconds a cut-short read keeps its app on the short budg
 # forces one (for measuring).
 TREE_PATH_FORCED = os.environ.get("TAPWRIGHT_TREE_PATH", "").strip().lower()
 TREE_ATTRS = os.environ.get("TAPWRIGHT_TREE_ATTRS", "lean").strip().lower()  # `std` turns the lean read off (version 10)
+# (2.0, runner route version 11: RUNNER-V11-PROTOCOL.md) the app in front without reading it (a few ms, where
+# /wda/activeAppInfo took 1.7-30 s on TikTok's feed), the screen as a JPEG in about 50 ms (the PNG /screenshot took
+# 250-640 ms), and the OCR read's picture in its own answer (`image=1`)
+FRONT_VERSION = 11
+FRONT_PATH = "/wda/tw/front"
+SHOT_PATH = "/wda/tw/shot"
+FRONT_WAIT = 3.0  # seconds: the runner's own worst case is about 1.8 s (an AX lookup bounded to 0.5 s, then the daemon's)
+SHOT_WAIT = 10.0  # seconds a JPEG shot may take (about 50 ms)
+SHOT_QUALITY = 80  # the JPEG quality asked of the runner's shot (shot.render encodes the answer's picture again)
+# (2.0, worker H) seconds a read of an app whose screen doesn't answer and keeps moving may be left unasked after a real
+# one went out (ReadBudget.plan): on TikTok's feed each read cost its whole budget (1.3-1.4 s at 1500 ms), before and
+# after every action. One real short-budget read goes out every UNASKED_FOR seconds, so a screen of that app that reads
+# (a profile, while a video plays in it) is found again; a still screen gets the normal budget at once (ReadBudget).
+UNASKED_FOR = 8.0
+UNASKED_WHY = ("not asked: {bundle} is still in front, its screen keeps moving, and its read {age:.1f} s ago gave no "
+               "elements in time")
 
 
 def tree_path(budget_ms: int, normal_ms: int, forced: str | None = None) -> str:
@@ -184,9 +200,33 @@ class ReadBudget:
     that reads whole (review R200v H1)."""
 
     def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
-                 memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic) -> None:
+                 memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic,
+                 unasked_for: float = UNASKED_FOR) -> None:
         self.normal_ms, self.short_ms, self.memory, self.clock = normal_ms, short_ms, memory, clock
+        self.unasked_for = unasked_for
         self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
+        self._tried: dict[str, float] = {}  # bundle id -> when a real read of it last went out
+
+    def plan(self, bundle: str | None, still: Callable[[], bool] | None = None) -> tuple[int, bool]:
+        """(the budget in ms, whether the read may be left unasked) for a read of `bundle`. (2.0, worker H) Unasked only
+        where the short budget applies (the app's memory of a cut read is fresh, and the screen isn't still) and a real
+        read of the app went out within `unasked_for` seconds: the caller then asks the runner only which app is in front
+        (route version 11), and makes the `root` answer itself when it is still this app."""
+        budget = self.budget(bundle, still)
+        if bundle is None or budget >= self.normal_ms:
+            return budget, False
+        at = self._tried.get(bundle)
+        return budget, at is not None and self.clock() - at < self.unasked_for
+
+    def tried(self, bundle: str | None) -> None:
+        """A real read of `bundle` goes out now."""
+        if bundle is not None:
+            self._tried[bundle] = self.clock()
+
+    def tried_ago(self, bundle: str | None) -> float | None:
+        """Seconds since a real read of `bundle` went out (None: none did)."""
+        at = self._tried.get(bundle) if bundle is not None else None
+        return None if at is None else self.clock() - at
 
     def budget(self, bundle: str | None, still: Callable[[], bool] | None = None) -> int:
         """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget). `still` is asked only
@@ -214,6 +254,7 @@ class ReadBudget:
 
     def forget(self) -> None:
         self._cut.clear()
+        self._tried.clear()
 
 
 SHORT_SETTLE = 0.5  # seconds an action's settle may wait on a screen that never stands still (SettleCap)
@@ -448,6 +489,9 @@ class Session:
         self.center_tier = "full"  # how much of Notification Center the newest read_center got (R200v L4)
         self.settles = SettleCap()  # (2.0) which apps' screens never stand still: their settles wait less
         self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
+        # whether this session's start had the pixel scale from the runner's screen route (version 9), which doesn't read
+        # the app: then nothing asks /wda/screen for it, which reads the app (worker H: on TikTok's feed, the AX timeout)
+        self.scale_by_runner = False
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -471,6 +515,7 @@ class Session:
         sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": wanted}}))["sessionId"]
         # Asked before anything reads the app: once a read hangs behind a frozen app, nothing else gets an answer.
         locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
+        self.scale_by_runner = False
         try:
             screen = await self._screen_of_runner() if bounded else None
             if screen is None:
@@ -537,6 +582,7 @@ class Session:
             scale = 0.0
         if scale > 0:
             self.scale, self.scale_read = scale, True  # (no read of the app needed for it later either)
+            self.scale_by_runner = True
         return w, h
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
@@ -749,18 +795,69 @@ class Session:
         # taken for another app's
         bundle = (self.read_app[1] if isinstance(self.read_app, tuple) else None) or self.budget_app
         normal = self.budgets.normal_ms
-        budget = self.budgets.budget(bundle, still=self.screen_still)
+        budget, unasked = self.budgets.plan(bundle, still=self.screen_still)
+        if unasked and self.tw_version >= FRONT_VERSION and bundle is not None:
+            source = await self._unasked_root(bundle)
+            if source is not None:
+                return source
+        self.budgets.tried(bundle)
         source = await self._compact_tree(timeout, budget_ms=budget, budget_for=bundle,
                                           read_path=tree_path(budget, normal))
         named = _root_bundle(source)
         if (source is not None and self.last_tier != "full" and budget < normal
                 and named is not None and named != bundle):
+            self.budgets.tried(named)
             source = await self._compact_tree(timeout, budget_ms=normal, budget_for=named,
                                               read_path=tree_path(normal, normal))
             named = _root_bundle(source)
         if source is not None:
             self.budget_app = named or bundle
         return source
+
+    async def _unasked_root(self, bundle: str) -> str | None:
+        """(2.0, worker H) The `root` answer a read of `bundle` would get, made here without asking the runner for the
+        tree (ReadBudget.plan said it may be left unasked): only when the runner's FRONT_PATH says that app is still in
+        front, with its pid. The XML is the one a runner's `root` answer becomes (RUNNER-V9-PROTOCOL §1: the
+        application node, the screen in points). None (read as before) when another app is in front or it can't say."""
+        front = await self.front_app()
+        if front is None or front[0] != bundle:
+            return None
+        node: dict = {"t": "Application", "r": [0, 0, self.screen[0], self.screen[1]], "b": bundle}
+        if front[1] is not None:
+            node["pid"] = front[1]
+        label = self.read_app[0] if isinstance(self.read_app, tuple) and self.read_app[1] == bundle else \
+            self.app_names.get(bundle)
+        if label and label != bundle:
+            node["l"] = label
+        source = ui.xml_of_tree(node)
+        age = self.budgets.tried_ago(bundle) or 0.0
+        self.last_tier, self.last_why = "root", UNASKED_WHY.format(bundle=bundle, age=age)
+        self.last_compact = None  # (a cut-short tree is never the "unchanged" baseline)
+        self.budget_app = bundle
+        if TRACE and not QUIET.get():
+            getattr(self.device, "log", lambda *a: None)(f"trace tree {self.last_why}")
+        return source
+
+    async def front_app(self) -> tuple[str, int | None] | None:
+        """(bundle id, pid or None) of the app in front, by the runner's FRONT_PATH (route version 11): found the way a
+        tree read finds it, without reading the app (a few ms). None when this runner is older, the app can't be told,
+        or the question failed; a dropped line is raised."""
+        if self.tw_version < FRONT_VERSION:
+            return None
+        try:
+            answer = await self._call("GET", FRONT_PATH, timeout=FRONT_WAIT)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            getattr(self.device, "log", lambda *a: None)(f"the runner couldn't say which app is in front ({e})")
+            return None
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if not isinstance(value, dict):
+            return None
+        bundle, pid = value.get("b"), value.get("pid")
+        if not isinstance(bundle, str) or not bundle or bundle == "unknown":
+            return None
+        return bundle, pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
     async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None,
                             budget_for: str | None = None, remember: bool = True,
@@ -929,7 +1026,19 @@ class Session:
         request a tree-only read leaves out."""
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
-        self.app = self.read_app = await self._app(tree.app)
+        known = tree.app
+        if known is None and tree.tier != "full" and self.tw_version >= FRONT_VERSION:
+            # (2.0, worker H) a cut-short root that names no app: activeAppInfo reads the app (1.7-30 s on TikTok's feed);
+            # route version 11 says which app is in front without reading it, and if it can't say, the app isn't known
+            front = await self.front_app()
+            known = (self.app_names.get(front[0]) or front[0], front[0]) if front is not None else None
+            if known is None:
+                self.app = self.read_app = None
+                self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
+                self.last_tree = tree
+                self._seen_tree(tree)
+                return Snapshot(tree, None, self.scale)
+        self.app = self.read_app = await self._app(known)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
         self._seen_tree(tree)

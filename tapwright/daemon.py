@@ -1864,7 +1864,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             s.session_settings = {**PRESETS[self.preset], **NO_IDLE_WAIT}  # (a session re-created later gets them in ensure)
             await s.settings(s.session_settings)
             self._fps = self._preset_fps()
-            await s.read_scale(refresh=True)  # once per connection, so every header says @3x, not only SpringBoard's
+            # once per connection, so every header says @3x, not only SpringBoard's; (2.0) not asked again when the
+            # session's start had it from the runner's screen route, which doesn't read the app (/wda/screen does)
+            await s.read_scale(refresh=not getattr(s, "scale_by_runner", False))
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
 
     async def _session_again_on_runner(self, s, error: Exception) -> bool:
