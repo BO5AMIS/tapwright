@@ -103,6 +103,9 @@ FROZEN_TOOLS = frozenset({"look", "tap", "long_press", "swipe", "press_button"})
 # (2.0) the touches a {text} target may be found for in the picture's text, on a screen whose elements weren't read
 # (_by_picture_text). Not type_text, toggle or scroll: they act on an element (a field, a switch, a list), not a point.
 TEXT_BY_PICTURE = frozenset({"tap", "long_press"})
+# What _by_picture_text's answers say of a cut-short screen, and what they say instead when the screen was read whole
+# and no element carries the text (2.0.1)
+PICTURE_CUT, PICTURE_WHOLE = "this screen's elements weren't read", "no element of this screen shows it"
 # (2.0) the tools whose gesture the hands play on the touchscreen (not press_button: the buttons are another service),
 # and what an answer says when the hands doubt their touch connection (hands.Hands.judged)
 HANDS_GESTURES = frozenset({"tap", "long_press", "swipe", "scroll", "back", "pinch", "drag", "toggle"})
@@ -4607,6 +4610,22 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 near = self._closest(view, target, str(e)) if tier == "shallow" else None
                 raise Refused("not_found", "\n".join([str(e), *([near] if near else []),
                                                       HINT_NO_ELEMENTS if tier == "root" else HINT_PART_ELEMENTS])) from None
+            if (e.code == "not_found" and target is not None and target.kind == "text" and name in TEXT_BY_PICTURE
+                    and self._ocr_possible()):
+                # (2.0.1) the screen was read whole and no element carries the text: it may still be on the screen
+                # (a canvas, a web view that exposes nothing, a picture with words; seen 2026-11-26 on a sign-in sheet
+                # whose look had just listed the text as an o ref). Looked for in the picture, as on a cut-short screen
+                try:
+                    by_picture = await self._by_picture_text(client_id, view, name, args, target)
+                except Refused as other:
+                    if PICTURE_CUT not in str(other):  # the touch's own refusal (a gate, stale, busy): as it is
+                        raise
+                    # its words and its hint are a cut-short screen's: this one was read whole
+                    said = "\n".join(line for line in str(other).replace(PICTURE_CUT, PICTURE_WHOLE).split("\n")
+                                     if line not in (HINT_NO_ELEMENTS, HINT_PART_ELEMENTS))
+                    raise Refused(other.code, said) from None
+                if by_picture is not None:
+                    return {**by_picture, "text": by_picture["text"].replace(PICTURE_CUT, PICTURE_WHOLE)}
             if e.code == "not_found" and (near := self._closest(view, target, str(e))):
                 raise Refused("not_found", f"{e}\n{near}") from None
             if e.code == "ambiguous" and self._other_app_shown():

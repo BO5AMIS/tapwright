@@ -415,7 +415,7 @@ def _feed_reads(runner, clock=None, reads=2):
 def test_a_moving_screen_read_moments_ago_is_answered_as_root_without_asking_for_the_tree(state):
     runner = _v11()
     s, (first, second) = _feed_reads(runner)
-    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=direct&attrs=lean"]  # the first only
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=xctest"]  # the first only
     assert runner.paths("/wda/tw/front") == ["/wda/tw/front"]
     assert second.tier == "root" and second.items == [] and second.app == ("TikTok", TT)
     assert s.last_tier == "root" and s.last_why.startswith(f"not asked: {TT} is still in front")

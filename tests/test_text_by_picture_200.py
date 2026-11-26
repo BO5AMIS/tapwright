@@ -115,3 +115,44 @@ def test_a_move_of_explore_or_a_repair_is_never_aimed_by_the_picture():
         assert "tap" not in s.calls
         await finish(stop, task)
     run(go)
+
+
+def test_a_text_no_element_carries_is_found_in_the_picture_of_a_screen_read_whole_too():
+    """(2.0.1, seen on a sign-in sheet) The look listed `o4 "Your email address"`, the screen had read whole with no
+    element carrying it, and `tap {"text": ...}` answered not_found."""
+    async def go():
+        s = feed_session(tier="full", text=TABS)
+        d = make(s)
+        stop, task = await started(d)
+        r = await d.run_tool("a", "tap", {"target": {"text": "Friends"}, "screenshot": False})
+        lines = r["text"].splitlines()
+        assert lines[0] == "Tapped (128, 888)." and s.calls.count("tap") == 1
+        assert NOTE.replace("this screen's elements weren't read", "no element of this screen shows it") in lines
+        with pytest.raises(Refused) as e:  # a text the picture doesn't show either: not_found, as before
+            await d.run_tool("a", "tap", {"target": {"text": "Settings"}})
+        assert e.value.code == "not_found" and daemon_module.HINT_NO_ELEMENTS not in str(e.value)
+        with pytest.raises(Refused) as e:  # only tap and long_press: a switch is an element
+            await d.run_tool("a", "toggle", {"target": {"text": "Friends"}})
+        assert e.value.code == "not_found" and s.calls.count("tap") == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_on_a_screen_read_whole_the_refusals_dont_say_its_elements_werent_read():
+    async def go():
+        both = [*TABS, ocr.Seen("Home", (200.0, 500.0, 40.0, 14.0), 1.0)]
+        s = feed_session(tier="full", text=both)
+        d = make(s)
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"text": "Home"}})
+        said = str(e.value)
+        assert e.value.code == "ambiguous" and "no element of this screen shows it" in said and "tap" not in s.calls
+        assert len([line for line in said.splitlines() if line.startswith("o")]) == 2
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"text": "Home", "index": 2}})
+        said = str(e.value)
+        assert e.value.code == "not_found" and "index 2" in said and "weren't read" not in said
+        assert not daemon_module.cut_refusal(e.value)  # (no hint of a screen that wasn't read: it was)
+        await finish(stop, task)
+    run(go)

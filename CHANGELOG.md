@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.1
+
+- A screen that another process draws inside an app lists its elements again: an in-app browser sign-in sheet
+  (`ASWebAuthenticationSession`, `SFSafariViewController`) read as "0 elements" in 2.0.0, where 1.10 listed its fields
+  and buttons. 2.0.0 made every screen read the runner's direct read, which asks the app's own process only. An ordinary
+  read is XCTest's own snapshot again, as in 1.10; the direct read stays for an app whose screen didn't answer in time.
+  A look is about as fast as in 1.10 again (touches stay as fast as in 2.0.0). `TAPWRIGHT_TREE_PATH=lean` reads the
+  2.0.0 way.
+- A tap or long press aimed by `{text}` that no element carries looks for the text in the picture on a screen that was
+  read whole as well (a canvas, a web view that exposes nothing, a picture with words), not only on one whose elements
+  weren't read: a look had listed the text as an `o` ref and `tap {text}` answered `not_found`.
+
 ## 2.0.0 (2026-11-26)
 
 - Faster over USB: Tapwright's requests to the runner on the phone and the live screen stream now go straight through
@@ -64,7 +76,8 @@
 - With the runner at route version 10 or later, a tree read with a budget is the runner's lean direct read (the
   attributes the list uses): faster than XCTest's way on every screen measured, and it keeps to its budget on a screen
   that never answers (`TAPWRIGHT_TREE_PATH=direct|xctest` forces one way; `TAPWRIGHT_TREE_ATTRS=std` turns the lean set
-  off). With route version 9 the normal budget reads the way XCTest does and the short budget the direct way. Touches by
+  off). With route version 9 the normal budget reads the way XCTest does and the short budget the direct way. (2.0.1
+  changed this: see above.) Touches by
   point or `o` ref there aren't refused as `stale` for a picture that keeps moving.
 - Actions on a screen that doesn't answer settle quickly: the answer waits at most 0.5 s for the picture to stand still
   (instead of 2 s), 1 s while that app's tree reads whole, and 2 s after the app was launched, until the screen stands
