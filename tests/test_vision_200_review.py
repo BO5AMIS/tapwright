@@ -260,7 +260,7 @@ def test_a_cut_short_look_aims_typing_at_the_app_it_shows(no_pc_ocr):
         await d.run_tool("a", "look", {"screenshot": False})
         assert d.control.client("a").aimed_app == ("TikTok", TIKTOK)
         r = await d.run_tool("a", "type_text", {"text": "dogs", "screenshot": False})
-        assert r["text"].startswith("Typed 4 characters into the focused field.")
+        assert r["text"].startswith("Typed 4 characters into whatever has the keyboard's focus")
         await finish(stop, task)
     run(go)
 
@@ -492,6 +492,10 @@ def test_the_settle_cap_memory():
     assert caps.cap("a", 2.0) == 2.0
     assert caps.settled("a", capped=True, cut=True)  # capped, still moving, its tree cut short: switched
     assert caps.cap("a", 2.0) == 0.5 and caps.cap("a", 4.0) == 0.5 and caps.cap("a", 0.3) == 0.3
+    # (lead, phone 2026-11-26) while its newest tree is whole the settle is given a second (the elements are read after
+    # it); after its launch two (0.5 s after one the app wasn't up yet)
+    assert caps.cap("a", 2.0, cut=False) == 1.0 and caps.cap("a", 4.0, launch=True) == 2.0 and caps.cap("a", 0.3, cut=False) == 0.3
+    assert caps.cap("b", 2.0, cut=False) == 2.0 and caps.cap("b", 4.0, launch=True) == 4.0
     assert caps.cap("b", 2.0) == 2.0
     assert not caps.settled("a", capped=True, cut=True)  # (already: no second log line)
     # (worker H) it stood still while its screen still doesn't read (a feed between two videos): the short cap stays
@@ -499,8 +503,9 @@ def test_the_settle_cap_memory():
     assert caps.settled("a", capped=False, cut=False)  # it stood still on a screen that reads: the normal cap again
     assert caps.cap("a", 2.0) == 2.0
     caps.settled("a", capped=True, cut=True)
-    assert caps.read_whole("a") and caps.cap("a", 2.0) == 2.0 and not caps.read_whole("a")
-    caps.settled("a", capped=True, cut=True)
+    # (lead, phone 2026-11-26) a whole read alone switches nothing: TikTok's feed reads whole for a moment after a launch
+    # and then not again, and each flip back cost a 2 s settle
+    assert not caps.read_whole("a") and caps.cap("a", 2.0) == 0.5
     caps.forget()
     assert caps.cap("a", 2.0) == 2.0
 
@@ -525,9 +530,9 @@ def test_the_daemons_settle_shortens_on_a_feed_and_comes_back_when_it_stands_sti
         for _ in range(3):  # (the third stood still, but the screen still doesn't read: the short cap stays, worker H)
             await d._settle(0, cap=2.0)
         s.last_tier = "full"  # a whole tree: a still end gives the normal cap back, and capped is only a long animation
-        await d._settle(0, cap=2.0)
+        await d._settle(0, cap=2.0)  # (the tree reads: a second, not half of one)
         await d._settle(0, cap=4.0)
-        assert caps_asked == [2.0, 0.5, 0.5, 0.5, 4.0]
+        assert caps_asked == [2.0, 0.5, 0.5, 1.0, 4.0]
         assert sum("never stands still" in str(x) for x in logged) == 1
         assert sum("stood still" in str(x) for x in logged) == 1
     run(go)

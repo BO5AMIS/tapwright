@@ -100,6 +100,9 @@ OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
 # (2.0) the calls that need no read of the app: while one blocks even the runner's bounded routes (not-answering),
 # Daemon._frozen_tool is where they are answered once hands exist (it answers none yet: refused as in 1.10.0)
 FROZEN_TOOLS = frozenset({"look", "tap", "long_press", "swipe", "press_button"})
+# (2.0) the touches a {text} target may be found for in the picture's text, on a screen whose elements weren't read
+# (_by_picture_text). Not type_text, toggle or scroll: they act on an element (a field, a switch, a list), not a point.
+TEXT_BY_PICTURE = frozenset({"tap", "long_press"})
 # (2.0) TAPWRIGHT_RUNNER_OCR=0: text is read from the picture on this computer only (RapidOCR), never by the runner
 RUNNER_OCR = os.environ.get("TAPWRIGHT_RUNNER_OCR", "1")
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
@@ -4492,8 +4495,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 e.args = (f"{e}\nNote: {taken}",)
             if (e.code == "not_found" and target is not None and target.point is None
                     and (tier := self._tier_now()) != "full"):
-                # (2.0) the screen gave no elements (or only some): say so, and how to reach what it shows; a near
-                # miss among the elements it did give comes first (review R200v L3)
+                # (2.0) the screen gave no elements (or only some): a text is looked for in the picture, as wait_for
+                # looks for it; else say so, and how to reach what the screen shows; a near miss among the elements it
+                # did give comes first (review R200v L3)
+                if target.kind == "text" and name in TEXT_BY_PICTURE:
+                    by_picture = await self._by_picture_text(client_id, view, name, args, target)
+                    if by_picture is not None:
+                        return by_picture
                 near = self._closest(view, target, str(e)) if tier == "shallow" else None
                 raise Refused("not_found", "\n".join([str(e), *([near] if near else []),
                                                       HINT_NO_ELEMENTS if tier == "root" else HINT_PART_ELEMENTS])) from None
@@ -6172,6 +6180,53 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                        "whose elements weren't read gets o refs with any look).")
         return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}
 
+    async def _by_picture_text(self, client_id: str, view, name: str, args: dict, target: ui.Target) -> dict | None:
+        """(2.0) A touch aimed by {text} that no element of a cut-short read carries: the text is looked for in what the
+        picture shows (the same words, or them inside a longer line, as wait_for's _seen_text), and the touch goes to
+        the centre of the line that shows it, as a touch on its o ref would. Lines that are the text itself come before
+        lines that only hold it. Several: `index` picks one in reading order, else the refusal lists them as the o refs
+        of this new reading. None when the picture's text can't be read or doesn't show it: the caller's refusal says
+        how to go on. Never for a move explore or a repair makes itself (their floor reads the element a touch goes
+        to, and a point on a screen with no elements has none)."""
+        if _TOUCH_FLOOR.get() is not None or not self._ocr_possible():
+            return None
+        want = " ".join(str(target.text).casefold().split())
+        if not want:
+            return None
+        try:
+            seen, note = await self._screen_text("accurate", implicit=True)
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - the refusal the caller makes stands
+            self.log(f"text by picture: {type(e).__name__}: {self._redact(str(e))[:160]}")
+            return None
+        if note:
+            return None
+        width, height = self.session.screen
+        top = STATUS_BAR if height > width else 0.0  # (the clock and the battery are the phone's, as in a look's o refs)
+        lines = [(s, " ".join(s.text.casefold().split())) for s in seen if s.rect[1] >= top]
+        hits = [s for s, text in lines if text == want] or [s for s, text in lines if want in text]
+        if not hits:
+            return None
+        said = ui.shown(str(target.text))
+        if target.index is None and len(hits) > 1:
+            view.ocr = {f"o{n}": s.center for n, s in enumerate(hits, 1)}
+            listed = "\n".join(dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(hits, 1))
+            raise Refused("ambiguous", f'{len(hits)} texts in the picture show "{said}" (this screen\'s elements weren\'t '
+                                       f'read, so they are what there is). Touch one by its ref, or add "index" '
+                                       f"(0-based):\n{listed}")
+        if target.index is not None and not 0 <= target.index < len(hits):
+            raise Refused("not_found", f'index {target.index} is past the {len(hits)} text(s) in the picture that show '
+                                       f'"{said}" (this screen\'s elements weren\'t read); look, then pick again.')
+        x, y = hits[target.index or 0].center
+        again = {**{k: v for k, v in args.items() if k != "index"}, "target": {"x": round(x, 1), "y": round(y, 1)}}
+        answer = await self._run_tool_core(client_id, name, again)
+        note = (f'Note: this screen\'s elements weren\'t read; "{said}" was found in the text read from its picture, and '
+                f"the touch {'would go' if args.get('dry_run') else 'went'} to its centre.")
+        lines_out = answer["text"].split("\n")
+        at = next((i for i, line in enumerate(lines_out) if line.startswith("Hint: ")), len(lines_out))
+        return {**answer, "text": "\n".join([*lines_out[:at], note, *lines_out[at:]])}
+
     def _tier_now(self) -> str:
         """How much of the tree the newest read got (Session.last_tier, runner route version 9): "full", "shallow" or
         "root". Always "full" with an older runner."""
@@ -6689,6 +6744,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             try:
                 if launch:
                     keep_crash(await self.run_tool(client_id, "close_app", {"app": bundle}, scope))
+                    # (2.0) the runner is told of the close behind close_app's answer: waited for here, so the launch
+                    # that is measured doesn't wait for it inside its window
+                    await self._closing_done()
                 # the window begins here: what the instruments gave while they were set up, and the app that was
                 # running before a launch, are dropped (the instruments stay ready)
                 await meter.begin_window(fresh=launch)
@@ -7202,11 +7260,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("not_actionable", "no_action: this screen's elements weren't read, so a field "
                                             "can't be cleared. Nothing was typed.")
         await self._last_checks("type_text", a, None, hit=False, police=False)
-        self._dry(a, f"Would type {len(text)} character{'s' if len(text) != 1 else ''} into the focused field (this "
-                     "screen's elements weren't read).")
+        self._dry(a, f"Would type {len(text)} character{'s' if len(text) != 1 else ''} into whatever has the "
+                     "keyboard's focus (this screen's elements weren't read).")
         await self.session.type_text(text, replace=False, submit=submit)
         done = Noted(f"Typed {len(text)} character{'s' if len(text) != 1 else ''}"
-                     + (" and pressed return" if submit else "") + " into the focused field.")
+                     + (" and pressed return" if submit else "") + " into whatever has the keyboard's focus (this "
+                     "screen's elements weren't read, so no field was checked).")
         if a.get("replace", True) and text:
             done.note = ("the field wasn't cleared first: this screen's elements weren't read, so nothing "
                          "could tell what it held.")
@@ -8927,8 +8986,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if caps is None:
             return await self._settle_frames(after_seq, still, cap, since, early)
         read = self._read_bundle()
-        bundle = bundle or read
-        done = await self._settle_frames(after_seq, still, caps.cap(bundle, cap), since, early)
+        launch, bundle = bundle is not None, bundle or read
+        # (the newest tree says whether the app's screen reads; one of another app says nothing: cut, the short cap)
+        reads = bundle == read and self._tier_now() == "full"
+        done = await self._settle_frames(after_seq, still, caps.cap(bundle, cap, cut=not reads, launch=launch), since, early)
         if (done.still or done.capped) and bundle == read:
             cut = self._tier_now() != "full"
             if caps.settled(bundle, done.capped, cut, done.seconds):

@@ -155,11 +155,12 @@ def test_a_screen_that_doesnt_answer_comes_back_as_root_and_its_app_gets_the_sho
     assert s.last_compact is None  # a cut-short tree is no baseline for "unchanged"
     asyncio.run(s.refresh())
     assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=xctest", "/wda/tw/tree?budget=1500&path=direct"]
-    # the app answers whole again (its profile reads in 0.2 s): the normal budget comes back at once
+    # the app answers whole again (its profile reads in 0.2 s): the short budget was enough for that, and it stays (a
+    # feed that reads whole for a moment and then not again paid the normal budget at every flip, phone 2026-11-26)
     runner.trees = [{"token": "f1", "tree": _app(children=[BUTTON]), "tier": "full", "truncated": False}]
     asyncio.run(s.refresh())
     asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree")[-2:] == ["/wda/tw/tree?budget=1500&path=direct", "/wda/tw/tree?budget=3000&path=xctest&since=f1"]
+    assert runner.paths("/wda/tw/tree")[-2:] == ["/wda/tw/tree?budget=1500&path=direct", "/wda/tw/tree?budget=1500&path=direct&since=f1"]
 
 
 def test_a_short_budget_meant_for_another_app_is_read_again_with_the_normal_one(state):
@@ -228,6 +229,11 @@ def test_the_budget_memory():
     assert b.budget("a") == 600
     b.answered("a", False, 600)  # it answered whole: the normal budget at once
     assert b.budget("a") == 3000
+    b.answered("a", True, 3000)
+    b.answered("a", False, 600, took_ms=200)  # whole within the short budget: that says nothing of the screens that
+    assert b.budget("a") == 600               # didn't answer, and the short budget was enough for this one
+    b.answered("a", False, 3000, took_ms=2100)  # whole, but only after more than the short budget: it is slow to read,
+    assert b.budget("a") == 3000                # and gets the time it needs
     b.answered(None, True, 3000)  # (no app named: nothing kept)
     b.answered("c", True, 3000)
     b.forget()
@@ -408,7 +414,8 @@ def test_targets_by_name_on_a_screen_with_no_elements_say_how_to_reach_it(no_pc_
         d = make(s)
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
-        for target in ({"text": "For You"}, {"label": "Like"}, {"id": "like-button"}, {"ref": "e3"}):
+        # (a text the picture shows is found there: test_text_by_picture_200; one it doesn't show is not_found as before)
+        for target in ({"text": "Nowhere"}, {"label": "Like"}, {"id": "like-button"}, {"ref": "e3"}):
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", "tap", {"target": target})
             assert e.value.code == "not_found" and daemon_module.HINT_NO_ELEMENTS in str(e.value), target
@@ -443,7 +450,8 @@ def test_typing_without_a_target_goes_to_the_focused_field(no_pc_ocr):
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         r = await d.run_tool("a", "type_text", {"text": "dogs", "submit": True, "screenshot": False})
-        assert r["text"].startswith("Typed 4 characters and pressed return into the focused field.")
+        assert r["text"].startswith("Typed 4 characters and pressed return into whatever has the keyboard's focus (this "
+                                    "screen's elements weren't read, so no field was checked).")
         assert s.typed == [("dogs", False, True, None)]  # never cleared: nothing can say what the field held
         r = await d.run_tool("a", "type_text", {"text": "cats", "screenshot": False})
         assert "the field wasn't cleared first" in r["text"]

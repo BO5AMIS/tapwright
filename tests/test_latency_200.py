@@ -241,3 +241,54 @@ def test_an_app_opened_again_after_a_close_app_is_watched_for_crashes_again():
         assert d.session.device.crash_asks > before and d._crash_pending  # looked for, and looked for again later
         await finish(stop, task)
     run(go)
+
+
+# ---- a read 0.5 s after a launch: the app isn't up yet ----
+
+def test_a_read_the_runner_gave_up_at_once_is_asked_again_within_its_budget(monkeypatch):
+    """Seen on the phone: TikTok read 0.5 s after its launch answered `root` in 8 ms (kAXErrorServerNotFound: no app to
+    ask yet). It was taken for a screen that doesn't answer: the short budget, and its next reads left unasked."""
+    from test_vision_200 import BUTTON, TIKTOK, V9Runner, _app
+
+    monkeypatch.setattr(session_module, "RETRY_GAP", 0.01)
+    runner = V9Runner()
+    quick = {"token": "r1", "tree": _app(), "tier": "root", "truncated": True,
+             "why": "full: Error getting main window kAXErrorServerNotFound (after 8 ms); shallow: Error getting main "
+                    "window kAXErrorServerNotFound (after 3 ms)"}
+    whole = {"token": "f1", "tree": _app(children=[BUTTON]), "tier": "full", "truncated": False}
+    runner.trees = [quick, quick, whole]
+    s = Session(runner)
+    s.read_app = ("TikTok", TIKTOK)
+    tree = asyncio.run(s.refresh())
+    assert tree.tier == "full" and len(tree.items) == 1
+    asked = [int(p.split("budget=")[1].split("&")[0]) for p in runner.paths("/wda/tw/tree")]
+    assert len(asked) == 3 and asked[0] == 3000 and 2000 < asked[2] < asked[1] < 3000  # what is left of the budget
+    assert not s.budgets.short(TIKTOK)  # the app is not one that doesn't answer
+
+
+def test_a_read_that_used_its_budget_is_not_asked_again(monkeypatch):
+    from test_vision_200 import TIKTOK, V9Runner, _app
+
+    runner = V9Runner()
+    runner.trees = [{"token": "r1", "tree": _app(), "tier": "root", "truncated": True,
+                     "why": "full: Error kAXErrorIPCTimeout getting snapshot (after 1807 ms); shallow: Error getting "
+                            "main window kAXErrorIPCTimeout (after 901 ms)"}]
+    s = Session(runner)
+    s.read_app = ("TikTok", TIKTOK)
+    assert asyncio.run(s.refresh()).tier == "root" and len(runner.paths("/wda/tw/tree")) == 1
+    assert s.budgets.short(TIKTOK)
+
+
+def test_quick_give_ups_that_use_the_whole_budget_end_as_a_cut_read(monkeypatch):
+    """An app that never has anything to answer with costs one budget, not a wait without end; then the short one."""
+    from test_vision_200 import TIKTOK, V9Runner, _app
+
+    monkeypatch.setattr(session_module, "RETRY_GAP", 0.0)
+    monkeypatch.setattr(session_module, "RETRY_MIN_MS", 2998)  # (the fake answers at once: two more asks, then too little is left)
+    runner = V9Runner()
+    runner.trees = [{"token": "r1", "tree": _app(), "tier": "root", "truncated": True,
+                     "why": "full: Error getting main window kAXErrorServerNotFound (after 8 ms)"}]
+    s = Session(runner)
+    s.read_app = ("TikTok", TIKTOK)
+    assert asyncio.run(s.refresh()).tier == "root"
+    assert len(runner.paths("/wda/tw/tree")) == 3 and s.budgets.short(TIKTOK)  # kept under the budget first asked

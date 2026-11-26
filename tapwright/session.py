@@ -157,6 +157,19 @@ TREE_BUDGET_MS = int(_env_float("TAPWRIGHT_TREE_BUDGET", 3000))  # ms a tree rea
 # for `root`: at 600 ms nearly every read came back `root`, even of a screen that reads whole in 0.4 s (the home screen's
 # tree took 0.4 s in Phase 0). 1500 ms leaves `full` about 0.9 s and room for `shallow`.
 SHORT_BUDGET_MS = 1500
+QUICK_CUT = 0.25  # a read that comes back with no elements in under this part of its budget wasn't kept waiting by the
+#                   app: the app had nothing to answer with yet. It is asked again, RETRY_GAP seconds later, while at
+#                   least RETRY_MIN_MS of the budget is left
+RETRY_GAP = 0.25
+RETRY_MIN_MS = 300
+_AFTER_MS = re.compile(r"\(after (\d+) ms\)")
+
+
+def _gave_up_ms(why: str) -> float | None:
+    """How long the runner says it tried before it gave a read up: the sum of its `why`'s "(after N ms)" (one for each
+    tier it tried). None when it doesn't say: nothing is concluded then."""
+    found = _AFTER_MS.findall(why or "")
+    return float(sum(int(n) for n in found)) if found else None
 BUDGET_MEMORY = 20.0  # seconds a cut-short read keeps its app on the short budget
 # (2.0) how the runner reads a tree (RUNNER-V9-PROTOCOL §1 `path`). Measured on the phone (lead, 2026-11-26): `direct`
 # keeps to its budget on TikTok's feed (1500 ms -> 1.43 s) where `xctest` takes 2.9-3.9 s whatever the budget, but on
@@ -196,8 +209,11 @@ class ReadBudget:
     """How long the runner may spend on a tree read of an app (route version 9's `budget`). A screen that never answers
     in time (TikTok's For You feed: a read of one element takes 14 s) would otherwise cost the whole budget on every
     look and every action. So, per bundle id: when a read with the normal budget came back truncated, that app's reads
-    use the short budget for BUDGET_MEMORY seconds; a read that comes back full gives it the normal budget again at
-    once. A truncated answer to a short-budget read doesn't renew the time: once it runs out, one read with the normal
+    use the short budget for BUDGET_MEMORY seconds; a read that comes back full after more than the short budget gives
+    it the normal budget again at once (the screen is only slow to read). A full read the short budget would have
+    covered changes nothing: a feed that reads whole for a moment after a launch and then not again (TikTok's, phone
+    2026-11-26) paid the whole normal budget at every flip.
+    A truncated answer to a short-budget read doesn't renew the time: once it runs out, one read with the normal
     budget asks again (a screen that is only slow to read gets its whole tree back within BUDGET_MEMORY seconds).
     A screen that is still (the caller's `still`: the stream's pictures show nothing moving) gets the normal budget even
     then: a playing feed is never still, and a still screen of the same app (a profile, a settings page) is usually one
@@ -247,12 +263,13 @@ class ReadBudget:
     def short(self, bundle: str | None) -> bool:
         return self.budget(bundle) < self.normal_ms
 
-    def answered(self, bundle: str | None, truncated: bool, budget_ms: int) -> None:
-        """A read of `bundle` with `budget_ms` came back truncated or full."""
+    def answered(self, bundle: str | None, truncated: bool, budget_ms: int, took_ms: float | None = None) -> None:
+        """A read of `bundle` with `budget_ms` came back truncated or full, after `took_ms` (None: not timed)."""
         if bundle is None:
             return
         if not truncated:
-            self._cut.pop(bundle, None)
+            if took_ms is None or took_ms >= self.short_ms:
+                self._cut.pop(bundle, None)
         elif budget_ms >= self.normal_ms:
             self._cut[bundle] = self.clock()
 
@@ -262,6 +279,9 @@ class ReadBudget:
 
 
 SHORT_SETTLE = 0.5  # seconds an action's settle may wait on a screen that never stands still (SettleCap)
+READABLE_SETTLE = 1.0  # the same while that app's newest tree is whole: its elements are read after it, and a tree read
+#                        in the middle of a page's push lists both pages (a push takes 0.35-0.5 s; a video hides its end)
+LAUNCH_SETTLE = 2.0  # the same after its launch: 0.5 s after one the app wasn't up yet (phone, 2026-11-26)
 
 
 class SettleCap:
@@ -277,13 +297,17 @@ class SettleCap:
     counted, while a still end cleared the memory again. Now a settle still moving at `short` seconds counts (the short
     cap would have ended it there), and a still end on a screen that still doesn't read keeps the short cap."""
 
-    def __init__(self, short: float = SHORT_SETTLE) -> None:
-        self.short = short
+    def __init__(self, short: float = SHORT_SETTLE, readable: float = READABLE_SETTLE,
+                 launch: float = LAUNCH_SETTLE) -> None:
+        self.short, self.readable, self.launch = short, readable, launch
         self._restless: set[str] = set()
 
-    def cap(self, bundle: str | None, cap: float) -> float:
-        """The cap for a settle of `bundle`'s screen whose normal cap is `cap`."""
-        return min(cap, self.short) if bundle is not None and bundle in self._restless else cap
+    def cap(self, bundle: str | None, cap: float, cut: bool = True, launch: bool = False) -> float:
+        """The cap for a settle of `bundle`'s screen whose normal cap is `cap`. `cut`: the app's newest tree was cut
+        short (False: it reads, and the settle is given `readable` seconds). `launch`: the settle after its launch."""
+        if bundle is None or bundle not in self._restless:
+            return cap
+        return min(cap, self.launch if launch else self.short if cut else self.readable)
 
     def settled(self, bundle: str | None, capped: bool, cut: bool, seconds: float = 0.0) -> bool:
         """A settle of `bundle` ended after `seconds`: by its cap with frames still changing (`capped`), else on frames
@@ -301,10 +325,9 @@ class SettleCap:
         return False
 
     def read_whole(self, bundle: str | None) -> bool:
-        """A read of `bundle` came back whole: the normal cap again. True when it switched."""
-        if bundle is not None and bundle in self._restless:
-            self._restless.discard(bundle)
-            return True
+        """A read of `bundle` came back whole. Nothing switches (False): its feed may read whole for a moment and then
+        not again (TikTok's after a launch, phone 2026-11-26), and each flip back to the normal cap cost a 2 s settle.
+        The cap is `readable` while the tree is whole (cap), and the normal one again once a settle ends still."""
         return False
 
     def restless(self, bundle: str | None) -> bool:
@@ -882,7 +905,7 @@ class Session:
 
     async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None,
                             budget_for: str | None = None, remember: bool = True,
-                            read_path: str | None = None) -> str | None:
+                            read_path: str | None = None, budget_asked: int | None = None) -> str | None:
         """The tree through the fork's compact read (TREE_PATH), as the XML /source would have sent; None when it
         can't be had that way (the caller reads /source). A dropped line or a frozen app is raised as from /source.
         `since`: send the last read's token, so an unchanged screen comes back as "unchanged" without the tree.
@@ -890,7 +913,8 @@ class Session:
         how much (`tier`); a cut-short answer is kept as `last_tier`, never as the token an "unchanged" reuses.
         `budget_for`: the app the budget was chosen for, which the answer is kept under when its root names none.
         `remember` False: the answer feeds no budget memory (Notification Center's read). `read_path`: the runner's way
-        of reading (`direct` or `xctest`, tree_path), sent with a budget."""
+        of reading (`direct` or `xctest`, tree_path), sent with a budget. `budget_asked`: the budget the caller chose,
+        when this read is one asked again within it (QUICK_CUT) and has what is left of it."""
         last = self.last_compact if since else None
         # (route version 10) the direct read asking only for the attributes the list uses is the fastest way on every
         # screen measured (lead, phone, 2026-11-26: Settings > General 543 ms against 942 by xctest and 1269 by direct
@@ -905,6 +929,7 @@ class Session:
                  *(["attrs=lean"] if lean else []),
                  *([f"since={last[0]}"] if last else [])]
         path = TREE_PATH + ("?" + "&".join(query) if query else "")
+        began = time.monotonic()
         try:
             value = (await self._call("GET", path, timeout=min(timeout, READ_CUT))).get("value")
         except ConnectionLost:
@@ -939,11 +964,24 @@ class Session:
         why = value.get("why")
         self.last_tier, self.last_why = tier, why if isinstance(why, str) else ""
         if budget_ms is not None:
-            if remember:
-                self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_ms)
-                if tier == "full" and self.settles.read_whole(_root_bundle(source) or budget_for):
+            took_ms = (time.monotonic() - began) * 1000
+            left = int(budget_ms - took_ms - RETRY_GAP * 1000)
+            gave_up = _gave_up_ms(self.last_why)
+            if tier == "root" and gave_up is not None and gave_up < QUICK_CUT * budget_ms and left >= RETRY_MIN_MS:
+                # the runner gave the read up long before its budget: the app didn't keep it waiting, it had nothing to
+                # answer with yet (0.5 s after a launch: kAXErrorServerNotFound after 8 ms). Asked again within what is
+                # left of the budget, so an app that is only starting isn't taken for one that doesn't answer.
+                if TRACE:
                     getattr(self.device, "log", lambda *a: None)(
-                        f"{_root_bundle(source) or budget_for} read whole again: actions settle with the normal cap")
+                        f"trace tree read given up after {gave_up:.0f} ms of {budget_ms}: asked again"
+                        f"{': ' + self.last_why[:120] if self.last_why else ''}")
+                await asyncio.sleep(RETRY_GAP)
+                return await self._compact_tree(timeout, since=False, budget_ms=left, budget_for=budget_for,
+                                                remember=remember, read_path=read_path,
+                                                budget_asked=budget_asked or budget_ms)
+            if remember:
+                self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_asked or budget_ms,
+                                      took_ms)
             if tier != "full":
                 getattr(self.device, "log", lambda *a: None)(
                     f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")
