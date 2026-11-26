@@ -400,7 +400,9 @@ def pinch_spread(x: float, y: float, scale: float, screen: tuple[float, float]) 
     ratio = max(scale, 1 / scale)
     wide = min(PINCH_GAP / 2 * ratio, room)
     narrow = min(PINCH_GAP / 2, wide / ratio)
-    if wide - narrow < PINCH_MOVE_MIN:
+    # (review N-M1) what the scale itself asks for is never too little: only the edge's cap can be. A scale of 1.1
+    # in the middle of the screen moves each finger 3 points, and was refused as "too near the edge"
+    if wide - narrow < min(PINCH_MOVE_MIN, PINCH_GAP / 2 * (ratio - 1)) - 1e-9:
         raise Refused("bad_params", f"({x:g}, {y:g}) is too near the screen's edge for a pinch's two fingers to move; "
                                     "pinch farther from it. Nothing was touched.")
     return (narrow, wide) if scale >= 1 else (wide, narrow)

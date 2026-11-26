@@ -52,7 +52,7 @@ React Native app from the inside**, through a small SDK in the app.
 ## You need
 
 - An iPhone on iOS 17 or later, and a USB cable for the one-time setup. Touches from the computer (the
-  "hands" of 2.0) need iOS 18 or later; on iOS 17 they go through the runner, as before. Tapwright installs
+  "hands" of 2.0) need iOS 18 to 26 (iOS 27 comes with a later release); on iOS 17 they go through the runner, as before. Tapwright installs
   pymobiledevice3 11.63 or later by itself.
 - A computer with Python 3.10+. On Windows, install **Apple Devices** from the Microsoft
   Store (it provides the USB connection); on Linux, `usbmuxd`.
@@ -133,11 +133,11 @@ repository too.
 | `look` | the screen: every visible element (role, text, id, position in points, what you can do with it) and a screenshot; `ocr: true` also reads the text in the picture that no element carries (games, canvases, web views), as refs `o1`, `o2` a touch can take until your next action (the phone reads them with Apple's Vision; `pip install "tapwright[ocr]"`, about 300 MB, is the fallback on the computer's CPU, about 1.5 s). A screen that doesn't answer in time says `Elements: none` or `Elements: partly read` and lists them by itself |
 | `tap`, `long_press`, `toggle` | by element `{id}` (`testID`/accessibility identifier), `{label}`, `{text}`, `{ref}` from the last list, or `{x, y}`; on a screen whose elements weren't read, `tap` and `long_press` also take an `o` ref, or a `{text}` found in the picture |
 | `type_text` | into a field (clearing it first by default, or pressing return after) |
-| `pinch` | two fingers spread (`scale` above 1) or pinched (below 1) about a point, to zoom a photo or a map; needs touches from the computer (iOS 18 or later) |
+| `pinch` | two fingers spread (`scale` above 1) or pinched (below 1) about a point, to zoom a photo or a map; needs touches from the computer (iOS 18 to 26) |
 | `scroll`, `swipe`, `back` | lists and pages, to the start, the end, or straight to an element; drags between points; up one screen (an open sheet closes first) |
 | `wait`, `wait_for` | a fixed delay, or until some text, id or label shows up or goes |
 | `alert` | accept, dismiss or read permitted alerts; `action: "cancel"` explicitly presses a verified Cancel button to recover from a system obstruction when the owner requests it, without showing private alert content |
-| `press_button` | home, lock, volume (`lock` needs touches from the computer, iOS 18 or later) |
+| `press_button` | home, lock, volume (`lock` needs touches from the computer, iOS 18 to 26) |
 | `rotate` | turn the phone to portrait or either landscape side, to test an app's landscape layout |
 | `network` | make the whole phone's network `offline`, `3g` or `lossy` (Apple's developer network conditions) to see an app's errors and loading states, or `normal` to restore it; every answer says the condition while it is on, and it ends with the session (or after 10 minutes without a call from the agent that set it, or 30 minutes at most). Over Wi-Fi only `3g` and `normal` (the other two would cut Tapwright's own link) |
 | `open_url` | deep links |

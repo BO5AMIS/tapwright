@@ -6467,7 +6467,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if self.frame_private(frame):
                 raise Refused("busy", UNLOCK_BUSY)
             picture = await jpeg_of(frame)
+            if getattr(frame, "picture", None) is None:
+                # (review N-M2) landscape: the stream's frame comes as captured (portrait). Read as it was, its text's
+                # places were transposed, and an o ref or a {text} touch went there. None while the side isn't known:
+                # the phone's own picture is read instead
+                picture = await self._upright(frame.seq, picture)
         else:
+            picture = None
+        if picture is None:
             picture = await self._phone_picture()  # (full size: this computer's OCR reads it)
             if self.unlocked_since(asked):
                 raise Refused("busy", UNLOCK_BUSY)

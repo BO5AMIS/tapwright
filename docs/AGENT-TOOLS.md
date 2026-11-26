@@ -48,7 +48,7 @@ Every accessibility read is bounded (runner route version 9 or later; `tapwright
 
 ### A screen whose elements weren't read
 
-A video feed (TikTok's For You), a game, a canvas or some web views may not answer in time. The look header then says `Elements: none (the screen's elements weren't read within the time given)` or `Elements: partly read (…)`, lists the elements it did get, and adds the text in the picture as `o1`, `o2`… refs (`ocr: false` leaves them out), with the picture. An `o` ref lasts until your next action: look again for fresh ones.
+A video feed (TikTok's For You), a game, a canvas or some web views may not answer in time. The look header then says `Elements: none (the screen's elements weren't read within the time given)` or `Elements: partly read (…)`, lists the elements it did get, and adds the text in the picture as `o1`, `o2`… refs (`ocr: false` leaves them out), with the picture. An `o` ref lasts until your next action, or until someone else (a person, another agent) uses the phone (then it answers `stale`: look again): look again for fresh ones.
 
 What to do there:
 - Touch an `o` ref, a point `{x, y}` or a `{text}`. `tap` and `long_press` aimed by `{text}` find it in the picture's text and touch the centre of the line that shows it. Several lines show it: `ambiguous`, listing them as `o` refs, or pick one with `index`. The answer says where the text was found.
@@ -72,7 +72,7 @@ What to do there:
 ### look
 
 Read the current screen: one line per element (ref, role, text, id, position and size in points, actions), plus a screenshot. `screenshot` (default true), `width` (160-1320 px, default 600) and `labels` (draw each actionable element's box and ref) shape the picture. Answers the full list, starting with a header. Long text is cut; `wait_for` with the text checks all of it.
-Tapwright: reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note. A screen that doesn't answer accessibility reads in time (a video feed, a game) says `Elements: none` or `Elements: partly read` in the header and lists the text in its picture that way by itself (`ocr: false` leaves it out); touch an `o` ref, a point or a `{text}` there, and actions on it answer with the picture after them. An `o` ref ends with your next action. An id, label or `e` ref is `not_found` there, and `audit` and `ux_check` are `unsupported`: see "A screen whose elements weren't read" above.
+Tapwright: reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note. A screen that doesn't answer accessibility reads in time (a video feed, a game) says `Elements: none` or `Elements: partly read` in the header and lists the text in its picture that way by itself (`ocr: false` leaves it out); touch an `o` ref, a point or a `{text}` there, and actions on it answer with the picture after them. An `o` ref ends with your next action, or with anyone else's (`stale`). An id, label or `e` ref is `not_found` there, and `audit` and `ux_check` are `unsupported`: see "A screen whose elements weren't read" above.
 
 Arguments: `screenshot`, `width`, `labels`, `ocr`.
 
@@ -295,7 +295,7 @@ Arguments: `x0`, `y0`, `x1`, `y1`, `seconds`, `look`, `screenshot`, `dry_run`, `
 
 ### pinch
 
-Tapwright 2.0 only. Pinch or spread two fingers about a point (`x`, `y`, in points), as on a photo or a map: `scale` above 1 spreads them to zoom in (2 = twice as far apart), below 1 pinches them to zoom out (0.2 to 5, not 1); `seconds` is how long the fingers move (0.1 to 3, default 0.5). The fingers lie on the horizontal line through the point, 60 points apart at the narrow end, and stay 10 points inside the screen's edges, so near an edge they spread less than asked. Needs touches through CoreDevice HID (iOS 18 to 26 today): `unsupported` otherwise, with nothing touched. Not listed with `--no-hints` or `--lazy-tools` (1.8.5's tools); the daemon takes it from any caller.
+Tapwright 2.0 only. Pinch or spread two fingers about a point (`x`, `y`, in points), as on a photo or a map: `scale` above 1 spreads them to zoom in (2 = twice as far apart), below 1 pinches them to zoom out (0.2 to 5, not 1); `seconds` is how long the fingers move (0.1 to 3, default 0.5). The fingers lie on the horizontal line through the point, 60 points apart at the narrow end, and stay 10 points inside the screen's edges, so near an edge they are closer together and move less than asked; at a point so near an edge that they could not move at all, the call answers `bad_params` and nothing is touched. Needs touches through CoreDevice HID (iOS 18 to 26 today): `unsupported` otherwise, with nothing touched. Not listed with `--no-hints` or `--lazy-tools` (1.8.5's tools); the daemon takes it from any caller.
 
 Arguments: `x`, `y`, `scale`, `seconds`, `look`, `screenshot`, `brief`.
 
