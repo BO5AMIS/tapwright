@@ -1432,7 +1432,7 @@ def test_an_action_settles_from_the_frames_since_its_gesture_went_out():
         seen = {}
         original = d._settle
 
-        async def settle(after_seq, still=None, cap=daemon_module.CAP, since=None, early=None):
+        async def settle(after_seq, still=None, cap=daemon_module.CAP, since=None, early=None, expect=None):
             seen["early"], seen["cap"] = early, cap
             return await original(after_seq, still, cap, since, early)
         d._settle = settle
@@ -2359,8 +2359,8 @@ def test_open_app_with_launch_arguments_ends_a_running_app_the_fast_way_too(monk
 
 
 
-NOTE_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
-                "report it as a finding.")
+NOTE_LOADING = ("The app may still be on its way: look, or wait_for what you expect, next; only if the screen is still "
+                "the same, try the touch again, and if that changes nothing either, report it as a finding.")
 NOTE_FIELD = "It is a text field: type_text types into it."
 NOTE_POINT = "No element is at that point."
 
@@ -3150,7 +3150,7 @@ def _recording_settles(d):
     """Replace the settle: the caps it was asked for, in order."""
     caps = []
 
-    async def settle(after_seq, still=None, cap=daemon_module.CAP, since=None, early=None):
+    async def settle(after_seq, still=None, cap=daemon_module.CAP, since=None, early=None, expect=None):
         caps.append(cap)
         return daemon_module.Settled(0.0, True, False)
     d._settle = settle

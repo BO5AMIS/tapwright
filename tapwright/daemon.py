@@ -152,6 +152,15 @@ HANDS_FRESH = 1.5  # seconds after a hands touch ended within which a settle is 
 # highlight (0.11 s) read the tree mid-transition: right after a back, `tap {"label": "General"}` found the outgoing
 # page's title too ("2 elements match"). The stillness after a highlight is about 0.1-0.2 s; 0.35 s lets the push start.
 HANDS_SETTLE_MIN = 0.35
+# (2.0.3, phone 2026-11-26) how long after a touch aimed at an element that has an action (a tap, long press or toggle
+# on a button, a row, a switch, by ref, id, label or text) the screen may stay as it was before "No visible change." is
+# believed, counted from the touch. Since 2.0 a tap takes about 0.1 s (3 s in 1.10, which hid it), and a React Native
+# app started its navigation a few hundred ms after the settle had answered "nothing changed" (0.38 s): twice in one
+# sweep, and the note then said "try once more", so a second tap would land on the new screen. A change that starts
+# within the wait is settled as any other. Not for a point, an o ref or a picture text (often nothing there acts), nor
+# a scroll, swipe or drag, nor an app whose screen never stands still (its short cap: SettleCap).
+EXPECT_CHANGE_WAIT = 1.5
+EXPECT_TOOLS = ("tap", "long_press", "toggle")
 NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or video); "
                "positions may be mid-change.")
 
@@ -651,8 +660,10 @@ HEALTH_TICK = 0.5  # seconds between the reads that see whether the Health sheet
 NOTE_DELIVERED = "the {touch} was delivered, and nothing on screen changed within {seconds:.1f} s. {hint}"
 HINT_FIELD = "It is a text field: type_text types into it."
 HINT_BARE_POINT = "No element is at that point."
-HINT_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
-                "report it as a finding.")
+# (2.0.3) never "try once more" first: an app that answers late shows its next screen after the note, and a second
+# touch then lands on that screen. A look or a wait_for comes first; only a screen still the same earns the touch again.
+HINT_LOADING = ("The app may still be on its way: look, or wait_for what you expect, next; only if the screen is still "
+                "the same, try the touch again, and if that changes nothing either, report it as a finding.")
 DELIVERED_TOOLS = ("tap", "long_press")
 
 
@@ -1388,6 +1399,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                  stream_linger: float = 30.0, stream_retry: float = 1.0, settle_still: float = STILL,
                  settle_first_frame: float = 1.0, settle_fallback: float = 0.6,
                  settle_quiet: float = MIN_QUIET, shot_wait: float = 1.0, shot_fresh: float = 1.0,
+                 settle_expect: float | None = None,
                  pace_tick: float | None = PACE_TICK, pace_quiet: tuple[float, float, float] = PACE_QUIET,
                  actions: ActionLog | None = None, audit: "auditlog.AuditLog | None" = None,
                  grant_clock: "Callable[[], datetime.datetime] | None" = None) -> None:
@@ -1444,11 +1456,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self.unsettled = False  # the last action returned without a settle: the screen may still be moving, for every client
         # (2.0, worker I) that action's settle, owed: (the stream's (seq, frame) as its gesture went out, its cap, when it
         # returned (monotonic)); None when unknown (a timeout). See _settle_unsettled.
-        self.unsettled_from: tuple[tuple[int, Frame | None], float, float] | None = None
+        # (the mark as the gesture went out, the settle's cap, when the call returned, when a change stops being
+        # expected: EXPECT_CHANGE_WAIT, or None)
+        self.unsettled_from: tuple[tuple[int, Frame | None], float, float, float | None] | None = None
         # settle: how long a still screen is quiet, how long to wait for a first frame, and the
         # blind sleep used when the stream gives no frames at all
         self.settle_still, self.settle_first_frame, self.settle_fallback = settle_still, settle_first_frame, settle_fallback
         self.settle_quiet = settle_quiet
+        # EXPECT_CHANGE_WAIT; None: it, unless the quiet span was shortened (a test's daemon: as HANDS_QUIET)
+        self.settle_expect = ((EXPECT_CHANGE_WAIT if settle_quiet >= MIN_QUIET else 0.0) if settle_expect is None
+                              else settle_expect)
         self.control = control or Controller()
         self.hub = FrameHub()
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
@@ -4575,6 +4592,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
             if name in DELIVERED_TOOLS and not dry:
                 box["hint"] = self._delivered_hint(args)  # what the touch was aimed at, as the list had it
+            # (2.0.3) until when "nothing changed" isn't believed yet: a touch at an element that acts (EXPECT_CHANGE_WAIT)
+            box["expect"] = box["began"] + self.settle_expect if not dry and self._expects_change(name, args) else None
             if scoped is not None:
                 # the newest read is the one the touch is aimed from (a keyboard closed or a scroll on the way read
                 # again): it names a given app, or nothing is asked of a person and nothing is touched (Codex, PR #9
@@ -4776,7 +4795,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if not reads_only:
             self.unsettled = not looks
             self.unsettled_from = (None if looks or "mark" not in box
-                                   else (box["mark"], settle or RESOLVE_SETTLE, time.monotonic()))
+                                   else (box["mark"], settle or RESOLVE_SETTLE, time.monotonic(), box.get("expect")))
         said_done = self._redact(str(result))  # (before element_name and the caption cut it, §18.6)
         self._announce("agent", name, label=element_name(said_done), caption=step_caption(name, said_done, args),
                        point=self._point(self.session.last_point))
@@ -4825,7 +4844,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         else:
             # (a launch settles with the launched app's cap: one known never to stand still waits SHORT_SETTLE)
             done = await self._settle(self._mark()[0], cap=settle, since=mark[1],
-                                      early=mark[0] if settle == CAP else None,
+                                      early=mark[0] if settle == CAP else None, expect=box.get("expect"),
                                       **({"bundle": self._opened} if name == "open_app" else {}))
         trace.settled()
         if session_module.TRACE:
@@ -9480,11 +9499,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             if owed is None or owed[0][1] is None:  # (a timeout, or no stream as the gesture went out: as before)
                 return await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
-            (seq, before), cap, returned = owed
+            (seq, before), cap, returned, expect = owed
             ago = time.monotonic() - returned
-            if ago >= HANDS_QUIET and self._proven_still(noted=False):
+            if (ago >= HANDS_QUIET and (expect is None or time.monotonic() >= expect)
+                    and self._proven_still(noted=False)):
                 return Settled(0.0, False, False, True)
-            return await self._settle(self._mark()[0], cap=max(RESOLVE_SETTLE, cap - ago), since=before, early=seq)
+            # (2.0.3) a `look: false` tap on a button: the next call doesn't act on the old screen before
+            # EXPECT_CHANGE_WAIT has passed with nothing changed (a navigation that starts late)
+            return await self._settle(self._mark()[0], cap=max(RESOLVE_SETTLE, cap - ago), since=before, early=seq,
+                                      expect=expect)
         finally:
             self.unsettled = False
 
@@ -9557,6 +9580,20 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 f"the time given{picture}, so whether it did isn't known. Look (the text in the picture comes as o "
                 "refs), then wait for a text, or touch an o ref or a point.")
 
+    def _expects_change(self, name: str, a: dict) -> bool:
+        """(2.0.3) Is this a touch the app is expected to answer, so "nothing changed" waits EXPECT_CHANGE_WAIT? A tap,
+        long press or toggle aimed at an element of the agent's list that has an action. Not a point, an o ref (a point
+        by then) or a picture text (not in the list), nor an element that does nothing (a static text)."""
+        target = a.get("target")
+        if (name not in EXPECT_TOOLS or self.settle_expect <= 0 or not isinstance(target, ui.Target)
+                or target.point is not None or _PICTURE_TEXT.get() or _PICTURE_AIM.get() is not None):
+            return False
+        try:
+            found = ui.resolve(self.session.items, target)
+        except Refused:
+            return False
+        return not isinstance(found, tuple) and bool(found.actions)
+
     async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                      since: Frame | None = None, early: int | None = None) -> tuple[float, bool]:
         """(seconds waited, changed): see _settle."""
@@ -9564,19 +9601,23 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return done.seconds, done.changed
 
     async def _settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
-                      since: Frame | None = None, early: int | None = None, bundle: str | None = None) -> Settled:
+                      since: Frame | None = None, early: int | None = None, bundle: str | None = None,
+                      expect: float | None = None) -> Settled:
         """_settle_frames, with the cap of a screen that never stands still (Session.settles, SettleCap): shorter while
         the app in front is known for it, and learned from how this settle ends. `bundle`: the app whose screen this is
         when the newest read isn't of it (open_app's launch settle: the app launched, known for it from an earlier
-        visit); a settle is learned from only when the newest read is of that app (its tier says whether it reads)."""
+        visit); a settle is learned from only when the newest read is of that app (its tier says whether it reads).
+        `expect`: (time.monotonic) until when unchanged frames don't yet mean "nothing changed" (EXPECT_CHANGE_WAIT);
+        dropped on the short cap of a screen that never stands still, which keeps its times."""
         caps = getattr(self.session, "settles", None)
         if caps is None:
-            return await self._settle_frames(after_seq, still, cap, since, early)
+            return await self._settle_frames(after_seq, still, cap, since, early, expect)
         read = self._read_bundle()
         launch, bundle = bundle is not None, bundle or read
         # (the newest tree says whether the app's screen reads; one of another app says nothing: cut, the short cap)
         reads = bundle == read and self._tier_now() == "full"
-        done = await self._settle_frames(after_seq, still, caps.cap(bundle, cap, cut=not reads, launch=launch), since, early)
+        capped = caps.cap(bundle, cap, cut=not reads, launch=launch)
+        done = await self._settle_frames(after_seq, still, capped, since, early, expect if capped >= cap else None)
         if (done.still or done.capped) and bundle == read:
             cut = self._tier_now() != "full"
             if caps.settled(bundle, done.capped, cut, done.seconds, unread=self._tier_now() == "root"):
@@ -9585,7 +9626,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return done
 
     async def _settle_frames(self, after_seq: int, still: float | None = None, cap: float = CAP,
-                             since: Frame | None = None, early: int | None = None) -> Settled:
+                             since: Frame | None = None, early: int | None = None,
+                             expect: float | None = None) -> Settled:
         """Wait for the screen to be still, as the stream shows it. `after_seq` is the newest frame when the
         phone call returned: the settle ends only on a later frame, since earlier ones may predate the effect.
         WebDriverAgent streams continuously even when nothing changes, so a silence is a stall, not stillness.
@@ -9600,7 +9642,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         start of the action (`since`, from _mark; None means there was no frame, so any frame counts).
         After a touch the hands sent (Session.hands_at), "changed, then still" ends it no sooner than HANDS_SETTLE_MIN
         from the touch's end: a row's highlight and the stillness after it come before the page's push.
-        `changed` is False only when the answer is certain: 3 frames, all like `since`, and `quiet` seconds.
+        `changed` is False only when the answer is certain: 3 frames, all like `since`, and `quiet` seconds, and no sooner
+        than `expect` (time.monotonic, EXPECT_CHANGE_WAIT after a touch the app should answer; ignored past the cap).
         A stall, no frames at all (it sleeps `settle_fallback` in total, first-frame wait included), too
         few frames, or the cap all report changed=True, so the tree gets read."""
         same = self._alike  # (the edge strips left out: alike_on_glass)
@@ -9620,6 +9663,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # a highlight followed by a moment of stillness is not the touch's end (HANDS_SETTLE_MIN)
             floor = began + max(0.0, HANDS_SETTLE_MIN - since_touch)
         deadline = began + cap
+        # (loop time) the earliest "unchanged" may end the settle: a late navigation still gets its chance to show
+        unchanged_from = began if expect is None else began + max(0.0, expect - time.monotonic())
+        if unchanged_from >= deadline:  # (a cap shorter than the wait: as before, never a capped "changed")
+            unchanged_from = began
         seq, differs, run, run_start, first_of_run = after_seq, False, 0, began, None
         if early is not None:
             last = None
@@ -9657,7 +9704,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             else:
                 run, run_start, first_of_run = 1, now, frame
             if run >= 2 and now - run_start >= still:
-                if (now >= floor) if differs else (seq - after_seq >= 3 and now - began >= quiet):
+                if (now >= floor) if differs else (seq - after_seq >= 3 and now - began >= quiet
+                                                   and now >= unchanged_from):
                     return Settled(now - began, differs, False, True)
         return Settled(loop.time() - began, True, differs)
 

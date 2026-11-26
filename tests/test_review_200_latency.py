@@ -202,7 +202,7 @@ def test_k_m2_a_shallow_screen_that_stood_still_after_a_push_keeps_the_normal_ca
         caps_asked = []
         ends = [Settled(0.8, True, False, True), Settled(0.3, True, False, True), Settled(0.3, True, False, True)]
 
-        async def frames(after_seq, still=None, cap=2.0, since=None, early=None):
+        async def frames(after_seq, still=None, cap=2.0, since=None, early=None, expect=None):
             caps_asked.append(cap)
             return ends.pop(0)
         d._settle_frames = frames
