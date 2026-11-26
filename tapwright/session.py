@@ -293,8 +293,8 @@ class ReadBudget:
     long budget (never the short one, never unasked; the caller's `long_ok` says nothing plays on the screen and its
     time covers the read). Each long read blocks the app's next one
     from the moment it is sent (long_sent): only a whole answer lifts the block, so a long read that is cut, raises, is
-    refused, cancelled or never answered keeps it, for `long_memory` seconds, doubled for each such read in a row up to
-    `long_memory_max` (`long_retry` for an app that read whole with the long budget before: review R203 M2). Neither the block nor the slow-but-readable mark is a fact about a
+    refused, cancelled or never answered keeps it, for `long_memory` seconds (`long_retry` for an app that read whole
+    with the long budget before: review R203 M2), doubled for each such read in a row up to `long_memory_max`. Neither the block nor the slow-but-readable mark is a fact about a
     runner session: forget() keeps both (review R203 H2)."""
 
     def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
@@ -325,12 +325,15 @@ class ReadBudget:
 
     def block_span(self, bundle: str) -> float:
         """Seconds a long read of `bundle` that didn't come back whole blocks the next: `long_retry` for an app that read
-        whole with the long budget before; else `long_memory`, doubled for each such read before it in a row, at most
-        `long_memory_max`."""
-        if bundle in self._readable:
-            return self.long_retry
-        misses = max(1, self._long_misses.get(bundle, 1))
-        return min(self.long_memory_max, self.long_memory * 2 ** min(misses - 1, 30))
+        whole with the long budget before, else `long_memory`; doubled for each such read before it in a row, at most
+        `long_memory_max` (review R203c H1: a playing feed in an app that read whole once got about 50 cut 8 s reads an
+        hour at a fixed 60 s)."""
+        start = self.long_retry if bundle in self._readable else self.long_memory
+        return min(self.long_memory_max, start * 2 ** min(self.misses(bundle) - 1, 30))
+
+    def misses(self, bundle: str | None) -> int:
+        """Long reads of `bundle` in a row that didn't come back whole, the one under way included (at least 1)."""
+        return max(1, self._long_misses.get(bundle, 1)) if bundle is not None else 1
 
     def blocked(self, bundle: str | None) -> bool:
         """Is a long read of `bundle` blocked: one went out within its block_span and didn't come back whole?"""
@@ -366,9 +369,9 @@ class ReadBudget:
         """(the budget in ms, whether the read may be left unasked) for a read of `bundle`. (2.0, worker H) Unasked only
         where the short budget applies (the app's memory of a cut read is fresh, and the screen isn't still) and a real
         read of the app went out within `unasked_for` seconds: the caller then asks the runner only which app is in front
-        (route version 11), and makes the `root` answer itself when it is still this app. `long_ok` (2.0.3): the screen
-        is still before the read and the caller's time covers a long read; else a slow app's read is planned as in
-        2.0.2 (review R203 M1: a moving screen of it pays no 8 s)."""
+        (route version 11), and makes the `root` answer itself when it is still this app. `long_ok` (2.0.3): nothing
+        plays on the screen before the read (Daemon._plays) and the caller's time covers a long read; else a slow app's
+        read is planned as in 2.0.2 (review R203 M1)."""
         budget = self.budget(bundle, still, long_ok)
         if bundle is None or budget >= self.normal_ms:
             return budget, False
@@ -1057,8 +1060,8 @@ class Session:
         bundle = (self.read_app[1] if isinstance(self.read_app, tuple) else None) or self.budget_app
         normal, long_ms = self.budgets.normal_ms, self.budgets.long_ms
         long_wait = read_wait(long_ms, long=True)
-        # (2.0.3) a long read needs the screen proven still before this read (the frame it showed is kept: review R203
-        # H1) and the caller's time for it (wait_for's reads may have less). Asked only when one could follow.
+        # (2.0.3) a long read needs the caller's time for it (wait_for's reads may have less); the newest frame is kept
+        # to compare with the one after a cut read (Daemon._still_across). Asked only when one could follow.
         slow = self.budgets.slow(bundle)
         bundle_long = self.budgets.long_on and timeout >= long_wait and (
             bundle is None or slow or self.budgets.long_try(bundle))
@@ -1133,6 +1136,9 @@ class Session:
         if not self.budgets.long_on:
             why = (f"the long budget is off (TAPWRIGHT_TREE_LONG_BUDGET {self.budgets.long_ms} ms, normal "
                    f"{self.budgets.normal_ms} ms)")
+        elif app is None:
+            why = ("the app isn't known (the cut answer names none, and the session has none): no block could count a "
+                   "long read")
         elif self.budgets.blocked(app):
             why = f"{app} is blocked for {self.budgets.blocked_for(app):.0f} s more after a long read that wasn't whole"
         elif not bundle_long or timeout - (time.monotonic() - began) < long_wait:
@@ -1140,6 +1146,8 @@ class Session:
                    f"{long_wait:.0f} s")
         elif self.still_mark is None or self.still_across is None:
             why = "no picture to judge by (a session without the daemon's stream)"
+        elif not self.budgets.long_try(app):
+            why = f"{app} may not have a long read now"
         if why and TRACE:
             getattr(self.device, "log", lambda *a: None)(f"trace no long try: {why}")
         return not why
@@ -1164,6 +1172,10 @@ class Session:
         long_ms = self.budgets.long_ms
         self.budgets.tried(app)
         self.budgets.long_sent(app)
+        if TRACE and app is not None:
+            getattr(self.device, "log", lambda *a: None)(
+                f"trace long read of {app}: if it isn't whole, {app} is blocked for "
+                f"{self.budgets.block_span(app):.0f} s (long read {self.budgets.misses(app)} in a row that may not be)")
         forced = TREE_PATH_FORCED if TREE_PATH_FORCED in ("direct", "xctest", "lean") else None
         path = tree_path(long_ms, normal) if forced else LONG_PATH
         try:

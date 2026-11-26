@@ -495,8 +495,9 @@ def alike_on_glass(a: Frame | None, b: Frame | None, screen: tuple[float, float]
 class StillMark:
     """(2.0.3) What a read that could lead to a long one kept before it went out (Daemon._still_mark): the newest
     frame, fresh then, which the frame after the read is compared with (kept here, so frames the video source sends
-    during the read can't push it out of the hub: CodeRabbit, PR #30)."""
-    frame: Frame
+    during the read can't push it out of the hub: CodeRabbit, PR #30). None: the picture before the read couldn't be
+    judged (comparing it failed), which counts as a video: no long read (review R203c L3)."""
+    frame: Frame | None
 
 
 def _unlike_box(x: "Image.Image", y: "Image.Image") -> tuple[int, int, int, int] | None:
@@ -547,6 +548,7 @@ SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the direction
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
 WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take (2.0.3: unless a long read fits, below)
 STILL_AFTER_READ = 1.0  # (2.0.3) seconds a fresh frame is waited for after a cut read, to compare with the one before it
+PLAYS_SPAN = 1.0  # (2.0.3, review R203c H1) seconds apart the two pictures are that say whether a slow app's screen plays
 STREAM_WAIT = 1.5  # (2.0.3, re-check R203b N2) seconds a read that could lead to a long one waits for a stream that is
 #                    open but has sent no fresh frame (it closes 30 s after the last call, and opens again with it)
 
@@ -9616,20 +9618,33 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     self.log(f"trace no frame kept before the read (no fresh frame{'; ' + waited if waited else ''})"
                              f"{self._why_not_still()}")
                 return None, False
-            plays = False
-            if check:
-                frames = self.hub.recent()
-                if len(frames) >= 2:
-                    share, said = self._change(frames[-2][1], frames[-1][1])
-                    plays = share > STILL_BOX
-                    if plays and session_module.TRACE:
-                        self.log(f"trace no long budget planned: the two newest frames before the read: {said}, "
-                                 f"allowed {STILL_BOX * 100:.0f} %")
-            return StillMark(latest), plays
-        except Exception as e:  # noqa: BLE001 - a picture that can't be compared says nothing: no mark, nothing plays
+            return StillMark(latest), self._plays() if check else False
+        except Exception as e:  # noqa: BLE001 - (review R203c L3) a picture that can't be judged counts as a video
             if session_module.TRACE:
-                self.log(f"trace no frame kept before the read ({type(e).__name__})")
-            return None, False
+                self.log(f"trace no long read: the picture before the read couldn't be judged ({type(e).__name__})")
+            return StillMark(None), True
+
+    def _plays(self) -> bool:
+        """(2.0.3) Does a slow app's screen play, before its planned long read? The newest frame against the newest one
+        at least PLAYS_SPAN older that is another picture (the video feeder publishes one picture again when the
+        source has no new one: review R203c H1, 20 % of ticks at 24 fps), changed inside a box of more than STILL_BOX.
+        Two neighbouring frames of a video differ far less than frames a second apart. No such older frame: it doesn't
+        (the long budget; the growing block bounds a mistake)."""
+        frames = self.hub.recent()
+        if not frames:
+            return False
+        at, newest = frames[-1]
+        picture = getattr(newest, "picture", None)
+        older = next((f for t, f in reversed(frames) if t <= at - PLAYS_SPAN and
+                      (picture is None or getattr(f, "picture", None) is not picture)), None)
+        if older is None:
+            return False
+        share, said = self._change(older, newest)
+        plays = share > STILL_BOX
+        if plays and session_module.TRACE:
+            self.log(f"trace no long budget planned: the picture changed in the {PLAYS_SPAN:g} s before the read: "
+                     f"{said}, allowed {STILL_BOX * 100:.0f} %")
+        return plays
 
     async def _still_across(self, mark: object) -> bool:
         """(2.0.3) Session.still_across, after a cut normal read: may the long try go out? Yes unless the picture changed
@@ -9642,6 +9657,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if session_module.TRACE:
                 self.log("trace long try: yes (no frame kept before the read)")
             return True
+        if mark.frame is None:
+            if session_module.TRACE:
+                self.log("trace no long try: the picture before the read couldn't be judged (counted as a video)")
+            return False
         loop = asyncio.get_running_loop()
         called = loop.time()
         try:
@@ -9656,10 +9675,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 go = share <= STILL_BOX
                 detail = (f"fresh frame after {round((loop.time() - called) * 1000)} ms, {said}, "
                           f"allowed {STILL_BOX * 100:.0f} %")
-        except Exception as e:  # noqa: BLE001 - nothing could be compared: the try is the default
-            go, detail = True, type(e).__name__
+        except Exception as e:  # noqa: BLE001 - (review R203c L3) a picture that can't be judged counts as a video
+            go, detail = False, f"the pictures couldn't be compared ({type(e).__name__}), counted as a video"
         if session_module.TRACE:
             self.log(f"trace long try: yes ({detail})" if go else
+                     f"trace no long try: {detail}" if detail.startswith("the pictures") else
                      f"trace no long try: the picture changed across the read ({detail})")
         return go
 
