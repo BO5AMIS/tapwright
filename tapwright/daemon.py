@@ -186,6 +186,11 @@ _PICTURE_AIM: contextvars.ContextVar["int | None"] = contextvars.ContextVar("tap
 # (2.0.1, review R201 M1) the touch under way is aimed by a {text} found in the picture (_by_picture_text): the agent
 # meant what shows the text, not a point of its own, so the touch waits out a notification banner as an element's does
 _PICTURE_TEXT: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_picture_text", default=False)
+# (2.0.3, the phone test of 137b583) how the settle of the action whose answer is being read ended, for that read only: True
+# on frames that stood still, False on its cap with frames still changing (a feed), None when no action's settle came
+# before the read (a look, wait_for's polls) or it said neither. Daemon._still_mark asks it before a slow app's planned
+# long read. A context variable, never a field of the session another client's call could overwrite (CodeRabbit, PR #29)
+_SETTLED: contextvars.ContextVar[bool | None] = contextvars.ContextVar("tapwright_settled", default=None)
 # A repaired script's check replay: the floor gates only the steps the repair made (they carry `repaired`); the script's own
 # unchanged steps run as a plain replay would, as the person wrote them (lead's ruling on review R180 M6).
 _FLOOR_REPAIRED_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_floor_repaired_only", default=False)
@@ -4852,11 +4857,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # (a scroll to a target read the list after each of its drags, with the refs carried: its last read is no
         # move for the refs, though the content did move since the agent's last answer)
         moves = None if name in MAY_MOVE_CONTENT else name in MOVES_CONTENT and not to_target
-        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
-                                   drifted=to_target or bool(box.get("scrolled")),
-                                   snap=landed[0] if landed is not None else None,
-                                   hint="" if done.capped else box.get("hint", ""),  # (a screen still moving: no "nothing changed")
-                                   watched=time.monotonic() - box["began"], touch=touch_name(name))
+        settled = _SETTLED.set(True if done.still else False if done.capped else None)  # (for the answer's read only)
+        try:
+            answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
+                                       drifted=to_target or bool(box.get("scrolled")),
+                                       snap=landed[0] if landed is not None else None,
+                                       hint="" if done.capped else box.get("hint", ""),  # (a screen still moving: no "nothing changed")
+                                       watched=time.monotonic() - box["began"], touch=touch_name(name))
+        finally:
+            _SETTLED.reset(settled)
         if closed_first == NOTE_KEYBOARD and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
@@ -9682,11 +9691,25 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     self.log(f"trace no frame kept before the read (no recent frame{'; ' + waited if waited else ''})"
                              f"{self._why_not_still()}")
                 return None, False
-            return StillMark(latest), self._plays() if check else False
+            return StillMark(latest), self._plays_now() if check else False
         except Exception as e:  # noqa: BLE001 - (review R203c L3) a picture that can't be judged counts as a video
             if session_module.TRACE:
                 self.log(f"trace no long read: the picture before the read couldn't be judged ({type(e).__name__})")
             return StillMark(None), True
+
+    def _plays_now(self) -> bool:
+        """(2.0.3, the phone test of 137b583) Does a slow app's screen play, before its planned long read? The read that
+        follows an agent's action asks that action's settle (_SETTLED), which ended 0.1-0.2 s before the read: on
+        frames that stood still, it doesn't (the picture a second ago was the screen before the action, and _plays
+        took it for a video: 3 s cut, then 8 s, 9.8 s on the phone where one 8 s read took 5); on its cap with frames
+        still changing (a feed), it does. A read with no settle before it (a look, wait_for's polls) asks _plays."""
+        verdict = _SETTLED.get()
+        if verdict is None:
+            return self._plays()
+        if session_module.TRACE:
+            self.log("trace long budget planned: the action's settle ended on frames that stood still" if verdict else
+                     "trace no long budget planned: the action's settle ended on its cap, the picture still changing")
+        return not verdict
 
     def _plays(self) -> bool:
         """(2.0.3) Does a slow app's screen play, before its planned long read? Both: the newest frame against the newest

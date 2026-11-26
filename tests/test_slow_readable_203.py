@@ -1423,3 +1423,68 @@ def test_a_long_try_answered_by_a_banner_leaves_the_apps_own_cut_answer(state):
         assert s.budget_app == SHOP and s.last_tier == "shallow"
         assert not s.budgets.blocked(SHOP) and s.budgets.misses(SHOP) == 1 and not s.budgets.slow(SPRINGBOARD)
     run(go)
+
+
+# ---- the phone test of 137b583: the read after an action asks the action's settle ----
+
+@pytest.mark.parametrize("verdict, still_after, planned, said", [
+    # an action changed the screen and its settle ended still 0.1-0.2 s before the read: one planned 8 s read (the
+    # phone: 99 % against a second ago, then 3 s cut and 8 s: 9.8 s where one 8 s read took 5)
+    (True, 0.15, 8000, "trace long budget planned: the action's settle ended on frames that stood still"),
+    # a feed: the action's settle ended on its cap, frames still changing: 2.0.2's rules for that read
+    (False, 2.0, 3000, "trace no long budget planned: the action's settle ended on its cap"),
+    # no settle before the read (a look): _plays decides, as built (a change 0.15 s ago: still changing)
+    (None, 0.15, 3000, "trace no long budget planned: the picture changed in the 1 s before the read"),
+])
+def test_the_read_after_an_action_asks_how_its_settle_ended(state, monkeypatch, verdict, still_after, planned, said):
+    monkeypatch.setattr(session_module, "TRACE", True)
+
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream)
+        lines: list[str] = []
+        stream.d.log = lines.append
+        stream.picture = stream.after = _jpeg_of(_band(0))
+        await look(s, stream)  # 3000 cut, 8000 whole: readable
+        stream.now[0] += 3.0
+        _screen_change(stream, still_after)
+        token = daemon_module._SETTLED.set(verdict)
+        try:
+            await s.refresh(timeout=60)
+        finally:
+            daemon_module._SETTLED.reset(token)
+        assert runner.budgets()[2] == planned and s.budgets.slow(SHOP)
+        assert any(said in line for line in lines), lines
+    run(go)
+
+
+@pytest.mark.parametrize("settled, verdict", [
+    (daemon_module.Settled(0.3, True, False, True), True),  # it ended on frames that stood still
+    (daemon_module.Settled(2.0, True, True, False), False),  # on its cap, frames still changing
+    (daemon_module.Settled(0.5, True, False, False), None),  # neither (no frames, a stall): _plays decides
+])
+def test_an_actions_answer_reads_with_its_settles_verdict_and_nothing_after_it_does(settled, verdict):
+    from fakes import DescribingSession
+    from test_daemon import finish, make, started
+    seen: list = []
+
+    async def go():
+        s = DescribingSession()
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+
+        async def settle(*args, **kwargs):
+            return settled
+        d._settle = settle
+        real = d._after
+
+        async def after(*args, **kwargs):
+            seen.append(daemon_module._SETTLED.get())
+            return await real(*args, **kwargs)
+        d._after = after
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "screenshot": False})
+        seen.append(daemon_module._SETTLED.get())  # (after the action: no verdict left behind)
+        await finish(stop, task)
+    run(go)
+    assert seen == [verdict, None]
