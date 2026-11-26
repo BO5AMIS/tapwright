@@ -510,7 +510,9 @@ MAX_SCROLL_SWIPES = 15  # `scroll to start|end` gives up after this many swipes
 SCROLL_CAP = 12.0  # ... or after this many seconds (a spinner or a bounce can keep the screen moving)
 SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the directions each `to` can mean; the first is the default
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
-WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take
+WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take (2.0.3: unless a long read fits, below)
+STILL_AFTER_READ = 1.0  # (2.0.3) seconds a fresh frame is waited for after a read, to say the screen stood still across it
+WAIT_FOR_LONG_MARGIN = 0.5  # (2.0.3) seconds of `wait_for`'s deadline a long read leaves unused (its clock is not ours)
 WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up instead of reading again
 SKIP_TEXT_WAIT = 3.0  # (2.0) seconds a step's `if` may spend reading the picture's text on a cut-short screen
 WAIT_FOR_FIRST_READ = 3.0  # `wait_for`'s first read of the screen gets at least this long (twice the slowest look allowed)
@@ -1439,6 +1441,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             self.session.on_tree = self._watch_code_field  # (each read the daemon builds says whether one shows)
             self.session.screen_still = self._still_for_budget  # (2.0: a still screen's read gets the normal budget)
+            self.session.still_mark = self._still_mark  # (2.0.3: stillness across a read, for the long budget)
+            self.session.still_across = self._still_across
         except AttributeError:
             pass
         # the passcode unlock (§18.6, §11.5; unlock.py): its rules and counts, and the lock screen it types on
@@ -3994,6 +3998,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         granted: list[bool] = []
         grant_token, scope_token = _GRANTED.set(granted), _SCOPE.set(scope)
         caller_token = _CALLER.set(client_id)
+        owner = object()  # (2.0.3) the reads of this call: their "took long" note is this answer's only (R203 L1)
+        owner_token = session_module.READ_OWNER.set(owner)
         said = _GRANT_CALL.get()  # (one made for this call's log line; a nested call's own otherwise)
         own_grants = said is None or said.taken
         if own_grants:
@@ -4020,7 +4026,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     # a call the crash cut short ends in an error too: it carries the note as well
                     note = await self._crash_note(client_id, scope, name, before, e, pid_before)
                     # (2.0.3) why the read this call made took long (a dry run's refusal leaves it for the next answer)
-                    slow = self._take_slow_note() if e.code != "dry_run" else None
+                    slow = self._take_slow_note(owner) if e.code != "dry_run" else None
                     if e.code != "dry_run" and (said.notes or note is not None or slow is not None):
                         notes = [*said.notes]  # why a matching grant didn't cover it (§19.3)
                         if note is not None:
@@ -4038,7 +4044,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     answer = {**answer, "text": f"{answer['text']}\nNote: {note}"}
                 elif client_id not in self._crash_pending and name not in DIAG_TOOLS:
                     self._crash_since = self._wall()
-                if (slow := self._take_slow_note()) is not None:
+                if (slow := self._take_slow_note(owner)) is not None:
                     # (2.0.3) the long try made a read's answer: said once, with the answer whose read it was
                     answer = {**answer, "text": f"{answer['text']}\nNote: {slow}"}
                 if said.notes:  # a grant matched but didn't cover it: said before the person's OK (§19.3)
@@ -4063,6 +4069,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             _GRANTED.reset(grant_token)
             _SCOPE.reset(scope_token)
             _CALLER.reset(caller_token)
+            session_module.READ_OWNER.reset(owner_token)
             if own_grants:
                 _GRANT_CALL.reset(grants_token)
 
@@ -7392,8 +7399,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # was on it (the same day: a 5 s wait said a text didn't appear which had been there all along).
             grace = left if seen else max(left, WAIT_FOR_FIRST_READ)
             try:
-                cap = self._wait_for_read_cap(grace)
-                tree = await asyncio.wait_for(self._read(lambda: self.session.refresh(timeout=cap)), grace)
+                # (2.0.3, review R203 M4) the read's time is decided once the turn is taken (inside _read), from this
+                # wait's own deadline: a long read is planned only when it ends before that, so the deadline never
+                # cancels one in flight (the runner would go on reading with the turn given away)
+                deadline = began + (timeout if seen else max(timeout, WAIT_FOR_FIRST_READ))
+                tree = await asyncio.wait_for(self._read(lambda: self.session.refresh(
+                    timeout=self._wait_for_read_cap(deadline - clock()))), grace)
             except asyncio.TimeoutError:
                 if not seen:
                     raise Refused("timeout", f"The phone didn't answer within {max(timeout, WAIT_FOR_FIRST_READ):g} s, so it "
@@ -7422,20 +7433,25 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return await self._add_shot(await self._after(view, result, notes, full, snap=snap), view,
                                     self._cut_shot(args, shot, getattr(tree, "tier", "full")))
 
-    def _wait_for_read_cap(self, grace: float) -> float:
-        """(2.0.3) The longest one of `wait_for`'s reads may take, with `grace` seconds left for it: WAIT_FOR_READ_MAX,
-        or, with the long budget on, as long as the wait has room for, up to a normal read and a long one (the session
-        gives a read the long budget only when its time covers it: a slow but readable app's warm read is 0.4 s)."""
+    def _wait_for_read_cap(self, left: float) -> float:
+        """(2.0.3) The longest one of `wait_for`'s reads may take, with `left` seconds to the wait's deadline as its
+        turn is taken: WAIT_FOR_READ_MAX, or, with the long budget on and room before the deadline for a long read and
+        its grace (WAIT_FOR_LONG_MARGIN kept back), that room, up to a normal read and a long one. The session plans a
+        long read only when its time covers it, so with the default 10 s timeout none is (review R203 M4, L3)."""
         budgets = getattr(self.session, "budgets", None)
         if not isinstance(budgets, session_module.ReadBudget) or not budgets.long_on:
             return WAIT_FOR_READ_MAX
-        room = session_module.read_wait(budgets.normal_ms) + session_module.read_wait(budgets.long_ms)
-        return max(WAIT_FOR_READ_MAX, min(grace, room))
+        room = left - WAIT_FOR_LONG_MARGIN
+        if room < session_module.read_wait(budgets.long_ms, long=True):
+            return WAIT_FOR_READ_MAX
+        return min(room, session_module.read_wait(budgets.normal_ms) +
+                   session_module.read_wait(budgets.long_ms, long=True))
 
-    def _take_slow_note(self) -> str | None:
-        """(2.0.3) Session.take_slow_note: once, the note that a read took the long budget to answer whole."""
+    def _take_slow_note(self, owner: object) -> str | None:
+        """(2.0.3) Session.take_slow_note: once, the note that a read of this call (`owner`, READ_OWNER) took the long
+        budget to answer whole."""
         take = getattr(self.session, "take_slow_note", None)
-        note = take() if callable(take) else None
+        note = take(owner) if callable(take) else None
         return note if isinstance(note, str) and note else None
 
     async def _type_text(self, view, a: dict) -> Typed:
@@ -9487,6 +9503,32 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return self._proven_still(noted=False)
         except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: the short budget stays
             return False
+
+    def _still_mark(self) -> "Frame | None":
+        """(2.0.3) Session.still_mark: the newest frame when the stream proves the screen still now (as
+        _still_for_budget), else None. Kept by the read, to be compared after it (_still_across)."""
+        try:
+            return self.hub.latest if self._proven_still(noted=False) else None
+        except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing
+            return None
+
+    async def _still_across(self, mark: object) -> bool:
+        """(2.0.3, review R203 H1) Session.still_across: did the screen stand still across a read that began on `mark`
+        (_still_mark)? The runner sends no frames while it reads, so the newest frame then is as old as the read: one
+        fresh frame is waited for (STILL_AFTER_READ at most) and must show the picture `mark` showed. None in time (the
+        stream reopening after a stall, or gone): not still."""
+        if not isinstance(mark, Frame):
+            return False
+        try:
+            latest = self.hub.latest
+            fresh = await self.hub.next_after(latest.seq if latest is not None else mark.seq, STILL_AFTER_READ)
+            still = fresh is not None and self._alike(fresh, mark)
+        except Exception:  # noqa: BLE001 - as above
+            still = False
+        if session_module.TRACE:
+            self.log(f"trace still across the read: {'yes' if still else 'no'}"
+                     f"{'' if still else self._why_not_still()}")
+        return still
 
     def _proven_still(self, noted: bool = True) -> bool:
         """Do the stream's recent frames already show what _settle waits for, so a read needn't wait? A read for

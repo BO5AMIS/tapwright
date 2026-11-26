@@ -102,9 +102,7 @@ def test_the_session_asks_the_daemons_stillness_before_a_short_budget(state):
     asyncio.run(s.refresh())
     s.screen_still = lambda: False
     asyncio.run(s.refresh())
-    # (2.0.3) the still screen's normal read, cut, is asked once more with the long budget; cut too, today's rules
     assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=xctest", "/wda/tw/tree?budget=3000&path=xctest",
-                                            "/wda/tw/tree?budget=8000&path=xctest",
                                             "/wda/tw/tree?budget=1500&path=direct"]
 
 

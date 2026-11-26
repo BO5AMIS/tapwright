@@ -454,9 +454,7 @@ def test_one_real_short_read_goes_out_every_eight_seconds_and_a_still_screen_is_
     assert len(runner.paths("/wda/tw/tree")) == 2  # unasked again
     s.screen_still = lambda: True  # the stream shows the screen still: the normal budget, asked
     asyncio.run(s.refresh())
-    # (2.0.3) and, cut on a still screen, once more with the long budget
-    assert [p.split("&")[0] for p in runner.paths("/wda/tw/tree")[-2:]] == ["/wda/tw/tree?budget=3000",
-                                                                             "/wda/tw/tree?budget=8000"]
+    assert runner.paths("/wda/tw/tree")[-1].startswith("/wda/tw/tree?budget=3000")
 
 
 def test_a_root_naming_no_app_on_a_v11_runner_asks_front_not_active_app_info(state):
