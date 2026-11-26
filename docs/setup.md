@@ -4,7 +4,10 @@ Once per phone, with the phone on USB. About ten minutes.
 
 ## 1. The computer
 
-- Python 3.10 or newer, then `pip install tapwright`.
+- Python 3.10 or newer, then `pip install tapwright`. It installs pymobiledevice3 11.63 or later, which 2.0 needs.
+- An iPhone on iOS 17 or later. Touches from the computer (taps, swipes, scrolls, `pinch`, `press_button lock`)
+  need iOS 18 or later (proven on iOS 26). On iOS 17, and on iOS 27 until its display stream is supported, touches go
+  through the runner as in 1.10.0, and `pinch` and `press_button lock` answer `unsupported`.
 - Windows: **Apple Devices** from the Microsoft Store (or iTunes). It provides the USB
   connection to the phone.
 - Linux: `usbmuxd` (`sudo apt install usbmuxd`).
@@ -172,6 +175,24 @@ See [the control and migration contract](agent-directed-control.md). Install a p
 - **Missed runs.** A run that falls due while the PC is off, or asleep with wake timers off, doesn't run later and
   leaves no audit line. Runs happen only while you're logged on to Windows. `tapwright doctor --unattended` says both.
 
+### Switches (Tapwright 2.0)
+
+Environment variables, read when `tapwright serve` starts (on Windows, `setx NAME VALUE`, then `tapwright serve --stop`
+so the next call starts a new daemon). None is needed for normal use.
+
+| Variable | Effect |
+|---|---|
+| `TAPWRIGHT_HANDS=runner` | every touch goes through the runner, as in 1.10.0 (default `auto`: from the computer where it can) |
+| `TAPWRIGHT_HANDS_LANDSCAPE=0` | landscape touches go through the runner |
+| `TAPWRIGHT_HUMAN=0` | swipes are straight lines, not finger-like |
+| `TAPWRIGHT_DIRECT=0` | USB requests to the runner go through the tunnel, not usbmuxd |
+| `TAPWRIGHT_TREE_BUDGET` | milliseconds a screen read may take (default 3000) |
+| `TAPWRIGHT_AX_TIMEOUT` | seconds any other accessibility read may take (default 3) |
+| `TAPWRIGHT_TREE_PATH=direct` or `xctest` | force the runner's way of reading (for measuring) |
+| `TAPWRIGHT_RUNNER_OCR=0` | read the picture's text on this computer only (RapidOCR), never on the phone |
+| `TAPWRIGHT_OCR_LANGUAGES` | languages the phone reads in the picture, for example `en-US,ar-SA` |
+| `TAPWRIGHT_TRACE=1` | log the time of each touch and each request to the phone |
+
 ### Keeping it working
 
 The development profile and certificate last a year. Then WebDriverAgent stops starting.
@@ -189,6 +210,12 @@ The development profile and certificate last a year. Then WebDriverAgent stops s
 - `--fix` never makes a certificate or a profile. If the profile itself has run out, or is
   about to, it says so: run `tapwright setup` again with your App Store Connect key (it
   makes the new profile and installs WebDriverAgent again).
+- **Updating the runner.** Tapwright 2.0 uses runner build `tw-16.15.3.11` (route version 11: reads that keep to their
+  time, the app in front without reading it, JPEG screenshots, on-phone text reading). An older runner keeps working,
+  as in 1.10.0, without those. To install the new one on an existing install, plug the phone in, stop `tapwright serve`
+  (`tapwright serve --stop`), and run `tapwright doctor --fix`: it sees that the phone has another build, signs the new
+  runner with the profile and certificate you already have, and installs it (about 20 s). `tapwright setup --force`
+  does the same and every other step again.
 - A new Tapwright may need a newer runner for a feature: `media add` with videos (mp4, mov, m4v) needs the runner's
   route version 7 (1.7.9), and an older one answers `unsupported` naming `tapwright setup --force`, which installs the
   current runner (pictures still work meanwhile). The video is copied into the runner's own container over USB or
@@ -328,6 +355,8 @@ It prints the file, its length and the number of frames. `tapwright serve` must 
 | the phone shows "Enter iPhone Passcode for XCTest" | enter it; then Settings > Developer > Enable UI Automation, so it doesn't ask again |
 | works on USB, not on Wi-Fi | same network, no client isolation; run `tapwright probe` with the phone on the Wi-Fi |
 | actions do nothing on a screen | look again: the screen may have changed; system alerts need `alert` |
+| a look says `Elements: none` | the screen didn't answer in time (a video feed, a game). Work from its `o` refs, a point or a `{text}`; pause what plays or go to a still screen to read it whole |
+| `pinch` or `press_button lock` says `unsupported` | they need touches from the computer: iOS 18 or later, and `TAPWRIGHT_HANDS` not `runner` |
 | "tapwright serve is running and owns the phone" | `smoke` and `probe` need the phone to themselves: `tapwright serve --stop` |
 | the live view says "missing or wrong token" or "This link has no valid key" | run `tapwright view` on the attached computer; it opens the authenticated page in its browser without printing the key. Opening just `localhost:8417`, or a masked copy of its URL in another browser, does not authenticate it |
 | port 8417 in use | the daemon takes a free port by itself; `tapwright view` finds it |
