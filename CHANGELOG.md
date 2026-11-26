@@ -6,15 +6,29 @@
   of a screen whose elements weren't read. A notification banner was over the top of the screen: the first tap opened
   the banner's app on a conversation, and the second landed on that conversation's call button and started a call.
   Nothing stopped either tap: the wait for a banner held only touches aimed at an element, and another app in front
-  stopped only typing. Now, before every touch of an agent (with the current runner, one question of a few ms):
-  - a touch that starts in the top 200 pt waits a banner out (up to 8 s) and is refused `covered` if it stays,
-    whatever it is aimed by (an element, a point, an `o` ref, a text found in the picture) and whatever the gesture;
-  - a touch is refused `stale` when another app is in front than the one the agent's last look or action's answer
-    showed: "Nothing was touched; look again." After a look, the agent may touch the new app. `open_app`,
-    `open_url`, `press_button` and `alert` change the app on purpose and aren't checked; an alert or permission
-    prompt over the app is no other app; a person's touches from the live view aren't checked;
-  - a `run` stops at a step that would touch an app no look showed (its steps don't look).
-  With an older runner (route version below 11), nothing changes: the question would cost a read.
+  stopped only typing. Now, with the current runner (route version 11 or later):
+  - every answer that shows the agent the screen (a look, an action's answer, `open_app`, `open_url`, a `run` step
+    whose `expect` held) records what was in front then, from the runner and iOS's process list: an app, the home
+    screen, or something of the system over an app (a notification, an alert, Notification or Control Center). A look
+    taken while a notification is down waits it out first, and if it stays the answer says so in its first line;
+  - right before each touch goes out (after Tapline's notice, as the finger is about to land) the same question is
+    asked again. The touch goes only when it finds what the agent was shown: the same app, the home screen it saw, or
+    the system over the app when the agent saw that. Another app, or the system over an app the agent saw alone, is
+    refused `stale` ("Nothing was touched; look again."). A touch in the top 200 pt while a notification may be there
+    waits it out (up to 8 s) and is refused `covered` if it stays, unless the agent aims at an element of its list it
+    saw there; a point there is always held;
+  - when Tapwright can't tell what is in front (asked twice), the touch is refused, nothing touched;
+  - `open_app`, `open_url`, `press_button` and `alert` change what is in front on purpose and aren't checked; a
+    person's touches from the live view aren't checked; a `run` stops at a step that would touch an app no answer
+    showed (a step that only taps doesn't look), while `open_app`, `open_url` and an `expect` that held let it go on.
+  What it costs: one question to the runner (usually a few ms) per touch and one per answer; iOS's process list only
+  when the system is in front. What it doesn't cover: a runner older than route version 11 (no protection: the
+  question would cost a read); the few ms between the last question and the finger; a notification over the home
+  screen, which looks the same as the home screen itself.
+- After an action that changed a slow app's screen, the read of its answer is planned with 8 s at once when the
+  action's settle ended on a picture that stood still (the phone: 9.8 s, a cut 3 s read then the 8 s one, where one
+  8 s read takes about 5). When the settle ended with the picture still changing (a feed), that read follows 2.0.2's
+  rules. A read with no action before it (a look) still compares the picture with one a second older.
 - A screen that is slow to read but does read lists its elements again. A shopping app's home screen (900 to 1,000
   elements) reads whole every time when given about 4 to 5 s, and never within the 3 s a read is given (measured on
   the phone, straight from the runner: with 1.5 s cut 5 of 5, with 3 s cut 5 of 5 after 2.7 s, with 8 s whole 4 of 4 in
