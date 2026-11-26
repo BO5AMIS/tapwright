@@ -6511,9 +6511,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         text = "\n".join(lines) + (f"\nNote: {note}" if note else "")
         return {**answer, "text": text}
 
-    def _refuse_cut_report(self, tool: str) -> None:
-        """(R200v M1) audit and ux_check are made only from a whole tree (CUT_REPORT)."""
-        if self._tier_now() != "full":
+    def _refuse_cut_report(self, tool: str, whole: bool | None = None) -> None:
+        """(R200v M1) audit and ux_check are made only from a whole tree (CUT_REPORT). `whole`: what the caller's own
+        read got, when another read may have come since (CodeRabbit, PR #26); else the newest read's tier."""
+        if not (self._tier_now() == "full" if whole is None else whole):
             raise Refused("unsupported", CUT_REPORT.format(tool=tool, unread=UNREAD[0].upper() + UNREAD[1:]))
 
     async def _audit(self, view, args: dict, notes: list) -> dict:
@@ -6580,8 +6581,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             shown = last if first == last else (last or first)
             raise Refused("not_allowed", _outside(shown, self.session.app_names.get(shown or ""),
                                                   ", ".join(given.values())))
-        if not seen.whole:
-            self._refuse_cut_report("ux_check")  # (nothing is checked, filed on the journey or kept for naming drift)
+        # (nothing is checked, filed on the journey or kept for naming drift) by this turn's read: another client's read
+        # since may have made the newest tier "full" (CodeRabbit, PR #26)
+        self._refuse_cut_report("ux_check", whole=seen.whole)
         rows: list[tuple[str, str, str]] = []
         notes = list(notes)
         if isinstance(issues, DeviceError):

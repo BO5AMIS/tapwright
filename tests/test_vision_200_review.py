@@ -344,6 +344,32 @@ def test_audit_and_ux_check_refuse_a_screen_read_in_part(no_pc_ocr, monkeypatch)
     run(go)
 
 
+def test_ux_check_refuses_by_its_own_read_when_another_read_came_back_whole_since(no_pc_ocr, monkeypatch):
+    # (CodeRabbit, PR #26) between ux_check's turn and its refusal another client's read can make the shared tier
+    # "full": the refusal goes by what this check read, never by the newest read of someone else
+    from tapwright import uxcheck
+    checked = []
+    monkeypatch.setattr(uxcheck, "check", lambda *a, **k: checked.append(a))
+
+    async def go():
+        s = feed_session(tier="shallow")
+        s.tree = [button("e1", "Like", "like-button", rect=(380, 400, 40, 40))]
+        d = make(s)
+        stop, task = await started(d)
+        read = d._read
+
+        async def then_whole(fn):
+            out = await read(fn)
+            s.last_tier = "full"  # another client's read, in a turn of its own, came back whole
+            return out
+        d._read = then_whole
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "ux_check", {})
+        assert e.value.code == "unsupported" and checked == []
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_cut_short_look_is_no_screen_for_naming_drift(no_pc_ocr, monkeypatch):
     from tapwright import uxcheck
     noted = []
