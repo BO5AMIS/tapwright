@@ -2086,6 +2086,15 @@ class Session:
         return f"Sent alert {action} request{named}. Check the screen to confirm the result."
 
     # ---- apps ----
+    def warm_hands(self) -> "asyncio.Task | None":
+        """Open CoreDevice HID behind the caller, so the first touch finds it open (Hands.warm). None when touches
+        don't go through the hands here."""
+        if self.hands is None or HANDS == "runner":
+            return None
+        task = asyncio.ensure_future(self.hands.warm())
+        task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (never a failed connect)
+        return task
+
     async def apps(self, fresh: bool = False) -> list[dict]:
         """The apps you installed. Asking the phone takes about a second (2.0: 0.9-1.1 s on USB, measured), and
         open_app, close_app, a crash check and a header's name all need the list, so the last answer is kept and

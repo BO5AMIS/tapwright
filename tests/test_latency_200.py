@@ -333,3 +333,31 @@ def test_a_whole_slow_read_gives_stillness_its_exception_back():
     assert b.budget("a", lambda: True) == 1500
     b.answered("a", False, 3000, took_ms=2000)  # whole after more than the short budget: all of it is forgotten
     assert b.budget("a", lambda: True) == 3000 and b.budget("a") == 3000
+
+
+# ---- the first touch after a connect ----
+
+def test_the_hands_are_opened_as_the_phone_connects_and_a_failure_fails_nothing():
+    from tapwright import hands as hands_module
+
+    class Opens:
+        def __init__(self, error=None):
+            self.opened, self.error, self._lock = 0, error, asyncio.Lock()
+
+        async def _open_now(self):
+            self.opened += 1
+            if self.error is not None:
+                raise self.error
+    for error in (None, hands_module.HandsUnavailable("no tunnel to the phone"), ConnectionError("dropped")):
+        fake = Opens(error)
+        assert asyncio.run(hands_module.Hands.warm(fake)) is (error is None) and fake.opened == 1
+
+    async def go():
+        s, _, _ = a_session()
+        assert s.warm_hands() is None  # no hands: nothing to open
+        s.hands = Opens()
+        await s.warm_hands()
+        assert s.hands.opened == 1
+    # (Session.warm_hands calls hands.warm: the fake gets the real one)
+    Opens.warm = hands_module.Hands.warm
+    asyncio.run(go())

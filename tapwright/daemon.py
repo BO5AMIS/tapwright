@@ -103,6 +103,15 @@ FROZEN_TOOLS = frozenset({"look", "tap", "long_press", "swipe", "press_button"})
 # (2.0) the touches a {text} target may be found for in the picture's text, on a screen whose elements weren't read
 # (_by_picture_text). Not type_text, toggle or scroll: they act on an element (a field, a switch, a list), not a point.
 TEXT_BY_PICTURE = frozenset({"tap", "long_press"})
+# (2.0) the tools whose gesture the hands play on the touchscreen (not press_button: the buttons are another service),
+# and what an answer says when the hands doubt their touch connection (hands.Hands.judged)
+HANDS_GESTURES = frozenset({"tap", "long_press", "swipe", "scroll", "back", "pinch", "drag", "toggle"})
+NOTE_HANDS_REOPENED = ("the last touches were acknowledged by the phone but none has changed the screen since the touch "
+                       "connection was opened, so it was opened again. If this touch should have changed something, "
+                       "look, then repeat it.")
+NOTE_HANDS_RUNNER = ("touches sent from this computer were acknowledged by the phone but changed nothing, also after the "
+                     "touch connection was opened again: from now on touches go through the runner on the phone "
+                     "(slower, about 0.3 s each). If this touch should have changed something, look, then repeat it.")
 # (2.0) TAPWRIGHT_RUNNER_OCR=0: text is read from the picture on this computer only (RapidOCR), never by the runner
 RUNNER_OCR = os.environ.get("TAPWRIGHT_RUNNER_OCR", "1")
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
@@ -1918,6 +1927,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # once per connection, so every header says @3x, not only SpringBoard's; (2.0) not asked again when the
             # session's start had it from the runner's screen route, which doesn't read the app (/wda/screen does)
             await s.read_scale(refresh=not getattr(s, "scale_by_runner", False))
+            if (warm := getattr(s, "warm_hands", None)) is not None:
+                warm()  # (2.0) the first touch after a connect doesn't open CoreDevice HID itself
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
 
     async def _session_again_on_runner(self, s, error: Exception) -> bool:
@@ -4657,6 +4668,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         trace.settled()
         if session_module.TRACE:
             self.log(f"trace {name} settle {done.seconds:.2f} s, changed={done.changed}")
+        if (doubt := await self._judge_hands(name, box.get("began"), done.changed)) is not None:
+            notes = [*notes, doubt]
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
         if name == "back" and not done.changed:
@@ -6247,6 +6260,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("not_found", f"{ref} isn't in your last OCR reading; look with ocr: true again (a screen "
                                        "whose elements weren't read gets o refs with any look).")
         return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}
+
+    async def _judge_hands(self, name: str, began: float | None, changed: bool) -> str | None:
+        """After the settle of a touchscreen gesture the hands played (Session.hands_at is from this call): tell the
+        hands whether the screen changed (Hands.judged), and give the note for the answer when they doubt their
+        connection. A nicety that never fails a call."""
+        s = self.session
+        hands, at = getattr(s, "hands", None), getattr(s, "hands_at", None)
+        if name not in HANDS_GESTURES or hands is None or began is None or at is None or at < began:
+            return None
+        try:
+            verdict = await hands.judged(changed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.log(f"hands: judging a touch failed: {type(e).__name__}: {e}")
+            return None
+        if verdict == "reopened":
+            return NOTE_HANDS_REOPENED
+        if verdict == "runner":
+            return NOTE_HANDS_RUNNER
+        return None
 
     async def _by_picture_text(self, client_id: str, view, name: str, args: dict, target: ui.Target) -> dict | None:
         """(2.0) A touch aimed by {text} that no element of a cut-short read carries: the text is looked for in what the

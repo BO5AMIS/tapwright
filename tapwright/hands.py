@@ -46,6 +46,10 @@ SEND_WAIT = 2.0  # seconds one report may take to be acked (1.3 ms measured)
 # on was entered), and a failed release closes the connection.
 DIRTY_HOLD = 5.0
 RETRY_OPEN = 30.0  # seconds before an open that failed for a passing reason is tried again on the same tunnel
+# Touches in a row that changed nothing, on a connection none of whose touches has changed the screen yet, before the
+# connection is doubted (Hands.judged). Seen once on the phone (2026-11-26): a whole session of touches acked in
+# 60-110 ms that did nothing, with nothing logged; the start after it worked, and so did the next 8.
+DOUBT_AFTER = 3
 BUTTON_MS = 50  # how long a button is held (Phase 0: 52 ms a press)
 KEY_GAP_MS = 12  # between two keyboard reports (15 characters in 396 ms, measured)
 LEFT_SHIFT = 0xE1
@@ -232,6 +236,9 @@ class Hands:
         self.dirty: dict[str, Any] = {}
         self._dirty_at = 0.0  # loop time when `dirty` was first set (DIRTY_HOLD counts from it)
         self._pending: asyncio.Future | None = None  # a release still going out after its gesture was cancelled
+        self._proven = False  # a touch of the open connection changed the screen (judged)
+        self._unchanged = 0  # touches in a row of the open connection that changed nothing, while it isn't proven
+        self._doubted: Any = None  # the tunnel whose touch connection was opened again for doubt, once
 
     # ---- state ----
     @property
@@ -295,6 +302,52 @@ class Hands:
                              f"CoreDevice HID can't be reached to let go of it ({e.reason}); nothing was touched: wait "
                              "a few seconds, then look") from None
 
+    async def judged(self, changed: bool) -> str | None:
+        """The caller's word on a touchscreen gesture these hands just played: did the screen change after it? The phone
+        acks a report as it is written, whether or not it does anything, so only the screen can say that touches land.
+        A connection is proven by its first touch that changes the screen. One that isn't proven and has played
+        DOUBT_AFTER touches in a row that changed nothing is closed: the next touch opens a new one ("reopened"). If
+        that one goes the same way, the hands are left for this tunnel and touches go through the runner ("runner").
+        None otherwise. A proven connection is never doubted: touches that change nothing are ordinary."""
+        if self._touch is None:
+            return None
+        if changed:
+            self._proven, self._unchanged = True, 0
+            return None
+        if self._proven:
+            return None
+        self._unchanged += 1
+        if self._unchanged < DOUBT_AFTER:
+            return None
+        async with self._lock:
+            rsd = self._rsd
+            if rsd is None:
+                return None
+            await self._drop()
+            if self._doubted is not rsd:
+                self._doubted = rsd
+                self.log(f"hands: {DOUBT_AFTER} touches in a row changed nothing and none of this connection's has "
+                         "changed the screen yet: opening CoreDevice HID again")
+                return "reopened"
+            why = (f"touches through CoreDevice HID were acknowledged but changed nothing, also after it was opened "
+                   f"again ({2 * DOUBT_AFTER} touches)")
+            self._failed = (rsd, why, math.inf)
+            self._say(rsd, f"hands: not used ({why}); touches go through the runner")
+            return "runner"
+
+    async def warm(self) -> bool:
+        """Open the services now, ahead of the first touch (the phone just connected): opening them took 0.4-1.7 s of
+        the first tap after a start. True when they are open. Never raises: a first touch opens them as before, and
+        says why when it can't."""
+        try:
+            async with self._lock:
+                await self._open_now()
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - HandsUnavailable, a dropped line: the first touch finds out again
+            return False
+
     async def _open_now(self) -> None:
         """Open the services on the device's current tunnel (under the lock). HandsUnavailable when they can't be."""
         rsd = getattr(self.device, "rsd", None)
@@ -325,6 +378,9 @@ class Hands:
             raise HandsUnavailable(why) from None
         self._rsd, self._touch, self._buttons, self._keyboard = rsd, touch, buttons, keyboard
         self._failed = None
+        self._proven, self._unchanged = False, 0
+        if self._doubted is not None and self._doubted is not rsd:
+            self._doubted = None  # another tunnel: a new connection altogether
         self._say(rsd, f"hands: CoreDevice HID (touchscreen {TOUCHSCREEN})")
         if self.dirty:
             await self._recover()
