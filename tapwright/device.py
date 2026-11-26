@@ -97,6 +97,10 @@ class PhoneLocked(ConnectionLost):
 
 
 AUTH_PROMPT = "LocalAuthenticationUIService"  # the process that draws iOS's passcode screen
+# The processes that draw widgets (chronod's renderers, e.g. com.apple.chrono.WidgetRenderer-Default): with an
+# interactive widget on the home screen iOS lists one as a foreground application (phone, 2026-11-26). Never the app in
+# front: the home screen is. (The runner says the same from route version 15.)
+WIDGET_HOSTS = "com.apple.chrono."
 PROMPT_AFTER = 6.0  # seconds a start may take before the phone is asked whether that screen is up (a start takes 3)
 PROMPT_EVERY = 3.0
 PROMPT_RETRY = 300.0  # seconds after which a start is tried anyway, in case the process list is wrong about the screen
@@ -688,7 +692,7 @@ class Device:
         # frozen app would take the screen away from the person typing)
         return [p["bundleIdentifier"] for p in procs
                 if p.get("foregroundRunning") and p.get("isApplication") and p.get("bundleIdentifier")
-                and p.get("name") != AUTH_PROMPT]
+                and p.get("name") != AUTH_PROMPT and not str(p["bundleIdentifier"]).startswith(WIDGET_HOSTS)]
 
     @_traced
     async def kill_app(self, bundle_id: str) -> int:

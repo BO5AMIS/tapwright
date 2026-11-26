@@ -45,11 +45,12 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # GET /wda/tw/shot (the screen as a JPEG) and `image=1` on the OCR route (the picture the text was read from).
 # tw-16.15.3.12 (tw version 12, 2.0.0): the OCR route draws a turned screenshot upright before Vision reads it (in
 # landscape Vision, told the screenshot's orientation, read the text upside down on iOS 26.5).
-# tw-16.15.3.14 (tw version 14, 2.0.0): a turned screen is read both ways up and the better reading kept; the answer says `turn`.
+# tw-16.15.3.15 (tw version 15, 2.0.0): a widget's renderer process is never the app in front (SpringBoard is).
+# tw-16.15.3.14 (tw version 14): a turned screen is read both ways up and the better reading kept; the answer says `turn`.
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
-    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.14", "6b4bde2c6a4b4516d6dbca39441ab5d147bb5efa4a8a98c610b9cc1ce5311ced", "fork-tw-16.15.3.14"),
+    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.15", "bcbc21c4b87b931bcc1de1641527f2a57b0b377e1fcdac4a82d0e969eb1e1665", "fork-tw-16.15.3.15"),
 }
 WDA_DEFAULT = "fork"
 WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]

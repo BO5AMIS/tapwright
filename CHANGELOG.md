@@ -21,7 +21,7 @@
 - `press_button lock` locks the phone (the runner can't); `home` and the volume buttons are pressed through HID too.
 - `pinch`: two fingers spread (`scale` above 1, zoom in) or pinched (below 1, zoom out) about a point. Needs HID.
 - Needs pymobiledevice3 11.63 or later.
-- The runner is now at route version 14 (`tw-16.15.3.14`). A phone with an older runner keeps working (without the
+- The runner is now at route version 15 (`tw-16.15.3.15`). A phone with an older runner keeps working (without the
   new reads, as in 1.10.0); to install the new one, run `tapwright doctor --fix` (phone on USB, `tapwright serve`
   stopped: it signs the runner again with your stored profile and installs it) or `tapwright setup --force`.
 - Screens that never answer accessibility reads in time (TikTok's For You feed, games, canvases, some web views) no
@@ -102,6 +102,10 @@
 - Text read from the picture in landscape is right again: with the screen turned, Apple's text reader returned each
   line upside down (`789` as `68L`). The runner now reads a turned screen both ways up and keeps the better reading.
 - Over Wi-Fi, a read whose answer never comes is asked again after its budget and 5 s (10 s before).
+- A widget is never the app in front. With an interactive widget on the home screen (a Smart Stack that turned to
+  one), WebDriverAgent and iOS's own process list both named the process that draws widgets as the app in front:
+  the home screen read as a screen with no elements, each read cost its whole budget, and `notifications` could
+  not close Notification Center. The runner (route version 15) and the daemon now name the home screen.
 - Measured on one phone (iPhone 14 Pro Max, iOS 26.5, USB, Settings app, 1.10.0 and 2.0.0 one after the other,
   medians): `open_app` 4.6 s to 1.7 s; `look` 0.53 s to 0.28 s; a tap with `look: false` 0.28 s to 0.11 s; a swipe
   3.6 s to 1.3 s; `close_app` 2.7 s to 0.55 s; `press_button home` 1.7 s to 1.2 s; a tap by label that opens a page,
