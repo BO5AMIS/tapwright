@@ -1582,10 +1582,11 @@ ELEMENTS_PART = "Elements: partly read (not all of the screen's elements were re
 # (2.0) a target by id, label, text or element ref on a screen that gave no elements, or only some (the daemon's
 # not_found says it; a repair and a route's count read it: review R200v M1)
 HINT_NO_ELEMENTS = ("This screen's elements weren't read within the time given, so there are none to find: look shows "
-                    "the text read from its picture as o refs; touch one of them, or a point {x, y}.")
+                    "the text read from its picture as o refs; touch one of them, a text it shows ({text}, with tap "
+                    "or long_press), or a point {x, y}.")
 HINT_PART_ELEMENTS = ("Not all of this screen's elements were read within the time given, so the element may be among "
-                      "those left out: look shows the text read from its picture as o refs; touch one of them, or a point "
-                      "{x, y}.")
+                      "those left out: look shows the text read from its picture as o refs; touch one of them, a text "
+                      "it shows ({text}, with tap or long_press), or a point {x, y}.")
 
 
 def cut_hint(text: str) -> bool:

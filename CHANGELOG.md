@@ -47,7 +47,9 @@
   none…`, with the picture after it unless `screenshot: false`.
 - A tap or long press aimed by `{text}` on a screen whose elements weren't read looks for the text in the text read from
   the picture and touches the centre of the line that shows it, as `wait_for` does. Several lines show it: `ambiguous`,
-  listing them as `o` refs of a new reading, or pick one with `index`. A target by id, label or `e` ref there, a
+  listing them as `o` refs of a new reading, or pick one with `index`. When the phone was used between the reading
+  of the text and the touch (a person in the live view, another agent), the touch is refused `stale`: look again. A
+  target by id, label or `e` ref there, a
   `{text}` the picture doesn't show, and a `{text}` target of any other call than `tap` and `long_press` (`toggle`,
   `type_text` into a named field, `scroll` to a target) answer `not_found` with how to reach the screen. `wait_for` a
   text also looks for it in the picture's text there; an id or label there can't be checked, so `wait_for` and `expect`
@@ -73,8 +75,9 @@
   taken for one that doesn't answer. A new session reads the screen's size without reading the app in front, so a screen
   that never answers no longer holds up the connection. `not_answering` is now only for an app that blocks even these
   bounded reads.
-- `apps`, `open_app`, `close_app` and a crash check use a kept list of the installed apps (asking the phone takes about a
-  second): it is given at once, read again behind the call when it is old, and asked fresh for a name it lacks. `close_app`
+- `open_app`, `close_app` and a crash check use a kept list of the installed apps (asking the phone takes about a
+  second): it is given at once, read again behind the call when it is old, and asked fresh for a name it lacks. The
+  `apps` tool itself always asks the phone. `close_app`
   answers without waiting for the runner to stop the app (an `open_app` waits for it), and the call after your own
   `close_app` looks for no crash of the app you closed. Measured on a phone: `open_app` 3.3 s to 1.4 s, `close_app`
   2.7 s to 0.5 s.
