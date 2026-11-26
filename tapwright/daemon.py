@@ -121,6 +121,11 @@ SCRIPT = contextvars.ContextVar("script", default=None)
 REASONED = frozenset({"not_actionable", "not_allowed"})  # codes whose message starts with a reason word
 STALE_AREA = 40.0  # points around a point target that must look as they did in the agent's last list (from PhoneUse)
 MIN_QUIET = 0.3  # seconds a screen must stay as it was before "No visible change." is believed
+# (2.0, phone 2026-11-26) the same after a touch sent by the hands. XCTest's tap answered about 200 ms after its effect
+# showed, so 0.3 s more was 0.5 s from the touch; a HID touch is acked at once, and the first tap into a page after a
+# cold start showed nothing for over 0.4 s: it was answered "No visible change." while the page was opening (11 of 11).
+HANDS_QUIET = 0.8
+HANDS_FRESH = 1.5  # seconds after a hands touch ended within which a settle is that touch's
 NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or video); "
                "positions may be mid-change.")
 
@@ -8846,6 +8851,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         stall = max(3 * gap if gap else 0.0, still)
         loop = asyncio.get_running_loop()
         began = loop.time()
+        # "nothing changed" is believed later after a touch the hands just sent (HANDS_QUIET, counted from its end)
+        touched = getattr(self.session, "hands_at", None)
+        quiet = self.settle_quiet
+        if isinstance(touched, float) and self.settle_quiet >= MIN_QUIET and 0 <= time.monotonic() - touched < HANDS_FRESH:
+            quiet = max(quiet, HANDS_QUIET - (time.monotonic() - touched))
         deadline = began + cap
         seq, differs, run, run_start, first_of_run = after_seq, False, 0, began, None
         if early is not None:
@@ -8884,7 +8894,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             else:
                 run, run_start, first_of_run = 1, now, frame
             if run >= 2 and now - run_start >= still:
-                if differs or (seq - after_seq >= 3 and now - began >= self.settle_quiet):
+                if differs or (seq - after_seq >= 3 and now - began >= quiet):
                     return Settled(now - began, differs, False, True)
         return Settled(loop.time() - began, True, differs)
 

@@ -425,6 +425,7 @@ class Session:
         # Tapwright 2.0: the HID hands (hands.Hands), set by the server for the real phone; None (tests' fakes, or no
         # hands): every touch goes through the runner. motion_rng shapes human-like taps and swipes (motion.py).
         self.hands: "hands_module.Hands | None" = None
+        self.hands_at: float | None = None  # time.monotonic() when the hands last finished a gesture
         self.motion_rng = random.Random()
         # (2.0, route version 9) how the newest tree read came back: "full", "shallow" (part of the tree, the runner's
         # budget ran out) or "root" (the application node alone: the screen doesn't answer accessibility reads); and
@@ -1152,6 +1153,7 @@ class Session:
             self.before_input = None
         if pending:
             trace.response(pending[0], {})
+        self.hands_at = time.monotonic()  # (the daemon's settle believes "nothing changed" later after a hands touch)
         if TRACE and not QUIET.get():
             getattr(self.device, "log", lambda *a: None)(
                 f"trace hands {what} {(time.monotonic() - began) * 1000:.0f} ms")
@@ -1167,6 +1169,9 @@ class Session:
             hx, hy, held = motion.tap(x, y, self.motion_rng)
             if held:
                 x, y, hold_ms = hx, hy, held
+        if TRACE and not QUIET.get():
+            getattr(self.device, "log", lambda *a: None)(
+                f"trace hands tap at ({x:.1f}, {y:.1f}) hold {hold_ms} ms, screen {self.screen}, turn {self.turn}")
         return await self._by_hands("tap", lambda before: hands.tap(x, y, hold_ms, screen=self.screen,
                                                                     turn=self.turn, before=before))
 
