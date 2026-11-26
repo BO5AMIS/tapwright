@@ -3672,6 +3672,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             floor_off = (_TOUCH_FLOOR.set(None) if _FLOOR_REPAIRED_ONLY.get() and not scriptrepair.under_repair(steps, i - 1)
                          else None)
             before = len(self._recording[client_id]["steps"]) if client_id in self._recording else None
+            ran = False  # (an `if` no read could decide is not an optional wait that timed out)
             try:
                 if "if" in step or step.get("optional"):  # one check, right after the step before settled (§9.1)
                     skip = await self._skipped(view, scope, step)
@@ -3679,6 +3680,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                         traced.append(batch.skipped(i, skip))  # said whether or not `trace` is on
                         done += 1
                         continue
+                ran = True
                 for tries in range(REFLEX_TRIES + 1):
                     try:
                         answer = await self.run_tool(client_id, step["tool"], batch.args_of(step), scope)
@@ -3713,7 +3715,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                   if "expect" in step else None)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
-                if step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
+                if ran and step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
                     traced.append(batch.skipped(i, batch.optional_wait_skipped(step, unread=unread(e))))  # (1.9.0 round 2)
                     done += 1
                     continue
@@ -3777,7 +3779,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """Why this step is skipped, or None when it runs (§9.1): its `if` doesn't hold, or it is `optional` and its target
         isn't on screen. One read of the screen with no wait, right after the step before settled; the elements below
         the fold count as there, and the match is `wait_for`'s (`_missing`). The line is `if: "Not now" isn't on
-        screen`, `if: "Loading" is on screen` (for `gone`) or `optional: "Not now" isn't on screen`."""
+        screen`, `if: "Loading" is on screen` (for `gone`) or `optional: "Not now" isn't on screen`. An `if` no read can
+        decide (a cut-short tree) raises `timeout` (UNREAD)."""
         given = await self._given(scope) if scope is not None else None
         await self._read(lambda: self._silent_read(view))
         if given is not None and self._bundle() not in given:
@@ -3792,8 +3795,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             shown = await self._presence(there, ui.parse_target({kind: cond[kind]}), kind, cond[kind], cut,
                                          SKIP_TEXT_WAIT)
             if shown is None:
-                # (R200v H2) neither held nor failed: the step isn't run on a guess (a guard keeps its step from running)
-                return f"if: {batch.aim_name(kind, cond[kind])} couldn't be checked ({UNREAD})"
+                # (R200v H2) neither held nor failed: the step isn't run on a guess, and (CodeRabbit, PR #26) neither are
+                # the steps after it, written for a screen whose state is known: the run stops `timeout`, as documented
+                raise Refused("timeout", f"if: {batch.aim_name(kind, cond[kind])} couldn't be checked ({UNREAD})")
             if shown == bool(cond.get("gone")):
                 verb = "is" if cond.get("gone") else "isn't"
                 return f"if: {batch.aim_name(kind, cond[kind])} {verb} on screen"

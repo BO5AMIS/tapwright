@@ -52,8 +52,8 @@
   target by id, label or `e` ref there, a
   `{text}` the picture doesn't show, and a `{text}` target of any other call than `tap` and `long_press` (`toggle`,
   `type_text` into a named field, `scroll` to a target) answer `not_found` with how to reach the screen. `wait_for` a
-  text also looks for it in the picture's text there; an id or label there can't be checked, so `wait_for` and `expect`
-  answer `timeout` saying so (never `Done`, never a failed check).
+  text also looks for it in the picture's text there; an id or label there can't be checked, so `wait_for`, `expect`
+  and a `run` step's `if` answer `timeout` saying so (never `Done`, never a failed check; the run stops there).
 - On such a screen nothing is reported as known that wasn't read: `audit` and `ux_check` answer `unsupported` (a
   report from part of a screen would be false), no place, road or route is saved from it, `explore` files no "no way
   back" from it, a journey's stress says survival couldn't be checked, `compare_screen` won't ignore elements it

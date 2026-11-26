@@ -200,19 +200,37 @@ def test_a_runs_expect_on_a_root_tree_fails_the_step_as_not_checked_never_as_a_f
     run(go)
 
 
-def test_a_steps_if_and_an_optional_wait_on_a_root_tree_are_skipped_as_not_checked(no_pc_ocr):
+def test_an_optional_wait_and_an_optional_tap_on_a_root_tree_are_skipped_as_not_checked(no_pc_ocr):
     async def go():
         s = feed_session()
         d = make(s)
         stop, task = await started(d)
         r = await d.run_tool("a", "run", {"steps": [
-            {**SWIPE, "if": {"id": "next"}},
             {"tool": "wait_for", "id": "spinner", "gone": True, "timeout": 0.5, "optional": True},
             {"tool": "tap", "target": {"id": "skip"}, "optional": True}], "trace": True, "screenshot": False})
         text = r["text"]
-        assert f"if: id=next couldn't be checked ({daemon_module.UNREAD})" in text
         assert "optional: id=spinner couldn't be checked within 0.5 s" in text
         assert f"optional: id=skip couldn't be found ({daemon_module.UNREAD})" in text
+        assert "tap" not in s.calls  # (nothing was run on a guess)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_steps_if_no_read_can_decide_stops_the_run_timeout(no_pc_ocr):
+    # (CodeRabbit, PR #26) AGENT-TOOLS: a step's `if` no read can decide answers `timeout`, never `Done`: the steps
+    # after it were written for a screen whose state is known, so the run stops there instead of going on
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        for first in ({**SWIPE, "if": {"id": "next"}},
+                      {"tool": "wait_for", "id": "x", "timeout": 0.5, "optional": True, "if": {"label": "Next"}}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "run", {"steps": [first, {"tool": "tap", "target": {"x": 100, "y": 100}}],
+                                              "screenshot": False})
+            said = str(e.value)
+            assert e.value.code == "timeout" and daemon_module.unread(e.value), first
+            assert said.startswith("Ran 0 of 2 steps; stopped at step 1") and "couldn't be checked" in said, said
         assert "swipe" not in s.calls and "tap" not in s.calls  # (nothing was run on a guess)
         await finish(stop, task)
     run(go)
