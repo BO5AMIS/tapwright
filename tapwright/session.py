@@ -507,6 +507,7 @@ class Session:
         # whether this session's start had the pixel scale from the runner's screen route (version 9), which doesn't read
         # the app: then nothing asks /wda/screen for it, which reads the app (worker H: on TikTok's feed, the AX timeout)
         self.scale_by_runner = False
+        self._made_root: str | None = None  # the newest root made here without asking for the tree (_unasked_root)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -714,8 +715,8 @@ class Session:
     async def _follow_orientation(self, source: str | None) -> None:
         """Keep `screen` and `turn` with the phone's orientation: the tree's root says the screen's size in points
         now (932x430 in landscape), and WebDriverAgent's rotation says which way it turned (z 90 or 270)."""
-        if not isinstance(source, str):
-            return
+        if not isinstance(source, str) or source is getattr(self, "_made_root", None):
+            return  # (a root made here from `screen` says nothing new: the rotation question isn't asked for it)
         root = ROOT_SIZE.search(source[:2000])
         if root is None:
             return
@@ -844,7 +845,7 @@ class Session:
             self.app_names.get(bundle)
         if label and label != bundle:
             node["l"] = label
-        source = ui.xml_of_tree(node)
+        source = self._made_root = ui.xml_of_tree(node)
         age = self.budgets.tried_ago(bundle) or 0.0
         self.last_tier, self.last_why = "root", UNASKED_WHY.format(bundle=bundle, age=age)
         self.last_compact = None  # (a cut-short tree is never the "unchanged" baseline)
@@ -960,6 +961,12 @@ class Session:
             self.last_tier, self.last_why = tier_was, why_was
 
     async def foreground_bundle_id(self) -> str | None:
+        """The bundle id of the app in front. (2.0, worker H) By route version 11's FRONT_PATH when the runner has it:
+        found as a tree read finds its root's app, without reading the app (a few ms, where /wda/activeAppInfo took
+        1.7-30 s on TikTok's feed); activeAppInfo only when that can't say."""
+        await self.ensure()
+        if (front := await self.front_app()) is not None:
+            return front[0]
         try:
             info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
         except ConnectionLost:
@@ -986,6 +993,8 @@ class Session:
         root's (label, bundle id): the same answer without a request (activeAppInfo cost 70 ms an answer)."""
         if known is not None:
             info = {"name": known[0], "bundleId": known[1]}
+        elif self.tw_version >= FRONT_VERSION and (front := await self.front_app()) is not None:
+            info = {"name": "", "bundleId": front[0]}  # (route version 11: without reading the app, as foreground_bundle_id)
         else:
             try:
                 info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}

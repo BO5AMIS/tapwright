@@ -6,7 +6,6 @@ import time
 
 import pytest
 
-from fakes import FrameFeeder  # noqa: F401  (kept for the helpers' imports below)
 from test_daemon import make, on_loop_clock, run_virtual
 
 from tapwright import daemon as daemon_module
@@ -607,3 +606,30 @@ def test_a_whole_look_or_a_stream_frame_keeps_the_picture_and_the_text_apart(mon
         await feeder.stop()
         await finish(stop, task)
     run(go)
+
+
+def test_the_app_in_front_is_asked_by_front_on_a_v11_runner_and_by_active_app_info_before(state):
+    from tapwright.session import Session
+    runner = _v11()
+    s = Session(runner)
+    assert asyncio.run(s.foreground_bundle_id()) == TT
+    assert asyncio.run(s._app())[1] == TT  # (a root naming no app is told the same way)
+    assert runner.paths("/wda/activeAppInfo") == []
+    runner.front = {"ms": 512}  # it can't say: activeAppInfo, as before
+    assert asyncio.run(s.foreground_bundle_id()) == TT and len(runner.paths("/wda/activeAppInfo")) == 1
+    old = _v11(version=10)
+    assert asyncio.run(Session(old).foreground_bundle_id()) == TT
+    assert old.paths("/wda/tw/front") == [] and len(old.paths("/wda/activeAppInfo")) == 1
+
+
+def test_a_root_made_here_asks_no_rotation_in_landscape(state):
+    from tapwright.session import Session
+    runner = _v11()
+    s = Session(runner)
+    asyncio.run(s.ensure())
+    s.screen, s.turn, s._turn_asked = (932.0, 430.0), 90, -float("inf")  # landscape, the side not asked lately
+    s.read_app = ("TikTok", TT)
+    asyncio.run(s.refresh())  # the real read (its root is 430x932 in the fake: it asks nothing either way)
+    s.screen, s.turn = (932.0, 430.0), 90
+    asyncio.run(s.refresh())  # made here
+    assert s.last_why.startswith("not asked") and runner.paths("/rotation") == [] and s.turn == 90
