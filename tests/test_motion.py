@@ -71,3 +71,12 @@ def test_min_jerk_runs_from_nothing_to_all_and_is_half_way_at_half_time():
     assert motion.min_jerk(0) == 0 and motion.min_jerk(1) == 1 and motion.min_jerk(0.5) == pytest.approx(0.5)
     values = [motion.min_jerk(i / 50) for i in range(51)]
     assert all(b >= a for a, b in zip(values, values[1:]))
+
+@pytest.mark.parametrize("ms", [0.0, 1.0, 1.4, 2.0, 3.0])
+def test_a_very_short_swipe_keeps_every_sample_after_the_rest_and_in_order(ms):
+    # (CodeRabbit, PR #26) a 1 ms move got 4 intervals; the room kept for the samples after one put it before the rest
+    for seed in range(20):
+        points = motion.swipe(0, 0, 100, 0, ms, random.Random(seed), human=True)
+        times = [t for t, _, _ in points]
+        assert all(b > a for a, b in zip(times[1:], times[2:])), (ms, seed, times)  # (after the rest: strictly later)
+        assert times[1] <= min(times[2:])

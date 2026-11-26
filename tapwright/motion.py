@@ -61,7 +61,9 @@ def swipe(x0: float, y0: float, x1: float, y1: float, ms: float, rng: random.Ran
     # the unit normal to the line, and how far the middle bows along it (either side)
     nx, ny = -(y1 - y0) / length, (x1 - x0) / length
     bow = min(rng.uniform(*ARC_SHARE) * length, ARC_MAX_PT) * rng.choice((-1.0, 1.0))
-    steps = max(4, math.ceil(ms / STEP_MS))
+    # (CodeRabbit, PR #26) no more intervals than the move has room for at 0.5 ms each: a 1 ms move got 4, and the room
+    # kept for the samples after the first put it before the rest
+    steps = min(max(4, math.ceil(ms / STEP_MS)), max(1, math.floor(ms / 0.5)))
     prev = dwell
     for i in range(1, steps):
         s = i / steps
