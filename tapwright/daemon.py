@@ -4728,7 +4728,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         trace.settled()
         if session_module.TRACE:
             self.log(f"trace {name} settle {done.seconds:.2f} s, changed={done.changed}")
-        if (doubt := await self._judge_hands(name, box.get("began"), done.changed, target)) is not None:
+        if (doubt := await self._judge_hands(name, box.get("began"), done, target)) is not None:
             notes = [*notes, doubt]
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
@@ -6376,23 +6376,43 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return False
             await asyncio.sleep(LOCK_PRESS_POLL)
 
-    async def _judge_hands(self, name: str, began: float | None, changed: bool,
+    async def _judge_hands(self, name: str, began: float | None, done: Settled,
                            target: "ui.Target | None" = None) -> str | None:
         """After the settle of a touchscreen gesture the hands played (Session.hands_at is from this call): tell the
-        hands whether the screen changed (Hands.judged), and give the note for the answer when they doubt their
-        connection. Only a tap, long press or toggle aimed at an element counts, for the connection or against it
-        (review L-L3; 2.0.2 for "for it"): a scroll at a list's end, a `back` with nothing to go back to and a tap at
-        a point the agent chose change nothing by right, and a screen that changed after a scroll or a swipe may have
-        changed by itself (that proved a connection that reached nothing, 2026-11-26). A nicety that never fails a
-        call."""
+        hands whether the touch landed (Hands.judged), and give the note for the answer when they doubt their
+        connection. A nicety that never fails a call.
+
+        Only a tap, long press or toggle aimed at something counts, for the connection or against it (review L-L3;
+        2.0.2 for "for it"): at an element, or at a text of the picture (an o ref, a {text} found there: review R202
+        M3, a screen with no elements has no other touch to judge by). A scroll at a list's end, a `back` with nothing
+        to go back to and a tap at a point the agent chose change nothing by right, and a screen that changed after a
+        scroll or a swipe may have changed by itself (that proved a connection that reached nothing, 2026-11-26).
+
+        And only what the screen showed for certain (review R202 H1, M1). Landed: the frames changed and then stood
+        still. A wait that ended on a stall, on its cap or with no frames says "changed" too, and on a screen that
+        never stands still (a spinner, a video) it would prove a connection that reaches nothing with every touch.
+        Not landed: the frames stood unchanged, the stream is the phone's own (a stalled AirPlay mirror repeats its
+        last picture) and the touch is no toggle (the tree, not the stream, says whether a switch flipped). Anything
+        else says nothing, either way."""
         s = self.session
         hands, at = getattr(s, "hands", None), getattr(s, "hands_at", None)
         if name not in HANDS_GESTURES or hands is None or began is None or at is None or at < began:
             return None
-        if not (name in HANDS_EXPECTED and target is not None and target.point is None):
+        aimed = target is not None and (target.point is None or _PICTURE_AIM.get() is not None)
+        if name not in HANDS_EXPECTED or target is None or not aimed:
             return None
+        if done.changed and done.still:
+            landed = True
+        elif not done.changed and name != "toggle" and not self._fed_by_video():
+            landed = False
+        else:
+            return None
+        if target.point is None:
+            key: tuple = (name, target.kind, getattr(target, target.kind), target.index)
+        else:
+            key = (name, "point", round(target.point[0]), round(target.point[1]))
         try:
-            verdict = await hands.judged(changed)
+            verdict = await hands.judged(landed, key)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001

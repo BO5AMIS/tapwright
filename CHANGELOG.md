@@ -2,15 +2,20 @@
 
 ## 2.0.2
 
-- Touches that are acknowledged and do nothing are caught reliably. A start of the service can open a touch connection
-  (CoreDevice HID) that the phone acknowledges and that reaches nothing: every tap answers "No visible change". 2.0
-  opens such a connection again after three taps on elements that changed nothing, but only while no gesture had
-  changed the screen, and a scroll or a swipe on a screen that changed by itself counted as one: the connection was
-  then trusted for as long as the service ran. Now only a tap, long press or toggle aimed at an element proves a
-  connection, a connection that had landed touches is doubted the same way (three such touches in a row that change
-  nothing open it again, which costs one opening), and when the new connection changes nothing either, touches go
-  through the runner for 10 minutes instead of for good, then the hands get one touch to prove themselves (each time
-  on the runner is twice the one before, up to 6 hours). The answer says so each time.
+- A touch connection that is acknowledged and reaches nothing is caught in more cases. A start of the service can
+  open a touch connection (CoreDevice HID) that the phone acknowledges and that does nothing: every tap answers "No
+  visible change". 2.0 opens such a connection again after three taps on elements that changed nothing, but only
+  while no gesture had changed the screen, and a scroll or a swipe on a screen that changed by itself counted as one:
+  the connection was then trusted for as long as the service ran. Now:
+  - only a tap, long press or toggle aimed at an element or at a text of the picture counts, for the connection or
+    against it, and only when the screen showed the outcome for certain (it changed and then stood still, or stood
+    unchanged; a wait that ended on its cap or on a stall says nothing);
+  - a connection that had landed touches is doubted the same way: three such touches in a row that change nothing
+    open it again (the same button pressed again and again counts once). That costs the opening and those touches;
+  - when the new connection changes nothing either, touches go through the runner for 10 minutes instead of for
+    good, then the hands are tried again; each time on the runner is twice the one before, up to 6 hours.
+  The answer says so each time. Not caught: a connection that reaches nothing on a screen that never stands still (a
+  video feed), where no touch shows its outcome for certain.
 
 ## 2.0.1
 

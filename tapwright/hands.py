@@ -245,6 +245,8 @@ class Hands:
         self._unchanged = 0  # touches in a row of the open connection that changed nothing, while it isn't proven
         self._doubted: Any = None  # the tunnel whose touch connection was opened again for doubt, once
         self._spells = 0  # times on the runner in a row for this tunnel (judged), with no touch landed between
+        self._landed = False  # a touch of this tunnel has landed (judged): some connection of it reached the screen
+        self._last_key: object = None  # what the last touch that changed nothing was aimed at (judged)
 
     # ---- state ----
     @property
@@ -313,31 +315,38 @@ class Hands:
                          f"touch can't go through CoreDevice HID to let go of it first ({e.reason}); nothing was "
                          "touched: wait a few seconds, then look") from None
 
-    async def judged(self, changed: bool, meant: bool = True) -> str | None:
-        """The caller's word on a touchscreen gesture these hands just played: did the screen change after it? The phone
-        acks a report as it is written, whether or not it does anything, so only the screen can say that touches land.
+    async def judged(self, changed: bool, key: object = None) -> str | None:
+        """The caller's word on a touch these hands just played that should change the screen (a tap, long press or
+        toggle aimed at something: the caller leaves every other gesture out, and every touch whose outcome the screen
+        didn't show for certain): did it? The phone acks a report as it is written, whether or not it does anything,
+        so only the screen can say that touches land. (2.0.2: a scroll or a swipe after which the screen changed
+        counted as proof. A screen that changes by itself said "it lands" of a connection that reached nothing, and
+        that connection was never doubted after it: the phone, 2026-11-26 12:41, taps answered "No visible change" for
+        as long as the service ran.)
 
-        `meant`: the gesture was a tap, long press or toggle aimed at an element, which should change the screen. Only
-        such a touch counts, either way (2.0.2). A scroll or a swipe after which the screen changed proves nothing: a
-        screen that changes by itself (a list still loading, a page that searches) said "it lands" of a connection that
-        reached nothing, and that connection was never doubted after it (the phone, 2026-11-26 12:41: taps answered
-        "No visible change" for as long as the service ran).
+        `key`: what the touch was aimed at. On a connection that has landed a touch, touches in a row at the same
+        thing that change nothing count once: a button that does nothing, pressed again and again, is no sign of a
+        connection that died (review R202 M2). On one that hasn't, each counts.
 
-        DOUBT_AFTER such touches in a row that changed nothing close the connection: the next touch opens a new one
+        DOUBT_AFTER touches in a row that changed nothing close the connection: the next touch opens a new one
         ("reopened"). A connection that had landed a touch is doubted the same way (2.0.2: it was never doubted): the
-        cost is one opening. When the connection opened for doubt changes nothing either, touches go through the
-        runner for RUNNER_FOR ("runner"), then the hands are tried again: that connection has one touch to land, and
-        each time on the runner is twice the one before (up to RUNNER_MAX), so a connection that never reaches the
-        screen costs one touch now and then, not three every ten minutes. None otherwise."""
-        if self._touch is None or not meant:
+        cost is the opening and the touches that count up to it. When the connection opened for doubt changes nothing
+        either, touches go through the runner for RUNNER_FOR ("runner"), then the hands are tried again, and each
+        time on the runner is twice the one before (up to RUNNER_MAX). A tunnel none of whose touches ever landed
+        gives the connection tried after a time on the runner one touch to land, so a connection that never reaches
+        the screen costs one touch now and then, not three every ten minutes. None otherwise."""
+        if self._touch is None:
             return None
         if changed:
-            self._proven, self._unchanged = True, 0
+            self._proven, self._unchanged, self._landed, self._last_key = True, 0, True, None
             # it lands: the next doubt of this tunnel starts with an opening again, and a first time on the runner
             self._doubted, self._spells = None, 0
             return None
+        if self._proven and key is not None and key == self._last_key:
+            return None
+        self._last_key = key
         self._unchanged += 1
-        after = 1 if self._spells and not self._proven else DOUBT_AFTER
+        after = 1 if self._spells and not self._landed else DOUBT_AFTER
         if self._unchanged < after:
             return None
         async with self._lock:
@@ -355,7 +364,7 @@ class Hands:
                          + ": opening CoreDevice HID again")
                 return "reopened"
             why = "touches through CoreDevice HID were acknowledged but changed nothing, also after it was opened again"
-            spell = min(RUNNER_FOR * 2 ** self._spells, RUNNER_MAX)
+            spell = min(RUNNER_FOR * 2 ** min(self._spells, 16), RUNNER_MAX)  # (review R202 L4: the exponent is bounded)
             self._spells += 1
             self._failed = (rsd, why, asyncio.get_running_loop().time() + spell)
             self._say(rsd, f"hands: not used for {spell / 60:.0f} minutes ({why}); touches go through the runner")
@@ -404,9 +413,9 @@ class Hands:
             raise HandsUnavailable(why) from None
         self._rsd, self._touch, self._buttons, self._keyboard = rsd, touch, buttons, keyboard
         self._failed = None
-        self._proven, self._unchanged = False, 0
+        self._proven, self._unchanged, self._last_key = False, 0, None
         if self._doubted is not None and self._doubted is not rsd:
-            self._doubted, self._spells = None, 0  # another tunnel: a new connection altogether
+            self._doubted, self._spells, self._landed = None, 0, False  # another tunnel: a new connection altogether
         self._say(rsd, f"hands: CoreDevice HID (touchscreen {TOUCHSCREEN})")
         if self.dirty:
             try:
