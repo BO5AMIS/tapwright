@@ -198,7 +198,7 @@ def test_a_full_swipe_reads_nothing_before_its_drag_and_a_tiny_one_still_does():
 
 # ---- back waits for fresh frames rather than reading again after its list's read held the stream ----
 
-def _back_after_a_stalled_read(resumes: bool) -> int:
+def _back_after_a_stalled_read(resumes: bool, age: float = 0.7) -> int:
     from fakes import FrameFeeder
     from test_daemon import finish, run, started
     from test_latency_paths_200 import _listing_session
@@ -212,7 +212,8 @@ def _back_after_a_stalled_read(resumes: bool) -> int:
         await asyncio.sleep(0.1)
         await d.run_tool("a", "look", {"screenshot": False})
         await feeder.stop()  # the runner sends no frames while it reads: the newest is as old as the read
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(age)  # (past BACK_JUST_READ by default: a list read a moment ago is taken as it is)
+        d.control.clock.t += age  # (the list's age is told on the controller's clock, a fake one here)
         assert not d._proven_still(noted=False)
         if resumes:
             async def later():
@@ -243,6 +244,12 @@ def test_back_waits_for_fresh_frames_to_prove_its_list_instead_of_reading_again(
 
 def test_back_reads_when_no_fresh_frame_comes_within_its_wait():
     assert _back_after_a_stalled_read(resumes=False) == 1
+
+
+def test_back_takes_a_list_read_a_moment_ago_without_any_frame():
+    """(lead, phone 2026-11-26) In a run of steps `back` follows the call that read the list at once: no frame can
+    prove anything yet, and it read the page again every time (1.0-1.5 s)."""
+    assert _back_after_a_stalled_read(resumes=False, age=0.1) == 0
 
 
 # ---- the agent's own home press is no crash sign ----

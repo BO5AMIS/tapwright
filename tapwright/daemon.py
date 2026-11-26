@@ -522,6 +522,7 @@ BACK_STILL_PAUSE, BACK_STILL_TRIES = 0.3, 6  # see Daemon._still_back
 BACK_STILL_WAIT = 0.3  # (2.0, worker I) seconds `back` waits for fresh frames to prove its list's screen still (_back_from_list)
 BACK_FIRST_FRAME = 0.12  # ... of which at most this for the first one (about 3 frame gaps at the stream's rate)
 STILL_UNPROVEN = "the screen isn't proven still"
+BACK_JUST_READ = 0.6  # seconds after its list was read in which `back` takes the list without proof of stillness
 TOGGLE_LAND_WAIT, TOGGLE_POLL = 0.5, 0.05  # seconds: see Daemon._toggle_landed
 # A switch element this many times wider than tall is a whole row (label and control): toggle touches the control,
 # SWITCH_FROM_RIGHT points in from its right end (half an iOS switch, 63 pt wide), not the label in the middle
@@ -8992,7 +8993,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return no("the picture changed since the read" + (_where_unlike(self.hub.latest, view.read_mark[1])
                                                                if session_module.TRACE else ""))
         try:
-            if not self._proven_still(noted=False):
+            # (lead, phone 2026-11-26) a list read a moment ago is taken as it is, as a tap by label takes one for
+            # LIVE_AGE: right after a read no frame can prove anything (the runner sends none while it reads), and a
+            # `back` that follows the call that read the list at once, as in a run of steps, read the page again
+            # every time (1.0-1.5 s on Settings > General)
+            if self.control.clock() - view.read_at >= BACK_JUST_READ and not self._proven_still(noted=False):
                 return no(STILL_UNPROVEN)
         except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: read as before
             return no("the picture can't be compared")
