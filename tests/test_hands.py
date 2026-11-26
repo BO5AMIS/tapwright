@@ -440,8 +440,10 @@ class Recorder:
 
 @pytest.fixture
 def phone(monkeypatch):
+    from tapwright import motion
     monkeypatch.setattr(session_module.store, "load_state", lambda: {"runner_id": "runner"})
     monkeypatch.setattr(session_module, "HANDS", "auto")
+    monkeypatch.setattr(motion, "HUMAN", True)  # (CodeRabbit, PR #26: not TAPWRIGHT_HUMAN of the shell running the tests)
     return Recorder()
 
 
@@ -672,13 +674,14 @@ def test_press_button_takes_lock_and_names_the_buttons_when_refusing():
     asyncio.run(go())
 
 
-def test_lazy_listing_keeps_pinch_and_lock_out():
+def test_lazy_listing_keeps_pinch_and_lock_out(monkeypatch):
     from tapwright import mcp_server
-    try:
-        mcp_server.set_lazy_tools(True)
-        tools = {t.name: t for t in asyncio.run(mcp_server.server.list_tools())}
-    finally:
-        mcp_server.set_lazy_tools(False)
+    # (CodeRabbit, PR #26) both listings by these settings, not TAPWRIGHT_LAZY_TOOLS of the shell running the tests
+    monkeypatch.delenv("TAPWRIGHT_LAZY_TOOLS", raising=False)
+    for name, value in (("LAZY_TOOLS", True), ("_LAZY_ASKED", True), ("_HINTS_ON", True)):
+        monkeypatch.setattr(mcp_server, name, value)
+    tools = {t.name: t for t in asyncio.run(mcp_server.server.list_tools())}
+    mcp_server.set_lazy_tools(False)
     assert "pinch" not in tools and "lock" not in tools["press_button"].input_schema["properties"]["name"]["enum"]
     eager = {t.name: t for t in asyncio.run(mcp_server.server.list_tools())}
     assert "pinch" in eager and "lock" in eager["press_button"].input_schema["properties"]["name"]["enum"]
