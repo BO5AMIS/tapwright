@@ -1120,7 +1120,7 @@ class Session:
         return self.hands is not None and HANDS != "runner" and self.front_apps is None
 
     async def _by_hands(self, what: str, act: "Callable[[Callable[[], Awaitable[None]]], Awaitable[None]]",
-                        input_: bool = True) -> bool:
+                        input_: bool = True, detail: str = "") -> bool:
         """Play a gesture through the hands: `act(before)` sends it, awaiting `before` right before its first report.
         `before` makes the checks a runner request makes in _timed (the execution guard, then the one-use input check
         for an input), and the trace notes the touch. False, with nothing sent, when the hands can't be used
@@ -1156,7 +1156,7 @@ class Session:
         self.hands_at = time.monotonic()  # (the daemon's settle believes "nothing changed" later after a hands touch)
         if TRACE and not QUIET.get():
             getattr(self.device, "log", lambda *a: None)(
-                f"trace hands {what} {(time.monotonic() - began) * 1000:.0f} ms")
+                f"trace hands {what} {(time.monotonic() - began) * 1000:.0f} ms{detail}")
         return True
 
     async def _hands_tap(self, x: float, y: float, hold_ms: int) -> bool:
@@ -1169,11 +1169,9 @@ class Session:
             hx, hy, held = motion.tap(x, y, self.motion_rng)
             if held:
                 x, y, hold_ms = hx, hy, held
-        if TRACE and not QUIET.get():
-            getattr(self.device, "log", lambda *a: None)(
-                f"trace hands tap at ({x:.1f}, {y:.1f}) hold {hold_ms} ms, screen {self.screen}, turn {self.turn}")
         return await self._by_hands("tap", lambda before: hands.tap(x, y, hold_ms, screen=self.screen,
-                                                                    turn=self.turn, before=before))
+                                                                    turn=self.turn, before=before),
+                                    detail=f" at ({x:.1f}, {y:.1f}) hold {hold_ms} ms, turn {self.turn}")
 
     async def hands_keys(self, text: str) -> bool:
         """Type US-ASCII text into whatever has focus through the HID keyboard (for later use: type_text still goes

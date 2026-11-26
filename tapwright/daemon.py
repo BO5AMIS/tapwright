@@ -126,6 +126,12 @@ MIN_QUIET = 0.3  # seconds a screen must stay as it was before "No visible chang
 # cold start showed nothing for over 0.4 s: it was answered "No visible change." while the page was opening (11 of 11).
 HANDS_QUIET = 0.8
 HANDS_FRESH = 1.5  # seconds after a hands touch ended within which a settle is that touch's
+# (2.0, phone 2026-11-26) the earliest a settle may end "changed, then still" after a touch the hands sent, counted from
+# the touch's end. A HID tap is acked at once (60-110 ms after it starts): in Settings a row shows its highlight first,
+# then stands still for a moment, then the push animation runs (0.7-0.9 s to stillness). A settle that ended on the
+# highlight (0.11 s) read the tree mid-transition: right after a back, `tap {"label": "General"}` found the outgoing
+# page's title too ("2 elements match"). The stillness after a highlight is about 0.1-0.2 s; 0.35 s lets the push start.
+HANDS_SETTLE_MIN = 0.35
 NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or video); "
                "positions may be mid-change.")
 
@@ -417,6 +423,19 @@ WAIT_FOR_MIN, WAIT_FOR_DEFAULT = 0.5, 10.0  # `wait_for`'s timeout in seconds (i
 WAIT_FOR_KINDS = ("text", "id", "label")
 WAIT_FOR_POLL = 0.3  # seconds between tree reads while waiting
 SCROLL_MIN, SCROLL_MAX = 0.1, 1.0  # `scroll`'s amount: a share of the scroll area
+def _bare_name(shown: str, bundle: str) -> str:
+    """An app's name as `Daemon._app` shows it ("Wayfare (com.example.wayfare)") without the bundle id it ends with."""
+    tail = f" ({bundle})"
+    return shown[:-len(tail)] if shown.endswith(tail) and len(shown) > len(tail) else shown
+
+
+def _app_words(app: tuple[str, str]) -> str:
+    """(name, bundle id) as an answer says it: `Name (bundle id)`, or the bundle id once when that is all the name is."""
+    name, bundle = app
+    name = _bare_name(name, bundle)
+    return bundle if not name or name == bundle else f"{name} ({bundle})"
+
+
 def _screen_sig(items: list[ui.Element]) -> tuple:
     """What a light read says the screen holds: for comparing two reads when there is no stream."""
     return tuple((e.role, e.label, e.value, e.rect) for e in items)
@@ -5783,7 +5802,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view.auto_begun.add(bundle_id)
         # (1.7.8, X item 4) nothing aimed at or typed into before belongs to the app that is opened: typing without a
         # target goes only to it, and no field of the app before is typed into again
-        view.aimed_app, view.typed_field = (shown, bundle_id), None
+        # (its name alone: `shown` already ends with the bundle id, and the stale-app refusal adds it once more)
+        view.aimed_app, view.typed_field = (_bare_name(shown, bundle_id), bundle_id), None
         self.session.typed_into = self.session.typed_place = None
         if a.get("language"):  # the language its titles are kept under (§18.9); a start in the phone's own language clears it
             self._language[bundle_id] = str(a["language"])
@@ -6988,9 +7008,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     and view.alert_now is None):  # (an OS alert's own field is typed into over any app)
                 # (1.7.8, X item 4) another app came to the front since the agent's last touch or open_app (Safari, after
                 # a tap in Files): its only input is no field the agent chose
-                raise Refused("stale", f"{front[0]} ({front[1]}) is in front now, not {view.aimed_app[0]} "
-                                       f"({view.aimed_app[1]}), where your last touch went. Nothing was typed; look, "
-                                       "then pass a target.")
+                raise Refused("stale", f"{_app_words(front)} is in front now, not {_app_words(view.aimed_app)}, where "
+                                       "your last touch went. Nothing was typed; look, then pass a target.")
             inputs = [e for e in view.items if e.role == "input"]
             if not inputs and self._tier_now() != "full":
                 return await self._type_focused(a)  # (2.0) the screen gave no fields: the keys go to the focused one
@@ -8843,6 +8862,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         so a slow stream isn't called still too soon). Each frame is compared with the first of its run, so a
         slow fade, close to the last frame every time, is not still. `changed`: a frame is unlike the one at the
         start of the action (`since`, from _mark; None means there was no frame, so any frame counts).
+        After a touch the hands sent (Session.hands_at), "changed, then still" ends it no sooner than HANDS_SETTLE_MIN
+        from the touch's end: a row's highlight and the stillness after it come before the page's push.
         `changed` is False only when the answer is certain: 3 frames, all like `since`, and `quiet` seconds.
         A stall, no frames at all (it sleeps `settle_fallback` in total, first-frame wait included), too
         few frames, or the cap all report changed=True, so the tree gets read."""
@@ -8854,8 +8875,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # "nothing changed" is believed later after a touch the hands just sent (HANDS_QUIET, counted from its end)
         touched = getattr(self.session, "hands_at", None)
         quiet = self.settle_quiet
-        if isinstance(touched, float) and self.settle_quiet >= MIN_QUIET and 0 <= time.monotonic() - touched < HANDS_FRESH:
-            quiet = max(quiet, HANDS_QUIET - (time.monotonic() - touched))
+        floor = began  # (loop time) the earliest "changed, then still" may end the settle
+        if isinstance(touched, float) and 0 <= time.monotonic() - touched < HANDS_FRESH:
+            since_touch = time.monotonic() - touched
+            if self.settle_quiet >= MIN_QUIET:
+                quiet = max(quiet, HANDS_QUIET - since_touch)
+            # a highlight followed by a moment of stillness is not the touch's end (HANDS_SETTLE_MIN)
+            floor = began + max(0.0, HANDS_SETTLE_MIN - since_touch)
         deadline = began + cap
         seq, differs, run, run_start, first_of_run = after_seq, False, 0, began, None
         if early is not None:
@@ -8872,7 +8898,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if not differs:  # nothing showed during the call: only frames after the return count
                 run, run_start, first_of_run = 0, began, None
             elif (gap and last is not None and run >= 2 and began - run_start >= still
-                  and began - last <= 1.5 * gap):
+                  and began - last <= 1.5 * gap and began >= floor):
                 return Settled(0.0, True, False, True)  # changed, then still up to a fresh frame at the return
         while (left := deadline - loop.time()) > 0:
             first = seq == after_seq
@@ -8894,7 +8920,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             else:
                 run, run_start, first_of_run = 1, now, frame
             if run >= 2 and now - run_start >= still:
-                if differs or (seq - after_seq >= 3 and now - began >= quiet):
+                if (now >= floor) if differs else (seq - after_seq >= 3 and now - began >= quiet):
                     return Settled(now - began, differs, False, True)
         return Settled(loop.time() - began, True, differs)
 
