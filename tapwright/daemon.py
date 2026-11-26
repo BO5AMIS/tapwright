@@ -4571,6 +4571,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             finally:
                 _SCOPE_TOUCHED.reset(touched_token)
                 if self.control.holds_turn():  # (an action that let go of its turn and ended without it set nothing now)
+                    # (CodeRabbit, PR #29) when and through which touch connection the hands played this action's
+                    # gesture, taken while the turn is held: the verdict comes after the settle, with the turn let
+                    # go, and another agent's gesture may have set the session's own by then (_judge_hands)
+                    box["hands"] = (getattr(self.session, "hands_at", None),
+                                    getattr(self.session, "hands_connection", None))
                     self.session.touch_hook, self.session.banner_guard = None, False
                     self.session.before_input = None
                     self.session.execution_guard = None
@@ -4728,7 +4733,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         trace.settled()
         if session_module.TRACE:
             self.log(f"trace {name} settle {done.seconds:.2f} s, changed={done.changed}")
-        if (doubt := await self._judge_hands(name, box.get("began"), done, target)) is not None:
+        if (doubt := await self._judge_hands(name, box.get("began"), done, target, box.get("hands"))) is not None:
             notes = [*notes, doubt]
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
@@ -6376,10 +6381,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return False
             await asyncio.sleep(LOCK_PRESS_POLL)
 
-    async def _judge_hands(self, name: str, began: float | None, done: Settled,
-                           target: "ui.Target | None" = None) -> str | None:
-        """After the settle of a touchscreen gesture the hands played (Session.hands_at is from this call): tell the
-        hands whether the touch landed (Hands.judged), and give the note for the answer when they doubt their
+    async def _judge_hands(self, name: str, began: float | None, done: Settled, target: "ui.Target | None" = None,
+                           played: "tuple[float | None, int | None] | None" = None) -> str | None:
+        """After the settle of a touchscreen gesture the hands played (`played`: Session.hands_at and
+        Session.hands_connection as this action left them while it held its turn; the time is from this call): tell
+        the hands whether the touch landed (Hands.judged), and give the note for the answer when they doubt their
         connection. A nicety that never fails a call.
 
         Only a tap, long press or toggle aimed at something counts, for the connection or against it (review L-L3;
@@ -6394,8 +6400,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         Not landed: the frames stood unchanged, the stream is the phone's own (a stalled AirPlay mirror repeats its
         last picture) and the touch is no toggle (the tree, not the stream, says whether a switch flipped). Anything
         else says nothing, either way."""
-        s = self.session
-        hands, at = getattr(s, "hands", None), getattr(s, "hands_at", None)
+        hands = getattr(self.session, "hands", None)
+        at, connection = played if played is not None else (None, None)
         if name not in HANDS_GESTURES or hands is None or began is None or at is None or at < began:
             return None
         aimed = target is not None and (target.point is None or _PICTURE_AIM.get() is not None)
@@ -6413,7 +6419,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         else:
             key = (name, "point", round(target.point[0]), round(target.point[1]))
         try:
-            verdict = await hands.judged(landed, key, getattr(s, "hands_connection", None))
+            verdict = await hands.judged(landed, key, connection)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001

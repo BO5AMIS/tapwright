@@ -250,6 +250,12 @@ def test_nothing_is_judged_without_an_open_connection():
     asyncio.run(go())
 
 
+async def judge_as(d, name, began, done, target=None):
+    """_judge_hands, told what the action left in the session while it held its turn (as _run_tool_core tells it)."""
+    played = (d.session.hands_at, getattr(d.session, "hands_connection", None))
+    return await d._judge_hands(name, began, done, target, played)
+
+
 class Judge:
     def __init__(self):
         self.heard, self.says, self.connections = [], None, []
@@ -269,39 +275,39 @@ def test_the_answer_says_when_the_touch_connection_was_opened_again_and_when_the
         judge = d.session.hands = Judge()
         row = daemon_module.ui.Target(label="General")
         d.session.hands_at = None
-        assert await d._judge_hands("tap", 10.0, UNCHANGED, row) is None and judge.heard == []  # the runner made this touch
+        assert await judge_as(d, "tap", 10.0, UNCHANGED, row) is None and judge.heard == []  # the runner made this touch
         d.session.hands_at = 9.0
-        assert await d._judge_hands("tap", 10.0, UNCHANGED, row) is None and judge.heard == []  # (an earlier call's touch)
+        assert await judge_as(d, "tap", 10.0, UNCHANGED, row) is None and judge.heard == []  # (an earlier call's touch)
         d.session.hands_at = 11.0
-        assert await d._judge_hands("press_button", 10.0, UNCHANGED) is None and judge.heard == []
+        assert await judge_as(d, "press_button", 10.0, UNCHANGED) is None and judge.heard == []
         # (review L-L3) what changes nothing by right is never held against the hands: a scroll at a list's end, a
         # `back` with nothing to go back to, a tap at a point the agent chose itself
         for name, target in (("scroll", None), ("back", None), ("swipe", None),
                              ("tap", daemon_module.ui.Target(x=215.0, y=12.0))):
-            assert await d._judge_hands(name, 10.0, UNCHANGED, target) is None and judge.heard == [], name
+            assert await judge_as(d, name, 10.0, UNCHANGED, target) is None and judge.heard == [], name
         # (2.0.2) nor does a change after a scroll or a swipe prove them: the screen may have changed by itself
         for name in ("swipe", "scroll", "back"):
-            assert await d._judge_hands(name, 10.0, LANDED) is None and judge.heard == [], name
+            assert await judge_as(d, name, 10.0, LANDED) is None and judge.heard == [], name
         d.session.hands_connection = 4
-        assert await d._judge_hands("tap", 10.0, LANDED, row) is None  # an element's tap that landed does
+        assert await judge_as(d, "tap", 10.0, LANDED, row) is None  # an element's tap that landed does
         assert judge.heard == [(True, ("tap", "label", "General", 0))] and judge.connections == [4]
         judge.heard.clear()
         judge.says = "reopened"
-        assert await d._judge_hands("tap", 10.0, UNCHANGED, row) == daemon_module.NOTE_HANDS_REOPENED
+        assert await judge_as(d, "tap", 10.0, UNCHANGED, row) == daemon_module.NOTE_HANDS_REOPENED
         # (CodeRabbit, PR #29) no index and index 0 name the same element: one key
         first = daemon_module.ui.Target(label="General", index=0)
-        assert await d._judge_hands("tap", 10.0, UNCHANGED, first) == daemon_module.NOTE_HANDS_REOPENED
+        assert await judge_as(d, "tap", 10.0, UNCHANGED, first) == daemon_module.NOTE_HANDS_REOPENED
         assert judge.heard == [(False, ("tap", "label", "General", 0))] * 2
         second = daemon_module.ui.Target(label="General", index=1)
-        await d._judge_hands("tap", 10.0, UNCHANGED, second)
+        await judge_as(d, "tap", 10.0, UNCHANGED, second)
         assert judge.heard[-1] == (False, ("tap", "label", "General", 1))
         judge.says = "runner"
-        assert await d._judge_hands("long_press", 10.0, UNCHANGED, row) == daemon_module.NOTE_HANDS_RUNNER
+        assert await judge_as(d, "long_press", 10.0, UNCHANGED, row) == daemon_module.NOTE_HANDS_RUNNER
 
         async def broken(changed, key=None, connection=None):
             raise RuntimeError("no")
         judge.judged = broken
-        assert await d._judge_hands("tap", 10.0, UNCHANGED, row) is None  # a nicety: never a failed call
+        assert await judge_as(d, "tap", 10.0, UNCHANGED, row) is None  # a nicety: never a failed call
         await finish(stop, task)
     run(go)
 
@@ -317,14 +323,14 @@ def test_only_what_the_screen_showed_for_certain_counts_either_way():
         d.session.hands_at = 11.0
         row = daemon_module.ui.Target(id="row")
         for done in (CAPPED, STALLED):
-            assert await d._judge_hands("tap", 10.0, done, row) is None and judge.heard == [], done
-        assert await d._judge_hands("toggle", 10.0, UNCHANGED, row) is None and judge.heard == []
-        assert await d._judge_hands("toggle", 10.0, LANDED, row) is None
+            assert await judge_as(d, "tap", 10.0, done, row) is None and judge.heard == [], done
+        assert await judge_as(d, "toggle", 10.0, UNCHANGED, row) is None and judge.heard == []
+        assert await judge_as(d, "toggle", 10.0, LANDED, row) is None
         assert judge.heard == [(True, ("toggle", "id", "row", 0))]
         judge.heard.clear()
         d._fed_by_video = lambda: True  # the AirPlay video is the picture's source
-        assert await d._judge_hands("tap", 10.0, UNCHANGED, row) is None and judge.heard == []
-        assert await d._judge_hands("tap", 10.0, LANDED, row) is None and len(judge.heard) == 1  # (a change is a change)
+        assert await judge_as(d, "tap", 10.0, UNCHANGED, row) is None and judge.heard == []
+        assert await judge_as(d, "tap", 10.0, LANDED, row) is None and len(judge.heard) == 1  # (a change is a change)
         await finish(stop, task)
     run(go)
 
@@ -338,12 +344,62 @@ def test_a_tap_at_a_text_of_the_picture_is_judged_like_one_at_an_element():
         judge = d.session.hands = Judge()
         d.session.hands_at = 11.0
         point = daemon_module.ui.Target(x=127.6, y=887.4)
-        assert await d._judge_hands("tap", 10.0, UNCHANGED, point) is None and judge.heard == []  # the agent's own point
+        assert await judge_as(d, "tap", 10.0, UNCHANGED, point) is None and judge.heard == []  # the agent's own point
         token = daemon_module._PICTURE_AIM.set(7)
         try:
-            assert await d._judge_hands("tap", 10.0, UNCHANGED, point) is None
+            assert await judge_as(d, "tap", 10.0, UNCHANGED, point) is None
         finally:
             daemon_module._PICTURE_AIM.reset(token)
         assert judge.heard == [(False, ("tap", "point", 128, 887))]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_verdict_is_of_the_gesture_its_own_action_played_not_of_one_that_came_during_the_settle():
+    """(CodeRabbit, PR #29) An action lets go of its turn before the screen settles. Another agent's gesture in that
+    time sets the session's "when and through which connection" anew: the first action's verdict must go with what it
+    recorded itself while it held the turn."""
+    async def go():
+        from fakes import button
+        from test_vision_200 import feed_session
+        s = feed_session(tier="full", text=[])
+        s.tree = [button("e1", "General", rect=(10, 300, 100, 40))]
+        d = make_daemon(s)
+        stop, task = await started(d)
+        played = []
+
+        async def heard(name, began, done, target=None, played_by=None):
+            played.append(played_by)
+            return None
+        d._judge_hands = heard
+        tapped = s.tap
+
+        async def tap_by_hands(*a, **k):
+            out = await tapped(*a, **k)
+            s.hands_at, s.hands_connection = daemon_module.time.monotonic(), 3  # this action's gesture
+            return out
+        s.tap = tap_by_hands
+        settle = d._settle
+
+        async def settle_while_another_gesture_plays(*a, **k):
+            s.hands_at, s.hands_connection = daemon_module.time.monotonic() + 5.0, 4  # another agent's, meanwhile
+            return await settle(*a, **k)
+        d._settle = settle_while_another_gesture_plays
+        await d.run_tool("a", "tap", {"target": {"label": "General"}, "screenshot": False})
+        assert len(played) == 1 and played[0] is not None and played[0][1] == 3
+        assert s.hands_connection == 4
+        await finish(stop, task)
+    run(go)
+
+
+def test_without_what_the_action_recorded_nothing_is_judged():
+    async def go():
+        d = make_daemon()
+        stop, task = await started(d)
+        judge = d.session.hands = Judge()
+        d.session.hands_at = 11.0
+        row = daemon_module.ui.Target(label="General")
+        assert await d._judge_hands("tap", 10.0, UNCHANGED, row) is None and judge.heard == []
+        assert await d._judge_hands("tap", 10.0, UNCHANGED, row, (11.0, 2)) is None and judge.connections == [2]
         await finish(stop, task)
     run(go)
