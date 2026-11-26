@@ -210,7 +210,7 @@ The development profile and certificate last a year. Then WebDriverAgent stops s
 - `--fix` never makes a certificate or a profile. If the profile itself has run out, or is
   about to, it says so: run `tapwright setup` again with your App Store Connect key (it
   makes the new profile and installs WebDriverAgent again).
-- **Updating the runner.** Tapwright 2.0 uses runner build `tw-16.15.3.12` (route version 12: reads that keep to their
+- **Updating the runner.** Tapwright 2.0 uses runner build `tw-16.15.3.14` (route version 14: reads that keep to their
   time, the app in front without reading it, JPEG screenshots, on-phone text reading). An older runner keeps working,
   as in 1.10.0, without those. To install the new one on an existing install, plug the phone in, stop `tapwright serve`
   (`tapwright serve --stop`), and run `tapwright doctor --fix`: it sees that the phone has another build, signs the new
