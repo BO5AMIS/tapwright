@@ -269,6 +269,44 @@ def test_o_refs_end_with_any_action_look_false_included(no_pc_ocr):
     run(go)
 
 
+def test_o_refs_end_with_an_action_that_may_have_sent_input_and_failed(no_pc_ocr):
+    # (CodeRabbit, PR #26) a swipe the phone didn't answer, or one refused after its touch went out, may have moved
+    # the screen: o2 must not become the old point on the new screen
+    from tapwright.device import Unanswered
+
+    async def go():
+        s = feed_session()
+        s.calls_touch_hook = True
+        d = make(s)
+        stop, task = await started(d)
+        for failure in (Unanswered("the phone didn't answer within 10 s"),
+                        Refused("timeout", "the touch went out; its end wasn't seen")):
+            await d.run_tool("a", "look", {"screenshot": False})
+            assert d.control.client("a").ocr
+            s.fail["swipe"] = failure
+            with pytest.raises(Refused):
+                await d.run_tool("a", "swipe", {"x0": 215, "y0": 700, "x1": 215, "y1": 200, "look": False})
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "tap", {"target": {"ref": "o2"}, "look": False})
+            assert e.value.code == "not_found" and "isn't in your last OCR reading" in str(e.value), failure
+        await finish(stop, task)
+    run(go)
+
+
+def test_o_refs_stay_after_a_refusal_before_any_input(no_pc_ocr):
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        with pytest.raises(Refused) as e:  # refused before anything was sent: the screen is the one the refs are of
+            await d.run_tool("a", "tap", {"target": {"ref": "o9"}})
+        assert e.value.code == "not_found"
+        assert d.control.client("a").ocr
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_cut_short_look_aims_typing_at_the_app_it_shows(no_pc_ocr):
     async def go():
         s = feed_session()

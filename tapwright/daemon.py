@@ -4565,10 +4565,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         except Unanswered as e:
             # the line is alive and the session stays; the screen may or may not have changed under the agent's list
             view.moved = True
+            view.ocr = {}  # (CodeRabbit, PR #26) and its o refs with it, as after any action (R200v M2)
             self.unsettled, self.unsettled_from = True, None
             self._announce("agent", name, ok=False, code="timeout")
             raise Refused("timeout", f"{e}; the action may have happened: look before you retry.") from None
         except ConnectionLost as e:
+            view.ocr = {}  # (CodeRabbit, PR #26) the action may have gone out: the refs may be of the screen before it
             self.lost(e)
             if isinstance(e, AppNotAnswering):  # the action went out, then the app stopped answering
                 self._announce("agent", name, ok=False, code="not_answering")
@@ -4579,6 +4581,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         except DryRun as e:  # nothing was sent: the answer is what would have been
             return _answer([str(e)], notes)
         except Refused as e:
+            if box.get("input"):  # (CodeRabbit, PR #26) a touch or key of this call went out before the refusal
+                view.ocr = {}
             if (taken := view.done_taken_back) is not None:  # (1.9.0) what a Done did is said with this refusal, never later
                 view.done_taken_back = None
                 e.args = (f"{e}\nNote: {taken}",)
