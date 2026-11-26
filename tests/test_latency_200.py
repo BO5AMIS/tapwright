@@ -361,3 +361,48 @@ def test_the_hands_are_opened_as_the_phone_connects_and_a_failure_fails_nothing(
     # (Session.warm_hands calls hands.warm: the fake gets the real one)
     Opens.warm = hands_module.Hands.warm
     asyncio.run(go())
+
+
+# ---- press_button lock ----
+
+def test_press_button_lock_takes_the_daemon_to_locked_at_once():
+    """Seen on the phone: 2 s after `press_button lock` a look listed the lock screen and a tap went to it; the
+    heartbeat learned of the lock only later."""
+    from tapwright.control import Refused
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        real = d.session.press_button
+
+        async def press_button(name):
+            out = await real(name)
+            if name == "lock":
+                d.session.is_locked = True
+            return out
+        d.session.press_button = press_button
+        r = await d.run_tool("a", "press_button", {"name": "lock"})
+        lines = r["text"].splitlines()
+        assert lines[0] == daemon_module.LOCKED_BY_PRESS and d.state == "locked"
+        assert len(lines) == 2 and "unlock" in lines[1]  # (the locked phone's own note says how to go on)
+        for tool, args in (("look", {}), ("tap", {"target": {"x": 10, "y": 10}})):
+            try:
+                await d.run_tool("a", tool, args)
+            except Refused as e:
+                assert e.code == "locked", tool
+            else:
+                raise AssertionError(f"{tool} went to a locked phone")
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_lock_press_the_phone_doesnt_confirm_answers_as_before(monkeypatch):
+    async def go():
+        monkeypatch.setattr(daemon_module, "LOCK_PRESS_WAIT", 0.05)
+        monkeypatch.setattr(daemon_module, "LOCK_PRESS_POLL", 0.01)
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "press_button", {"name": "lock", "look": False})
+        assert r["text"].startswith("pressed lock") and d.state == "live"
+        await finish(stop, task)
+    run(go)

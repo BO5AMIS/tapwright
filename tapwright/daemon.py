@@ -106,6 +106,9 @@ TEXT_BY_PICTURE = frozenset({"tap", "long_press"})
 # (2.0) the tools whose gesture the hands play on the touchscreen (not press_button: the buttons are another service),
 # and what an answer says when the hands doubt their touch connection (hands.Hands.judged)
 HANDS_GESTURES = frozenset({"tap", "long_press", "swipe", "scroll", "back", "pinch", "drag", "toggle"})
+LOCK_PRESS_WAIT = 1.5  # seconds `press_button lock` waits for the phone to say it is locked, asking every LOCK_PRESS_POLL
+LOCK_PRESS_POLL = 0.15
+LOCKED_BY_PRESS = "Locked the phone."  # (the note every answer of a locked phone carries says how to go on)
 NOTE_HANDS_REOPENED = ("the last touches were acknowledged by the phone but none has changed the screen since the touch "
                        "connection was opened, so it was opened again. If this touch should have changed something, "
                        "look, then repeat it.")
@@ -4608,6 +4611,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view.ocr = {}
         if isinstance(result, Unchanged):  # nothing was done: nothing to settle or diff
             return _answer([str(result)], notes)
+        if name == "press_button" and args.get("name") == "lock" and await self._locked_by_press():
+            return _answer([LOCKED_BY_PRESS], notes)
         reads_only = name == "alert" and args.get("action") == "text"  # it changes nothing on the phone
         looks = settle is not None and args.get("look", True) and not reads_only
         view.moved = view.moved or not looks
@@ -6260,6 +6265,25 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("not_found", f"{ref} isn't in your last OCR reading; look with ocr: true again (a screen "
                                        "whose elements weren't read gets o refs with any look).")
         return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}
+
+    async def _locked_by_press(self) -> bool:
+        """After the agent's own `press_button lock`: ask the phone whether it is locked now (it takes a moment), for
+        at most LOCK_PRESS_WAIT, and take the daemon to `locked` when it is. Else the heartbeat learned of it up to 5 s
+        later, and until then a look listed the lock screen and a touch went to it (phone, 2026-11-26). False when the
+        phone doesn't say it is locked in that time: the answer is the press's own, as before."""
+        if self.state != "live":
+            return self.state == "locked"
+        deadline = time.monotonic() + LOCK_PRESS_WAIT
+        while True:
+            try:
+                if await self.control.read(lambda: self._connected_only(self.session.locked)):
+                    self._set_state("locked", "unlock the phone")
+                    return True
+            except (Refused, DeviceError):
+                return False  # (it can't say: the heartbeat will)
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(LOCK_PRESS_POLL)
 
     async def _judge_hands(self, name: str, began: float | None, changed: bool) -> str | None:
         """After the settle of a touchscreen gesture the hands played (Session.hands_at is from this call): tell the
