@@ -1933,7 +1933,18 @@ class Session:
         return True
 
     async def _active_element(self) -> str | None:
-        focused = (await self._call("GET", "/session/{sid}/element/active")).get("value") or {}
+        """WebDriverAgent's element with the keyboard's focus; None when none has it. WebDriverAgent says that as an
+        error (`no such element`), which was passed on as `internal` (2.0.1, seen 2026-11-26: a field of an in-app
+        browser sheet takes the focus a moment after the tap, the app around it being idle at once, and the first
+        question after the focusing tap came before it). None, so the wait for focus asks again."""
+        try:
+            focused = (await self._call("GET", "/session/{sid}/element/active")).get("value") or {}
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            if "no such element" not in str(e).lower():
+                raise
+            return None
         return focused.get("ELEMENT") or next(iter(focused.values()), None)
 
     async def _attribute(self, element: str, name: str) -> str | None:

@@ -11,6 +11,11 @@
 - A tap or long press aimed by `{text}` that no element carries looks for the text in the picture on a screen that was
   read whole as well (a canvas, a web view that exposes nothing, a picture with words), not only on one whose elements
   weren't read: a look had listed the text as an `o` ref and `tap {text}` answered `not_found`.
+- `type_text` into a field that takes the keyboard's focus a moment after the tap (a field of an in-app browser sheet)
+  waits for it, up to 1.5 s as for any field. It answered `internal: the phone side failed: WebDriverAgent: no such
+  element`: the runner says "nothing has the focus yet" as an error, and the first question came before the focus did.
+  A field that never takes it is refused in words (`not_actionable: ... didn't take focus`), and `type_text` with no
+  target and nothing focused says the old text may remain instead of failing.
 
 ## 2.0.0 (2026-11-26)
 
