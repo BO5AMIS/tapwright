@@ -168,7 +168,10 @@
   the phone showed the hit test silent at a banner's own points over such an app. Such a silence never counts as a
   dropped line (no reconnect); never more than one hit question is out, the hit test that proves a touch's element
   included, and after one that got no answer none is asked for 5 s. Once a banner was seen at a touch's start, only an
-  answer that nothing is over the point ends its wait: a silence keeps it waiting, then `covered`. A touch near the
+  answer that nothing is over the point ends its wait: a silence keeps it waiting, then `covered`; that wait is 8 s for
+  the touch in all, through the computer's touches too, and a pause, a lock or a person's touch ends it within a poll.
+  The flick up goes on such an app too (on a banner it sends it away; with none it is the agent's own swipe of the
+  app's top), and the slow words say so. A touch near the
   top of such an app can be refused though nothing is over it. Not asked
   (as before): a runner below route version 6 or without the route, `TAPWRIGHT_HIT_CHECK=0`. Cost: one hit question
   (about 20 ms) for each touch, points and elements alike, that starts in the top 200 pt of an app or the home screen
