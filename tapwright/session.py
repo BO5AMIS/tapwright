@@ -731,6 +731,9 @@ HIT_NOTHING_SLOW = 0.25
 # one question). Requests through accessibility wait for it (Session.channel_free), asking the clock every
 # HIT_FREE_EVERY s, HIT_FREE_WAIT s at most a question
 HIT_HELD, HIT_FREE_EVERY, HIT_FREE_WAIT = 12.0, 0.7, 1.0
+# (round L, review RK M1) how young the clear of a banner wait's last poll must be for the hands' gate that runs again
+# right after it (under the hands' lock, a hold known) to take it instead of asking
+GATE_FRESH = 1.0
 WEB_CONTENT = "com.apple.WebKit."  # (the phone: a web page's content in the zone names WebKit's content process)
 HIT_BANNER_WAIT = 1.5  # seconds the gate waits for the hit test's answer before it can't say
 BANNER_OVER, BANNER_CLEAR, BANNER_UNSURE, BANNER_UNASKED = "over", "clear", "unsure", "unasked"
@@ -771,6 +774,11 @@ COVERED_GUESS = ("covered: can't tell whether a notification is over the top of 
 class _BannerUp(Exception):
     """(review RP2 H1) The front check would wait a banner out: raised inside the hands' `before`, so the wait happens
     with the hands' lock let go (Session._by_hands), and the guard and the check run again right before the touch."""
+
+
+class _HeldUp(Exception):
+    """(round L, review RK M1) The hands' gate found the runner held: raised inside `before`, so the wait for it
+    (channel_free) happens with the hands' lock let go, then the touch starts again."""
 
 
 class FrontUnchecked(Refused):
@@ -1961,6 +1969,9 @@ class Session:
         self.input_point = at
         self._banner_seen = False  # (review RH H2) a banner seen at this touch's start: only "clear" ends its wait
         self._banner_until: float | None = None  # (review RI M1) the touch's one banner deadline, across its waits
+        self._banner_real = False  # (round L) a banner element seen in this touch's check
+        self._banner_moving = False  # (round L) a banner only in motion seen (a fast "no element answered")
+        self._wait_clear = None  # (review RK M1) (point, front, when) of the clear that ended this touch's banner wait
         if self.banner_guard and at is not None and self.touch_rules is None:
             await self._clear_of_banner(at)  # (a touch without the agent's rules: the banner wait as before 2.0.3)
         if at is not None:
@@ -1984,8 +1995,8 @@ class Session:
             return
         try:
             await self._front_rules(at, wait)
-        except _BannerUp:
-            raise  # (the gate stays: it runs again once the banner is waited out)
+        except (_BannerUp, _HeldUp):
+            raise  # (the gate stays: it runs again once the banner, or the runner, is waited out)
         except BaseException:
             self._gate_at, self._banner_seen, self._banner_until = None, False, None
             raise
@@ -2003,8 +2014,8 @@ class Session:
         while time.monotonic() < until:
             await asyncio.sleep(BANNER_POLL)
             await self._banner_guard()
-            if self._held():
-                continue  # (round K: the runner held, nothing is asked, and a hold is no clear; the deadline bounds it)
+            if self._held() and not await self._free_step():
+                continue  # (round K, review RK L5: the runner still held; one question at the clock, no more, this poll)
             now = await self.front_state()
             if now is None or now.kind not in (FRONT_OVER, FRONT_APP, FRONT_HOME):
                 return
@@ -2014,12 +2025,22 @@ class Session:
             app = now.app if now.kind == FRONT_APP else None
             if now.kind != FRONT_OVER:
                 said = BANNER_CLEAR if at is None else await self.banner_at(
-                    at, app, rules.aimed if rules is not None else None)
+                    at, app, rules.aimed if rules is not None else None, hands=True)
+                if said == BANNER_CLEAR and at is not None:
+                    self._wait_clear = (at, now, time.monotonic())  # (review RK M1: the gate after it takes it)
                 # (review RH H2) once a banner was seen, only "clear" says it left: a silence or "can't say" waits on
                 if said == BANNER_CLEAR or (said != BANNER_OVER and not getattr(self, "_banner_seen", False)):
-                    return  # (the gate runs again in full: the check, then the guard)
+                    return  # (the gate runs again: the check, then the guard)
+        words = self._covered_at_bound()
         self._gate_at, self._banner_seen, self._banner_until = None, False, None
-        raise Refused("not_actionable", COVERED_BANNER)
+        raise Refused("not_actionable", words)
+
+    def _covered_at_bound(self) -> str:
+        """(round L, review RK L5) The words of a touch whose wait reached its bound: the slow app's when its check only
+        ever found a banner in motion (a fast "no element answered", the runner not held at the confirm) and never a
+        banner's element, else a banner's."""
+        moving = getattr(self, "_banner_moving", False) and not getattr(self, "_banner_real", False)
+        return COVERED_SLOW if moving else COVERED_BANNER
 
     async def _banner_guard(self) -> None:
         """(review RI M1) The execution guard (a pause, a lock, a person's turn), asked at each poll of a banner wait: a
@@ -2047,7 +2068,7 @@ class Session:
         return None
 
     async def banner_at(self, at: tuple[float, float], app: str | None = None,
-                        aimed: "tuple[float, float, float, float] | None" = None) -> str:
+                        aimed: "tuple[float, float, float, float] | None" = None, hands: bool = False) -> str:
         """(rounds G to K) Is something over the app (`app`, the one the agent saw; None: the home screen) at this point?
         BANNER_OVER: a banner; BANNER_CLEAR: nothing over it; BANNER_UNSURE: it can't be told (another process over the
         app, an error, a malformed or unverified answer, a turn not known); BANNER_SLOW: no answer, the quiet (HIT_QUIET
@@ -2065,7 +2086,12 @@ class Session:
         as if nothing were there (its plate [8, 56, 414, 73]): only the point can see it. A phone with no status-bar
         element at the clock (a home-button phone) gets no witness. The home screen, landscape, a turn not known, a
         point in the status bar: no witness, the point once. Trace notes: the point, the frame, the process, never a
-        label."""
+        label.
+        (Round L, review RK) A "no element answered" is slow only when it took HIT_NOTHING_SLOW longer than the clock's own
+        round trip (H1: the link's time is in both), and the clock's clear needs the hold confirmed: the clock asked
+        once more says nothing too, as slowly (a real answer there: the runner isn't held, the point's "nothing" was
+        SpringBoard's, over). `hands`: the touch goes by the hands; the runner's touch goes through XCTest, held now,
+        and would land late (M2): no clear then, slow."""
         if HIT_CHECK == "0" or self.tw_version < 6:
             return BANNER_UNASKED
         point = self._portrait_point(at)
@@ -2080,61 +2106,89 @@ class Session:
         if lock is None:
             lock = self._hit_lock = asyncio.Lock()
         async with lock:
+            if self._held():  # (review RK L4: a hold set while this call waited for the lock)
+                trace.note("banner_held", where)
+                return BANNER_SLOW
             deadline = time.monotonic() + HIT_TRIES_FOR
             holds = None  # (the clock's frame when SpringBoard's status bar answered there)
+            t_w = 0.0  # (review RK H1: the clock's own round trip, which a "no element answered" is judged against)
             witnessing = app is not None and point is at and point[1] >= HIT_BANNER_BELOW
             if witnessing:
-                kind, value = await self._hit_once(HIT_WITNESS, deadline, where)
+                kind, value, t_w = await self._hit_once(HIT_WITNESS, deadline, where)
                 if kind in ("silent", "quiet"):
                     return BANNER_SLOW
-                if kind == "nothing_slow":
-                    self._hold("witness", at)
-                    return BANNER_SLOW
-                if kind == "nothing_fast":
+                if kind == "nothing":
+                    if t_w >= HIT_NOTHING_SLOW:
+                        self._hold("witness", at)
+                        return BANNER_SLOW
                     trace.note("banner_moving", {**where, "witness": True})  # (the status bar being redrawn)
+                    self._banner_moving = True
                     return BANNER_OVER
                 if kind == "unasked":
                     return BANNER_UNASKED
                 said, frame = self._witness_of(value, where) if kind == "answer" else (None, None)
                 if said == BANNER_OVER:
+                    self._banner_real = True
                     return BANNER_OVER
                 holds = frame if said == "holds" else None
-            kind, value = await self._hit_once(point, deadline, where)
+            kind, value, took = await self._hit_once(point, deadline, where)
             if kind in ("silent", "quiet"):
                 return BANNER_SLOW
-            if kind in ("nothing_slow", "nothing_fast"):
+            if kind == "nothing":
+                slow = took >= t_w + HIT_NOTHING_SLOW  # (review RK H1: against the clock's round trip, not zero)
                 if point[1] < HIT_NOTHING_ABOVE:  # (review RH L5: the portrait panel's top edge)
-                    return BANNER_CLEAR  # (the screen's top edge, 7 ms: a banner there would have answered)
-                if kind == "nothing_fast" and witnessing:
-                    trace.note("banner_moving", where)  # (SpringBoard's "nothing here right now": a banner in motion)
+                    if slow:
+                        self._hold("top edge", at)  # (review RK L2: SpringBoard says nothing there in ~7 ms)
+                    return BANNER_CLEAR  # (the screen's top edge: a banner there would have answered)
+                if not slow:
+                    # (review RK L1) SpringBoard's own "nothing here right now", every path: a banner in motion
+                    trace.note("banner_moving", where)
+                    self._banner_moving = True
                     return BANNER_OVER
-                if kind == "nothing_slow":
+                if holds is None or not hands:
+                    # no witness to tell the app from SpringBoard; or (review RK M2) the touch goes through the runner,
+                    # which is held now: it would land seconds late, past any check
                     self._hold("point", at)
-                    if holds is not None:
-                        trace.note("banner_witness", {**where, "frame": holds})
-                        return BANNER_CLEAR  # (the app didn't answer where SpringBoard, answering, would have)
-                trace.note("banner_slow", where)
+                    trace.note("banner_slow", {**where, "hands": hands})
+                    return BANNER_SLOW
+                # (review RK H1) the runner held after the point's question is the physical sign that the app didn't
+                # answer it: the clock asked once more must say nothing too, as slowly
+                again, _, t_again = await self._hit_once(HIT_WITNESS, deadline, where, wait=HIT_FREE_WAIT)
+                if again == "nothing" and t_again >= t_w + HIT_NOTHING_SLOW:
+                    self._hold("point", at)
+                    trace.note("banner_witness", {**where, "frame": holds,
+                                                  "ms": [round(t_w * 1000), round(took * 1000), round(t_again * 1000)]})
+                    return BANNER_CLEAR  # (the app didn't answer where SpringBoard, answering, would have)
+                if again == "answer":
+                    # the runner isn't held: the point's "nothing" was SpringBoard's own, or the app answered late
+                    trace.note("banner_moving", {**where, "confirm": True})
+                    self._banner_moving = True
+                    return BANNER_OVER
+                trace.note("banner_slow", {**where, "confirm": again})
                 return BANNER_SLOW
             if kind == "unasked":
                 return BANNER_UNASKED
             if kind != "answer":
                 return BANNER_UNSURE
-            return self._banner_of(value, at, app, aimed, point is not at)
+            said = self._banner_of(value, at, app, aimed, point is not at)
+            if said == BANNER_OVER:
+                self._banner_real = True
+            return said
 
     async def _hit_once(self, xy: tuple[float, float], deadline: float, where: dict,
-                        wait: float | None = None) -> "tuple[str, object]":
-        """(round K) One hit question at a portrait point, `once`, inside the call's deadline (or `wait` seconds): (kind,
-        the answer). "answer"; "nothing_fast" / "nothing_slow" ("no element answered" in less / at least
-        HIT_NOTHING_SLOW: SpringBoard's "nothing here right now", or the runner's wait for an app that didn't answer);
-        "unasked" (no such route); "error" (another refusal); "silent" (no answer in time: the quiet is set, review RH
-        M1); "quiet" (none sent: HIT_QUIET after a silence, or too little time left)."""
+                        wait: float | None = None) -> "tuple[str, object, float]":
+        """(round K, L) One hit question at a portrait point, `once`, inside the call's deadline (or `wait` seconds):
+        (kind, the answer, the seconds it took, as the daemon saw them). "answer"; "nothing" ("no element answered":
+        the caller judges its time against the clock's own round trip, review RK H1); "unasked" (no such route);
+        "error" (another refusal); "silent" (no answer in time: the quiet is set, review RH M1); "quiet" (none sent:
+        HIT_QUIET after a silence, or too little time left)."""
         quiet = getattr(self, "_hit_quiet_until", 0.0) - time.monotonic()
         if quiet > 0:
             trace.note("banner_quiet", round(quiet, 1))  # (a hit question got no answer: none is sent)
-            return "quiet", None
+            return "quiet", None, 0.0
         left = min(HIT_BANNER_WAIT, deadline - time.monotonic()) if wait is None else wait
         if wait is None and left < HIT_TRY_MIN:
-            return "quiet", None  # (too little of the call's deadline left: not asked)
+            return "quiet", None, 0.0  # (too little of the call's deadline left: not asked)
         began = time.monotonic()
         try:
             answer = await asyncio.wait_for(
@@ -2145,17 +2199,18 @@ class Session:
         except Unanswered:
             self._hit_quiet_until = time.monotonic() + HIT_QUIET
             trace.note("banner_silent", {**where, "asked": [round(xy[0]), round(xy[1])]})
-            return "silent", None
+            return "silent", None, time.monotonic() - began
         except DeviceError as e:
             said = str(e).lower()
             if HIT_NOTHING in said:
-                return ("nothing_slow" if time.monotonic() - began >= HIT_NOTHING_SLOW else "nothing_fast"), None
-            return ("unasked" if "unknown command" in said or "unknown method" in said else "error"), None
+                return "nothing", None, time.monotonic() - began
+            return ("unasked" if "unknown command" in said or "unknown method" in said else "error"), None, \
+                time.monotonic() - began
         except Exception:  # noqa: BLE001 - no answer in time (or the wait failed): the runner may be on it still
             self._hit_quiet_until = time.monotonic() + HIT_QUIET
             trace.note("banner_silent", {**where, "asked": [round(xy[0]), round(xy[1])]})
-            return "silent", None
-        return "answer", answer
+            return "silent", None, time.monotonic() - began
+        return "answer", answer, time.monotonic() - began
 
     def _witness_of(self, answer: object, where: dict) -> "tuple[str | None, list | None]":
         """(round K) What the status bar's clock says: (BANNER_OVER, frame) for a banner there by _banner_of's rule, a
@@ -2194,34 +2249,45 @@ class Session:
         trace.note("runner_held", {"why": why, "at": [round(at[0]), round(at[1])]})
 
     async def channel_free(self) -> None:
-        """(round K) Before a request through XCTest's accessibility (the front route, a tree read) while the runner is
+        """(round K, L) Before a request through XCTest's accessibility (the front route, a tree read) while the runner is
         known to be held: the hit test at the status bar's clock (HIT_WITNESS, portrait points whatever the turn), about
-        every HIT_FREE_EVERY seconds, HIT_FREE_WAIT at most a question; the first real answer ends the hold; at
-        HIT_HELD it is given up (the request goes). The execution guard (a pause, a lock, a person's turn), when the
-        path has one, is asked at each poll. Instead of a front question that stalls for 8 s and is taken for a lost
-        connection, the read after a touch on a hung app comes up to about 10 s later."""
+        every HIT_FREE_EVERY seconds, HIT_FREE_WAIT at most a question; only a real answer (an element) ends the hold
+        (review RK L3: another refusal or a silence says nothing of it); at HIT_HELD it is given up (the request goes);
+        a runner with no such route ends the waiting, the hold with it (nothing could ever be asked). The execution
+        guard (a pause, a lock, a person's turn), when the path has one, is asked at each poll. Instead of a front
+        question that stalls for 8 s and is taken for a lost connection, the read after a touch on a hung app comes up
+        to about 10 s later."""
         if not self._held():
             return
         began = time.monotonic()
-        lock = getattr(self, "_hit_lock", None)
-        if lock is None:
-            lock = self._hit_lock = asyncio.Lock()
         while self._held():
             guard = getattr(self, "execution_guard", None)
             if guard is not None:
                 await guard()
             asked = time.monotonic()
-            async with lock:
-                kind, _ = await self._hit_once(HIT_WITNESS, asked + HIT_FREE_WAIT, {"at": [66, 22]},
-                                               wait=HIT_FREE_WAIT)
-            if kind in ("answer", "error", "unasked"):
-                self._held_until = 0.0
+            if await self._free_step():
                 trace.note("runner_free", round(time.monotonic() - began, 1))
                 return
             pause = HIT_FREE_EVERY - (time.monotonic() - asked)
             if pause > 0 and self._held():
                 await asyncio.sleep(min(pause, max(0.0, self._held_until - time.monotonic())))
         trace.note("runner_free", {"gave_up": round(time.monotonic() - began, 1)})
+
+    async def _free_step(self) -> bool:
+        """(round L) One question at the clock while a hold is known, under the hit lock: True when it ended the hold (a
+        real answer; or no such route, where nothing could be asked again)."""
+        lock = getattr(self, "_hit_lock", None)
+        if lock is None:
+            lock = self._hit_lock = asyncio.Lock()
+        async with lock:
+            if not self._held():
+                return True
+            kind, _, _ = await self._hit_once(HIT_WITNESS, time.monotonic() + HIT_FREE_WAIT, {"at": [66, 22]},
+                                              wait=HIT_FREE_WAIT)
+        if kind in ("answer", "unasked"):
+            self._held_until = 0.0
+            return True
+        return False
 
     def _banner_of(self, answer: object, at: tuple[float, float], app: str | None,
                    aimed: "tuple[float, float, float, float] | None", turned: bool) -> str:
@@ -2338,6 +2404,24 @@ class Session:
         rules = self.touch_rules
         if rules is None:
             return
+        if not wait and self._held():
+            # (review RK M1) under the hands' lock nothing may wait for the runner: right after this touch's banner wait
+            # ended clear, its verdict stands if young; with a banner wait under way, the slow words; else the wait for
+            # the runner happens with the hands' lock let go (_HeldUp)
+            fresh, self._wait_clear = getattr(self, "_wait_clear", None), None
+            if fresh is not None and fresh[0] == at and time.monotonic() - fresh[2] < GATE_FRESH:
+                front = fresh[1]
+                seen = rules.seen
+                if (isinstance(front, Front) and isinstance(seen, Front)
+                        and (front.kind == FRONT_APP and seen.kind in (FRONT_APP, FRONT_OVER) and seen.app == front.app
+                             or front.kind == FRONT_HOME and seen.kind == FRONT_HOME)):
+                    trace.note("gate_fresh", {"at": [round(at[0]), round(at[1])]})
+                    if front.kind == FRONT_APP:
+                        self.found_front = front
+                    return
+            if getattr(self, "_banner_until", None) is not None:
+                raise Refused("not_actionable", COVERED_SLOW)
+            raise _HeldUp()
         now = await self.front_state()
         if now is None:
             return
@@ -2352,21 +2436,23 @@ class Session:
         if seen.kind == FRONT_UNKNOWN:
             raise Refused("not_actionable", UNSEEN_FRONT)
         zone = at[1] < BANNER_ZONE
-        waited = 0.0
+        until: float | None = None
 
         async def hold() -> Front:
             """One step of waiting a banner out (rule A): _BannerUp when the caller waits with no lock held, `covered`
-            once BANNER_WAIT has passed, else a poll later, what is in front then."""
-            nonlocal waited
+            once BANNER_WAIT has passed (by the clock, round L: a poll's question at a held runner takes time too, and
+            the touch's bound stays BANNER_WAIT and one question), else a poll later, what is in front then."""
+            nonlocal until
             if not wait:
                 raise _BannerUp()
-            if waited >= BANNER_WAIT:
-                raise Refused("not_actionable", COVERED_BANNER)
+            if until is None:
+                until = time.monotonic() + BANNER_WAIT
+            if time.monotonic() >= until:
+                raise Refused("not_actionable", self._covered_at_bound())
             await asyncio.sleep(BANNER_POLL)
-            waited += BANNER_POLL
             await self._banner_guard()  # (review RI M1: a pause during the wait is heard within a poll)
-            if self._held():
-                return now  # (round K: the runner held, nothing is asked; the touch's deadline stays BANNER_WAIT)
+            if self._held() and not await self._free_step():
+                return now  # (round K, review RK L5: the runner held: one question at the clock this poll, no more)
             return await self.front_state() or Front(FRONT_UNKNOWN)
         while True:
             if now.kind == FRONT_APP:
@@ -2376,7 +2462,7 @@ class Session:
                         raise Refused("not_actionable", COVERED_GUESS.format(app=self._words(now)))
                     # (round G, iOS 26.5) the route names the app while a timer's banner is over it: in the zone, the
                     # hit test at the touch's start says whether SpringBoard is there
-                    said = await self.banner_at(at, now.app, rules.aimed) if zone else BANNER_UNASKED
+                    said = await self.banner_at(at, now.app, rules.aimed, hands=not wait) if zone else BANNER_UNASKED
                     if said in (BANNER_OVER, BANNER_SLOW) and rules.flick:
                         # (round G) the flick up that sends it away; (round J, the lead) on "slow" too: on a banner it
                         # sends it away, and with none it is the agent's own swipe of the app's top
@@ -2400,7 +2486,7 @@ class Session:
                 if zone:
                     # (round G) the hit test tells a banner from the home screen's own top: a banner is waited out as
                     # over an app; the top edge (a pull for Control or Notification Center), the status bar, a widget go
-                    said = await self.banner_at(at, None, rules.aimed)
+                    said = await self.banner_at(at, None, rules.aimed, hands=not wait)
                     if said in (BANNER_OVER, BANNER_SLOW) and rules.flick:
                         return  # (round G, J) the flick up that sends it away
                     if said == BANNER_OVER and not rules.element and not getattr(self, "_banner_seen", False):
@@ -2434,6 +2520,7 @@ class Session:
             if rules.flick and await self.banner_at(at, now.app) == BANNER_OVER:
                 return
             self._banner_seen = True  # (review RH H2: should the route name the app again, only "clear" ends it)
+            self._banner_real = True  # (round L: the route names SpringBoard over the app: a banner's words at the bound)
             now = await hold()
         raise Refused("stale", f"{self._words(now)} is in front now, not {self._words(seen)}, where your last look was. "
                                "Nothing was touched; look again.")
@@ -2568,6 +2655,9 @@ class Session:
                     # (review RP2 H1) nothing was sent; the hands' lock is let go while a banner is waited out (a
                     # person's touch goes first), then the touch starts again: the check and the guard run again
                     await self._wait_banner()
+                except _HeldUp:
+                    # (review RK M1) the runner held by the app: waited for with the hands' lock let go, then again
+                    await self.channel_free()
         except hands_module.HandsUnavailable:
             return False
         except BaseException:
@@ -2692,6 +2782,12 @@ class Session:
                 raise unproven("identity_unproven") from None
             if isinstance(e, Unanswered):
                 self._hit_quiet_until = time.monotonic() + HIT_QUIET  # (review RH L3: the runner may still be on it)
+            elif (isinstance(e, DeviceError) and HIT_NOTHING in str(e).lower()
+                  and time.monotonic() - began >= HIT_NOTHING_SLOW):
+                # (review RK H2) the process at the point didn't answer: the runner is held until it does, and the front
+                # route after this must wait for it (no witness here: the absolute time; a hold set by mistake costs one
+                # question at the clock)
+                self._hold("hit_at", (x, y))
             if strict_proof:
                 # Version 6 binds attributes to the AX hit. Every failed attempted proof is terminal, including
                 # Unanswered (the runner stayed alive after a timeout), rather than an unchecked ordinary tap.

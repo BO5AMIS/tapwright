@@ -49,6 +49,27 @@ def answers(s, witness, point):
     s.hit = hit
 
 
+def busy_app(s, point_first=None):
+    """(round L) A busy app, as on the phone (BRIEF-K F4): the clock answers the status bar until the app's point is
+    asked; that question gets "no element answered" after the runner's 0.3 s and leaves the runner held, so every
+    question after it, the clock's too, says "no element answered" as slowly. `point_first`: the answers at the point
+    before the app is asked (a callable of the count of questions so far, None when the app is asked)."""
+    state = {"held": False}
+
+    def hit(x, y):
+        if state["held"]:
+            return nothing()
+        if (x, y) == WITNESS:
+            return status_bar()
+        early = point_first(len(s.hit_questions)) if point_first is not None else None
+        if early is not None:
+            return early
+        state["held"] = True
+        return nothing()
+    s.hit = hit
+    return state
+
+
 def asked_twice_at_one_point(s) -> bool:
     return any(s.hit_questions[i] == s.hit_questions[i + 1] for i in range(len(s.hit_questions) - 1))
 
@@ -58,9 +79,9 @@ def asked_twice_at_one_point(s) -> bool:
 def test_the_witness_holds_and_a_slow_nothing_at_the_point_is_clear_with_the_hold_set():
     async def go():
         s = unread()
-        answers(s, status_bar(), nothing())
-        assert await s.banner_at((383.0, 168.0), SHOP[1]) == session_module.BANNER_CLEAR
-        assert s.hit_questions == [WITNESS, (383.0, 168.0)] and s._held()
+        busy_app(s)  # (round L: the hold confirmed by the clock asked once more; the hands' touch)
+        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=True) == session_module.BANNER_CLEAR
+        assert s.hit_questions == [WITNESS, (383.0, 168.0), WITNESS] and s._held()
     run(go)
 
 
@@ -69,9 +90,11 @@ def test_on_a_busy_app_a_point_tap_and_an_element_in_the_zone_go():
         s = unread()
         s.tree, s.tier = [button("e1", "Close", rect=(363, 148, 40, 40))], "full"
         d, stop, task = await _looked(s)
-        answers(s, status_bar(), nothing())
+        s.by_hands = True  # (round L, review RK M2: the witness's clear is for the hands' touch)
+        busy_app(s)
         await d.run_tool("a", "tap", {"target": {"x": 383, "y": 168}, "look": False})
         s._held_until = 0.0  # (the app answered meanwhile)
+        busy_app(s)
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert s.sent == [("tap", (383, 168)), ("tap", (383.0, 168.0))]
         await finish(stop, task)
@@ -382,7 +405,8 @@ def test_a_hung_app_the_tap_goes_at_once_and_the_read_after_waits_with_no_lost_c
                 raise DeviceError(f"unsupported operation: {session_module.HIT_NOTHING}")
             return await real_http(method, path, payload, timeout)
         s.device.http = http
-        assert await s.banner_at((320.0, 83.0), SHOP[1]) == session_module.BANNER_CLEAR  # (the tap goes at once)
+        # (the tap goes at once, by the hands; round L: the hold confirmed by the clock once more)
+        assert await s.banner_at((320.0, 83.0), SHOP[1], hands=True) == session_module.BANNER_CLEAR
         assert time.monotonic() - hung_from < 0.2 and s._held()
         began = time.monotonic()
         assert await s.front_app() == (SHOP[1], 9)  # (the read after it: waits for the runner, no lost connection)
@@ -422,8 +446,9 @@ def test_after_a_banner_was_seen_only_a_clear_ends_the_wait():
     async def go():
         s = unread()
         d, stop, task = await _looked(s)
-        # (the plate first; then the status bar and a slow "nothing" at the point: the witness's clear)
-        answers(s, status_bar(), lambda x, y: hit_of(SPRINGBOARD, PLATE) if len(s.hit_questions) <= 2 else nothing())
+        s.by_hands = True  # (round L: the hands' path, where the witness's clear is taken)
+        # (the plate first; then the status bar and a slow "nothing" at the point, confirmed: the witness's clear)
+        busy_app(s, lambda n: hit_of(SPRINGBOARD, PLATE) if n <= 2 else None)
         await d.run_tool("a", "tap", {"target": {"x": 215, "y": 80}, "look": False})
         assert s.sent == [("tap", (215, 80))]
         s._held_until = 0.0

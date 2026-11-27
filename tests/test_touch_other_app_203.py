@@ -64,6 +64,8 @@ class PointSession(DescribingSession):
     _held = _real("_held")
     _hold = _real("_hold")
     channel_free = _real("channel_free")
+    _free_step = _real("_free_step")
+    _covered_at_bound = _real("_covered_at_bound")
 
     def __init__(self, app=SHOP) -> None:
         super().__init__()
@@ -109,7 +111,19 @@ class PointSession(DescribingSession):
     async def _goes(self, kind: str, ms: float, at: tuple[float, float]) -> None:
         await self._touching(ms, at)
         if callable(getattr(self, "_gate", None)):
-            await self._gate()  # (as the hands' `before` or the runner's touch request run it)
+            if getattr(self, "by_hands", False):
+                # (round L) as Session._by_hands: the gate in the hands' `before` (wait=False); a banner, or a held
+                # runner, waited out with the hands' lock let go, then the gate again
+                while True:
+                    try:
+                        await self._gate(wait=False)
+                        break
+                    except session_module._BannerUp:
+                        await self._wait_banner()
+                    except session_module._HeldUp:
+                        await self.channel_free()
+            else:
+                await self._gate()  # (as the runner's touch request runs it)
         self._record(kind)
         self.sent.append((kind, at))
         if at in self.opens:

@@ -165,11 +165,23 @@ def test_the_phones_feed_two_no_answers_then_the_apps_own_the_touch_goes():
         s = unread()
         d, stop, task = await _looked(s)
         # (round K: the status bar's clock answers SpringBoard's status bar, the feed's point "no element answered" after
-        # the runner's 0.3 s: the app didn't answer where SpringBoard would have, the touch goes at once, two questions)
-        s.hit = lambda x, y: (other("com.apple.springboard", (55, 18, 52, 23), "XCUIElementTypeStaticText")
-                              if (x, y) == session_module.HIT_WITNESS else NOTHING)
+        # the runner's 0.3 s: the app didn't answer where SpringBoard would have, the touch goes at once. Round L: the
+        # runner is then held, as on the phone, so the clock asked once more says nothing too (the hold confirmed); and
+        # the clear is the hands' touch's: three questions)
+        s.by_hands = True
+        held = {"on": False}
+
+        def hit(x, y):
+            if held["on"]:
+                return NOTHING
+            if (x, y) == session_module.HIT_WITNESS:
+                return other("com.apple.springboard", (55, 18, 52, 23), "XCUIElementTypeStaticText")
+            held["on"] = True
+            return NOTHING
+        s.hit = hit
         await d.run_tool("a", "tap", {"target": {"x": 200, "y": 85}, "look": False})
-        assert s.sent == [("tap", (200, 85))] and s.hit_questions == [session_module.HIT_WITNESS, (200.0, 85.0)]
+        assert s.sent == [("tap", (200, 85))] and s.hit_questions == [session_module.HIT_WITNESS, (200.0, 85.0),
+                                                                       session_module.HIT_WITNESS]
         await finish(stop, task)
     run(go)
 
