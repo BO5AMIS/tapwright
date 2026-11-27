@@ -765,7 +765,11 @@ def build_version(build: str | None) -> int:
     """The route version of a recorded runner build ("fork-tw-16.15.3.15" -> 15); 0 for Appium's, or none recorded."""
     found = re.fullmatch(r"fork-tw-\d+\.\d+\.\d+\.(\d+)", build or "")
     return int(found.group(1)) if found else 0
-_PHONE_TIME = re.compile(r"no element answered at the point \(hit (\d+(?:\.\d+)?) ms, (client|daemon)\b")
+# (round O, review RN-M1) runner 16 after c9dd3486 says the lookup's own time, then the whole (the AX timeout's lock,
+# install and restore): "(hit 12 ms, all 272 ms, client, ...)". The verdict is the lookup's own time; "all" and the
+# error's name go to the trace. A refusal of 4392284f's build (no "all") is read as round N read it
+_PHONE_TIME = re.compile(r"no element answered at the point \(hit (\d+(?:\.\d+)?) ms(?:, all (\d+(?:\.\d+)?) ms)?, "
+                         r"(client|daemon)(?:, ([^)]+))?\)")
 # (round L, review RK M1) how young the clear of a banner wait's last poll must be for the hands' gate that runs again
 # right after it (under the hands' lock, a hold known) to take it instead of asking
 GATE_FRESH = 1.0
@@ -836,9 +840,23 @@ def phone_time(said: str, version: int) -> float | None:
     if version < PHONE_TIME_VERSION:
         return None
     found = _PHONE_TIME.search(said)
-    if found is None or found.group(2) != "client":
+    if found is None or found.group(3) != "client":
         return None
     return float(found.group(1)) / 1000.0
+
+
+def phone_words(said: str) -> dict:
+    """(round O) What a runner-16 refusal says besides the lookup's time, for the trace: {"all": ms, "how": way,
+    "err": the error's or the exception's name}, each only when said."""
+    found = _PHONE_TIME.search(said)
+    if found is None:
+        return {}
+    told = {"hit": float(found.group(1)), "how": found.group(3)}
+    if found.group(2) is not None:
+        told["all"] = float(found.group(2))
+    if found.group(4):
+        told["err"] = found.group(4)
+    return told
 
 
 def slow_nothing(phone: float | None, took: float) -> bool:
@@ -2067,6 +2085,8 @@ class Session:
             return
         try:
             await self._front_rules(at, wait)
+            if (late := getattr(self, "late_check", None)) is not None:
+                await late(at)  # (round O, review RN-M4: an o ref's text, read again when its check is old)
         except (_BannerUp, _HeldUp):
             raise  # (the gate stays: it runs again once the banner, or the runner, is waited out)
         except BaseException:
@@ -2165,6 +2185,7 @@ class Session:
         slowly (a real answer there: the runner isn't held, the point's "nothing" was SpringBoard's, over). A clock
         that answered the status bar but not promptly still lets the point decide, except that its "nothing" is slow. `hands`: the touch goes by the hands; the runner's touch goes through XCTest, held now,
         and would land late (M2): no clear then, slow."""
+        self.sheet_over = None  # (round N: another app's sheet over the screen, as this check found it; round O, RN-L1)
         if HIT_CHECK == "0" or self.tw_version < 6:
             return BANNER_UNASKED
         point = self._portrait_point(at)
@@ -2172,7 +2193,6 @@ class Session:
             trace.note("banner_turn", {"at": [round(at[0]), round(at[1])], "turn": self.turn})
             return BANNER_UNSURE
         where = {"at": [round(at[0]), round(at[1])]}
-        self.sheet_over = None  # (round N: another app's sheet over the screen, as this check found it)
         if self._held():
             trace.note("banner_held", where)  # (the runner waits on the app: nothing is asked)
             return BANNER_SLOW
@@ -2216,8 +2236,8 @@ class Session:
                 if value is not None:
                     # (round N) runner 16 timed its own lookup: the phone's time says it. Fast: nothing is there right
                     # now (a banner in motion). Slow with SpringBoard's status bar answering at the clock: the app didn't
-                    # answer where SpringBoard would have, clear on both paths (the lookup was bounded on the phone:
-                    # nothing is held, so nothing lands late) with no confirm and no promptness asked of the clock.
+                    # answer where SpringBoard would have: clear by the hands with no confirm and no promptness asked of
+                    # the clock (the hold set above); by the runner only once the clock answers again (round O, RN-H1).
                     # Slow with no witness: the app can't be told from SpringBoard, slow (the hold set above either way)
                     ms = round(value * 1000)
                     if value < HIT_PHONE_SLOW:
@@ -2226,6 +2246,22 @@ class Session:
                         return BANNER_OVER
                     if holds is None:
                         trace.note("banner_slow", {**where, "phone_ms": ms})
+                        return BANNER_SLOW
+                    if not hands:
+                        # (round O, review RN-H1) the runner's own touch goes through XCTest: that the bounded lookup
+                        # left nothing held isn't measured yet (N-F4). The clock asked once more: a real answer proves
+                        # the runner free (clear, no hold); "nothing" or a silence: held, slow (round M's refusal)
+                        again, answer, _ = await self._hit_once(HIT_WITNESS, deadline, where, wait=HIT_FREE_WAIT)
+                        if again == "answer":
+                            self._held_until = 0.0
+                            if self._witness_of(answer, where)[0] == BANNER_OVER:
+                                self._banner_real = True  # (a banner came to the clock meanwhile)
+                                return BANNER_OVER
+                            trace.note("banner_witness", {**where, "frame": holds, "phone_ms": ms, "free": True})
+                            return BANNER_CLEAR
+                        trace.note("banner_slow", {**where, "phone_ms": ms, "confirm": again})
+                        if again == "nothing":
+                            self._hold("confirm", at)
                         return BANNER_SLOW
                     trace.note("banner_witness", {**where, "frame": holds, "phone_ms": ms, "hands": hands})
                     return BANNER_CLEAR
@@ -2277,7 +2313,7 @@ class Session:
             return said
 
     async def _hit_once(self, xy: tuple[float, float], deadline: float, where: dict,
-                        wait: float | None = None) -> "tuple[str, object, float]":
+                        wait: float | None = None, sets_quiet: bool = True) -> "tuple[str, object, float]":
         """(round K, L) One hit question at a portrait point, `once`, inside the call's deadline (or `wait` seconds):
         (kind, the answer, the seconds it took, as the daemon saw them). "answer"; "nothing" ("no element answered":
         the caller judges its time against the clock's own round trip, review RK H1; round N: its answer is the phone's
@@ -2299,17 +2335,22 @@ class Session:
         except ConnectionLost:
             raise
         except Unanswered:
-            self._hit_quiet_until = time.monotonic() + HIT_QUIET
+            if sets_quiet:  # (round O, review RN-L3: not after a held state's clock question)
+                self._hit_quiet_until = time.monotonic() + HIT_QUIET
             trace.note("banner_silent", {**where, "asked": [round(xy[0]), round(xy[1])]})
             return "silent", None, time.monotonic() - began
         except DeviceError as e:
             said = str(e).lower()
             if HIT_NOTHING in said:
-                return "nothing", phone_time(said, self.tw_version), time.monotonic() - began
+                phone = phone_time(said, self.tw_version)
+                if phone is not None:
+                    trace.note("hit_phone", {**where, **phone_words(str(e))})  # (round O: the whole and the error too)
+                return "nothing", phone, time.monotonic() - began
             return ("unasked" if "unknown command" in said or "unknown method" in said else "error"), None, \
                 time.monotonic() - began
         except Exception:  # noqa: BLE001 - no answer in time (or the wait failed): the runner may be on it still
-            self._hit_quiet_until = time.monotonic() + HIT_QUIET
+            if sets_quiet:
+                self._hit_quiet_until = time.monotonic() + HIT_QUIET
             trace.note("banner_silent", {**where, "asked": [round(xy[0]), round(xy[1])]})
             return "silent", None, time.monotonic() - began
         return "answer", answer, time.monotonic() - began
@@ -2393,31 +2434,27 @@ class Session:
         what the service asks after a reconnect), else by the newest read or open_app; never by the runner."""
         in_front: list = []
         try:
+            # (round O, review RN-L2) the one device question, HELD_FRONT_WAIT at most: the app's name comes from what
+            # is known already (the installed apps' names, the newest read), else its bundle id names it
             in_front = list(await asyncio.wait_for(self.device.foreground_apps(), HELD_FRONT_WAIT))
         except Exception:  # noqa: BLE001 - the newest read names it then
             pass
         known = getattr(self, "app", None)
         bundle = (in_front[0] if in_front else known[1] if isinstance(known, tuple) else
                   getattr(self, "opened_app", None) or "")
-        names = getattr(self, "app_names", None)
-        if names is None:
-            names = self.app_names = {}
-        if bundle and bundle not in names:
-            try:
-                await asyncio.wait_for(self.read_app_names(), HELD_FRONT_WAIT)
-            except Exception:  # noqa: BLE001 - the bundle id names it well enough
-                pass
+        names = getattr(self, "app_names", None) or {}
         name = names.get(bundle) or (known[0] if isinstance(known, tuple) and known[1] == bundle else "") or bundle
         trace.note("runner_given_up", {"b": bundle})
         return RunnerHeld(bundle, name)
 
-    async def held_answers(self) -> bool:
-        """(round N) The state a given-up hold left (RunnerHeld): one question at the clock, HELD_ASK_WAIT at most. A
-        real answer ends it (True); a slow or fast "no element answered", a silence, or the quiet after one leave it
-        (False), and nothing else is asked. True at once when there is no such state."""
+    async def held_answers(self, wait: float | None = None) -> bool:
+        """(round N) The state a given-up hold left (RunnerHeld): one question at the clock, `wait` (HELD_ASK_WAIT) at
+        most. A real answer ends it (True); a slow or fast "no element answered", a silence, or the quiet after one
+        leave it (False), and nothing else is asked. True at once when there is no such state. (Round O, review RN-L3)
+        Its silence sets no quiet: the next call, or the way out's next question, asks again."""
         if getattr(self, "runner_held", None) is None:
             return True
-        return await self._free_step(HELD_ASK_WAIT)
+        return await self._free_step(HELD_ASK_WAIT if wait is None else wait, quiet=False)
 
     async def _held_wait(self) -> None:
         """(round L, M) A hands touch's wait for a held runner, with the hands' lock let go: inside the touch's single
@@ -2429,7 +2466,7 @@ class Session:
             self._gate_at, self._banner_seen, self._banner_until = None, False, None
             raise Refused("not_actionable", COVERED_SLOW)
 
-    async def _free_step(self, wait: float | None = None) -> bool:
+    async def _free_step(self, wait: float | None = None, quiet: bool = True) -> bool:
         """(round L) One question at the clock while a hold is known, under the hit lock: True when it ended the hold (a
         real answer; or no such route, where nothing could be asked again). `wait`: the question's bound (HIT_FREE_WAIT).
         (Round N) A real answer ends a given-up hold (RunnerHeld) too."""
@@ -2440,7 +2477,8 @@ class Session:
         async with lock:
             if not self._held():
                 return True
-            kind, _, _ = await self._hit_once(HIT_WITNESS, time.monotonic() + wait, {"at": [66, 22]}, wait=wait)
+            kind, _, _ = await self._hit_once(HIT_WITNESS, time.monotonic() + wait, {"at": [66, 22]}, wait=wait,
+                                              sets_quiet=quiet)
         if kind in ("answer", "unasked"):
             self._held_until = 0.0
             if getattr(self, "runner_held", None) is not None:

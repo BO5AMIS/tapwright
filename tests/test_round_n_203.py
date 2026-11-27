@@ -93,6 +93,7 @@ def test_n_f2_a_hold_past_hit_held_answers_not_answering_and_never_costs_the_lin
     async def go():
         s = HeldSession(hold_for=9.0)  # (90 s on the phone, at a tenth)
         d, stop, task = await _looked(s)
+        d.heartbeat = 3600.0  # (round O: the heartbeat's own clock question has its own test; the call's are counted)
         attempts, sid = d._attempts, s.sid
         began = time.monotonic()
         r = await d.run_tool("a", "tap", {"target": {"x": POINT[0], "y": POINT[1]}, "screenshot": False})
@@ -147,8 +148,11 @@ def test_n_f1_a_hold_that_ends_before_hit_held_still_ends_as_before(scaled):
 
 
 async def _held(s: HeldSession):
-    """A daemon in the state N-F2 now ends in: looked, tapped, the hold given up."""
+    """A daemon in the state N-F2 now ends in: looked, tapped, the hold given up. (Round O) The heartbeat asks the clock
+    once a beat in that state (RN-M3, its own tests below): here it beats once an hour, so a call's questions are its
+    own."""
     d, stop, task = await _looked(s)
+    d.heartbeat = 3600.0
     await d.run_tool("a", "tap", {"target": {"x": POINT[0], "y": POINT[1]}, "screenshot": False})
     assert isinstance(d.stuck, session_module.RunnerHeld)
     s.hit_questions.clear()
@@ -269,14 +273,58 @@ def _sixteen(script, version=16):
     return s
 
 
-@pytest.mark.parametrize("hands", [True, False])
 @pytest.mark.parametrize("link", [0.0, 0.4])
-def test_16_a_busy_app_is_clear_on_both_paths_with_no_confirm_and_the_hold_set(hands, link):
+def test_16_a_busy_app_is_clear_by_the_hands_with_no_confirm_and_the_hold_set(link):
     async def go():
         s = _sixteen(lambda n, path, dev: (0.02 + link, status_bar()) if "x=66.00" in path
                      else (0.31 + link, _timed(304)))
-        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=hands) == session_module.BANNER_CLEAR
+        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=True) == session_module.BANNER_CLEAR
         assert len(s.device.asked) == 2 and s._held()  # (the clock and the point, no confirm; a late clock is fine)
+    run(go)
+
+
+@pytest.mark.parametrize("link", [0.0, 0.4])
+def test_16_rn_h1_by_the_runner_a_free_runner_is_proven_by_the_clock_once_more(link):
+    # (round O, review RN-H1) the runner's own touch goes only once the clock answers again: clear, and no hold
+    async def go():
+        s = _sixteen(lambda n, path, dev: (0.02 + link, status_bar()) if "x=66.00" in path
+                     else (0.31 + link, _timed(304)))
+        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=False) == session_module.BANNER_CLEAR
+        assert [p for _, p in s.device.asked] == ["x=66.00&y=22.00", "x=383.00&y=168.00", "x=66.00&y=22.00"]
+        assert not s._held()
+    run(go)
+
+
+@pytest.mark.parametrize("again", ["held", "silent"])
+def test_16_rn_h1_by_the_runner_a_hold_that_persists_is_slow_and_by_the_hands_goes(again, monkeypatch):
+    # (round O, the reviewer's probe: on 16 the point's slow "nothing" no longer clears the runner's path by itself)
+    monkeypatch.setattr(session_module, "HIT_FREE_WAIT", 0.2)
+
+    def script(n, path, dev):
+        if time.monotonic() < dev.held_until:
+            return (0.03, _timed(301)) if again == "held" else (0.4, status_bar())  # (silent: past HIT_FREE_WAIT)
+        if "x=66.00" in path:
+            return 0.0, status_bar()
+        dev.held_until = time.monotonic() + 0.03 + 5.0  # (the app's request stays: N-F4 not holding)
+        return 0.03, _timed(304)
+
+    async def go():
+        s = _sixteen(script)
+        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=False) == session_module.BANNER_SLOW
+        assert len(s.device.asked) == 3 and s._held()
+        s2 = _sixteen(script)
+        assert await s2.banner_at((383.0, 168.0), SHOP[1], hands=True) == session_module.BANNER_CLEAR
+        assert len(s2.device.asked) == 2 and s2._held()
+    run(go)
+
+
+def test_16_rn_h1_a_banner_at_the_clock_when_asked_again_is_over():
+    async def go():
+        from test_round_i_203 import hit_of
+        s = _sixteen(lambda n, path, dev: (0.0, status_bar() if n == 1 else hit_of("com.apple.springboard",
+                                                                                     [8, 11, 414, 90]))
+                     if "x=66.00" in path else (0.31, _timed(304)))
+        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=False) == session_module.BANNER_OVER
     run(go)
 
 
@@ -362,7 +410,8 @@ def test_16_the_hold_is_not_assumed_away_the_front_route_waits_for_the_clock(sca
             dev.held_until = time.monotonic() + 0.3
             return 0.03, _timed(304)
         s = _sixteen(script)
-        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=False) == session_module.BANNER_CLEAR
+        # (round O, RN-H1: the runner's path asks the clock once more, which the held runner doesn't answer: slow)
+        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=False) == session_module.BANNER_SLOW
         assert s._held()
         await s.front_app()
         assert not s.device.front_into_held  # (the clock was asked until it answered)

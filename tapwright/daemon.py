@@ -102,6 +102,9 @@ OCR_REF = re.compile(r"o[1-9][0-9]*")
 # it: the picture's text is read once more right before the touch (an o ref tapped 6 s after the look, on a list cut
 # short, went to another control: the screen had moved and nothing said so)
 O_REF_STILL = 12.0
+# (round O, review RN-M4) a check older than this when the touch's gate has run (a queue, a banner wait) is made again
+# there, right before the touch
+O_REF_FRESH = 1.0
 OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its centre):"
 OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
 # (2.0) the calls that need no read of the app: while one blocks even the runner's bounded routes (not-answering),
@@ -202,6 +205,9 @@ _PICTURE_AIM: contextvars.ContextVar["int | None"] = contextvars.ContextVar("tap
 # (2.0.1, review R201 M1) the touch under way is aimed by a {text} found in the picture (_by_picture_text): the agent
 # meant what shows the text, not a point of its own, so the touch waits out a notification banner as an element's does
 _PICTURE_TEXT: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_picture_text", default=False)
+# (round O, review RN-M4) an o ref's check for this call: (ref, its text, when it was made: hub.mono()); None otherwise
+_O_REF_CHECK: contextvars.ContextVar["tuple[str, str, float] | None"] = contextvars.ContextVar("tapwright_o_ref_check",
+                                                                                              default=None)
 # (2.0.3, the phone test of 137b583) how the settle of the action whose answer is being read ended, for that read only: True
 # on frames that stood still, False on its cap with frames still changing (a feed), None when no action's settle came
 # before the read (a look, wait_for's polls) or it said neither. Daemon._still_mark asks it before a slow app's planned
@@ -2431,6 +2437,17 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 continue
             if self._photo_wait_left() is not None:
                 continue  # a media add holds the runner (iOS's photo prompt, a video's import): no answer is expected, and none is a drop
+            if isinstance(self.stuck, session_module.RunnerHeld):
+                # (round O, review RN-M3) a given-up hold: one question at the clock a beat, nothing else; a real answer
+                # ends the state with no call (the agent stopped, or a person closed the app on the phone)
+                try:
+                    if await self.control.read(lambda: self.session.held_answers(session_module.HIT_FREE_WAIT)):
+                        self._end_held("the clock answered at a heartbeat")
+                except ConnectionLost as e:
+                    self.lost(e)
+                except Exception as e:  # noqa: BLE001 - the next beat asks again
+                    self.log(f"heartbeat while the runner was held: {e}")
+                continue
             try:
                 locked = await self.control.read(lambda: self._connected_only(self.session.locked))
             except ConnectionLost as e:
@@ -4576,15 +4593,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         target_in = args.get("target")
         o_ref = target_in.get("ref") if isinstance(target_in, dict) else None
         args, read_at = self._ocr_target(client_id, args)
+        checked = None
         if read_at is not None and isinstance(o_ref, str) and not args.get("force"):
             args = await self._o_ref_still(client_id, name, o_ref, args)  # (round N, N-F7: `dry_run` checks too)
+            text = self.control.client(client_id).ocr_text.get(o_ref)
+            checked = (o_ref, text, self.hub.mono()) if text is not None else None
         if read_at is not None:
             # (CodeRabbit, PR #26) an o ref is a point of the screen as its text was read: the touch is refused `stale`
             # in its turn when another's action came since (a person, another agent), as a {text} by picture is (K-H2)
-            token = _PICTURE_AIM.set(read_at)
+            token, check_token = _PICTURE_AIM.set(read_at), _O_REF_CHECK.set(checked)
             try:
                 return await self._run_tool_core(client_id, name, args)
             finally:
+                _O_REF_CHECK.reset(check_token)
                 _PICTURE_AIM.reset(token)
         if "index" in args and isinstance(args.get("target"), dict) and "index" not in args["target"]:
             # `index` belongs inside `target`; a first-time agent put it beside it and got an ambiguous error back
@@ -4870,6 +4891,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self.session.banner_guard = self._guards_banners(name, target)
             self.session.touch_rules = self._touch_rules(view, name, target, args)
             self.session.found_front = None
+            # (round O, review RN-M4) an o ref's text, read again after the gate (a queue, a banner wait) when its check
+            # is older than O_REF_FRESH
+            self.session.late_check = self._o_ref_late(*checked) if (checked := _O_REF_CHECK.get()) else None
             touched_token = _SCOPE_TOUCHED.set([])
             try:
                 return await act()
@@ -4886,6 +4910,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     if isinstance(found, session_module.Front):  # (review RP2 M2: the system the agent saw has gone)
                         view.seen_front = found
                     self.session.touch_rules = self.session.found_front = None
+                    self.session.late_check = None
                     self.session.before_input = None
                     self.session.execution_guard = None
                     self.session.front_apps = None  # (a tap that checked the app in front cleared it already)
@@ -6476,7 +6501,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         until = time.monotonic() + HELD_AFTER_WAIT
         while isinstance(self.stuck, session_module.RunnerHeld):
             try:
-                answered = await self.control.read(self.session.held_answers)
+                # (round O, review RN-L3) a way out's question is given what entering the state gave one
+                answered = await self.control.read(lambda: self.session.held_answers(session_module.HIT_FREE_WAIT))
             except ConnectionLost as e:
                 self.lost(e)
                 return False
@@ -6584,6 +6610,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if bundle_id == stuck.bundle_id:
             self.session._hit_quiet_until = 0.0
         said = self._after_open(view, a, bundle_id, shown, before, False, back)
+        if bundle_id == stuck.bundle_id and said.endswith("."):
+            # (round O, review RN-L6) what the agent had in it is gone: say so
+            said = said[:-1] + " (it was ended first: it held the phone's runner, so it starts fresh)."
         view.moved = True  # (nothing was read after it)
         self.log(f"opened {bundle_id} through iOS process control while the runner was held")
         self._announce("agent", "open_app", label=_bare_name(shown, bundle_id))
@@ -6849,12 +6878,37 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise
         except Exception as e:  # noqa: BLE001 - the picture can't be read now: the touch isn't made
             seen, note = [], f"{type(e).__name__}"
+        x, y = self._o_ref_verdict(ref, text, point, seen, note)
+        return {**args, "target": {**args["target"], "x": round(x, 1), "y": round(y, 1)}}
+
+    def _o_ref_late(self, ref: str, text: str, checked: float) -> "Callable[[tuple[float, float]], Awaitable[None]]":
+        """(round O, review RN-M4) The touch's last step for an o ref (Session._gate, after the queue, the front check and
+        any banner wait): a check older than O_REF_FRESH is made again, reading the picture's text without the queue
+        (the touch holds its turn), and the touch goes only when the same text is within O_REF_STILL of the point it
+        goes to; else `stale` with the check's words, nothing touched. The touch's point is the one the first check
+        found (its gesture is made by then): never moved here."""
+        async def late(at: tuple[float, float]) -> None:
+            if self.hub.mono() - checked < O_REF_FRESH:
+                return
+            try:
+                seen, note = await self._screen_text("accurate", implicit=True, queued=False)
+            except Refused:
+                raise
+            except Exception as e:  # noqa: BLE001 - the picture can't be read now: the touch isn't made
+                seen, note = [], f"{type(e).__name__}"
+            self._o_ref_verdict(ref, text, (float(at[0]), float(at[1])), seen, note)
+            trace.note("o_ref_late", {"ref": ref, "age": round(self.hub.mono() - checked, 2)})
+        return late
+
+    def _o_ref_verdict(self, ref: str, text: str, point: "tuple[float, float]", seen: "list[ocr.Seen]",
+                       note: str) -> "tuple[float, float]":
+        """(rounds N, O) Where an o ref's text is now: the centre of the same text within O_REF_STILL of `point`, else
+        `stale` (saying where it is when it moved further, or that the picture can't be read)."""
         want = " ".join(text.casefold().split())
         alike = sorted((s for s in seen if " ".join(s.text.casefold().split()) == want),
                        key=lambda s: math.dist(s.center, point))
         if alike and math.dist(alike[0].center, point) <= O_REF_STILL:
-            x, y = alike[0].center
-            return {**args, "target": {**args["target"], "x": round(x, 1), "y": round(y, 1)}}
+            return alike[0].center
         if alike:
             where = f" (it is at ({round(alike[0].center[0])}, {round(alike[0].center[1])}) now)"
         elif note or not seen:
@@ -7186,17 +7240,22 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         reads = getattr(self.session, "reads_text", None)
         return bool(reads()) if callable(reads) and RUNNER_OCR != "0" else False
 
-    async def _screen_text(self, level: str = "accurate", implicit: bool = False) -> "tuple[list[ocr.Seen], str]":
+    async def _screen_text(self, level: str = "accurate", implicit: bool = False,
+                           queued: bool = True) -> "tuple[list[ocr.Seen], str]":
         """(the text lines the screen shows now, a note for the answer or ""). The runner reads them on the phone
         (route version 9, Apple's Vision: faster than this computer's CPU); RapidOCR reads the picture here when the
         runner can't (an older runner, or its OCR failed: never a failed call). Neither: no lines, and the note says
         how to install the extra. `implicit`: a read the agent didn't ask for (a cut-short look, a wait's picture): a
-        broken install here is a note too, never a failed call (review R200v L5)."""
+        broken install here is a note too, never a failed call (review R200v L5). `queued` False (round O): read inside
+        the caller's own turn (an o ref's late check), not through the queue it holds."""
         failed = ""
+
+        async def through(fn):
+            return await (self._read(fn) if queued else fn())
         if self._runner_reads_text():
             asked = self.hub.mono()
             try:
-                seen = await self._read(lambda: self.session.read_text(level))
+                seen = await through(lambda: self.session.read_text(level))
             except Refused:
                 raise
             except Exception as e:  # noqa: BLE001 - the picture is read here instead
@@ -7221,7 +7280,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         else:
             picture = None
         if picture is None:
-            picture = await self._phone_picture()  # (full size: this computer's OCR reads it)
+            picture = await self._phone_picture(queued=queued)  # (full size: this computer's OCR reads it)
             if self.unlocked_since(asked):
                 raise Refused("busy", UNLOCK_BUSY)
         try:
@@ -10553,13 +10612,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         answer["image"], answer["image_size"] = base64.b64encode(jpeg).decode(), [size[0], size[1]]
         return answer
 
-    async def _phone_picture(self, width: int | None = None) -> bytes:
-        """The screen as the phone takes it, through the queue: the runner's JPEG shot (route version 11, about 50 ms;
-        `width` pixels wide, None: full size), else /screenshot's PNG (250-640 ms). The caller checks the unlock rule."""
+    async def _phone_picture(self, width: int | None = None, queued: bool = True) -> bytes:
+        """The screen as the phone takes it, through the queue (`queued` False: inside the caller's own turn): the
+        runner's JPEG shot (route version 11, about 50 ms; `width` pixels wide, None: full size), else /screenshot's PNG
+        (250-640 ms). The caller checks the unlock rule."""
         picture = getattr(self.session, "screen_picture", None)
         if callable(picture):
-            return await self._read(lambda: picture(width))
-        return await self._read(self.session.screenshot_png)
+            return await (self._read(lambda: picture(width)) if queued else picture(width))
+        return await (self._read(self.session.screenshot_png) if queued else self.session.screenshot_png())
 
     def _pairs_text(self, view, shot: "tuple[int, bool] | None") -> bool:
         """(2.0, worker H) Does a look's picture come with its text in ONE request (the OCR read's `image=1`, route version
