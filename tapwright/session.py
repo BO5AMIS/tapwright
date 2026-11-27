@@ -737,6 +737,35 @@ HIT_WITNESS_PROMPT, HIT_NOTHING_MARGIN = 0.15, 0.2
 # one question). Requests through accessibility wait for it (Session.channel_free), asking the clock every
 # HIT_FREE_EVERY s, HIT_FREE_WAIT s at most a question
 HIT_HELD, HIT_FREE_EVERY, HIT_FREE_WAIT = 12.0, 0.7, 1.0
+# (round N, phone 2026-11-28 N-F2) a hold that outlasts HIT_HELD is given up: nothing more goes into the runner through
+# accessibility (the front route asked into it stalled, was taken for a lost line, and a reconnect and a new session
+# followed: 82 s); the app in front, named by iOS's process list (HELD_FRONT_WAIT at most), isn't answering
+# (RunnerHeld) until the clock answers again: each later call asks it once, HELD_ASK_WAIT at most
+HELD_FRONT_WAIT, HELD_ASK_WAIT = 3.0, 0.45
+# (round N) runner 16 times its own point lookup (inside XCTest's accessibility timeout, 0.3 s, instead of a request
+# with none: N-F3) and says so after the words of a "no element answered": "(hit 304 ms, client)", with the
+# accessibility error's short name when there was one. Judged by that time (the phone's own), at least HIT_PHONE_SLOW is
+# slow (the app at that point didn't answer in time), under it fast (nothing is there right now: a banner in motion);
+# the link's delay no longer counts. Runner 15, a refusal with no time, or one asked the daemon's way: the daemon's own
+# clock and the rules of rounds K-M
+HIT_PHONE_SLOW, PHONE_TIME_VERSION = 0.25, 16
+RUNNER_OLD = ("the phone's runner is route version {version}, older than 16: the top of a busy app is checked the slow "
+              "way (a question more, judged by this computer's clock), and an app that stops answering can make the "
+              "phone unreadable until it is closed. To update it: plug the phone in, stop the service (tapwright serve "
+              "--stop), then run tapwright doctor --fix (or tapwright setup --force).")
+
+
+def runner_note(version: int) -> str | None:
+    """(round N) What doctor and the status say of the fork's runner older than PHONE_TIME_VERSION (None: 16 or later,
+    or not the fork's runner: nothing to compare)."""
+    return RUNNER_OLD.format(version=version) if 0 < version < PHONE_TIME_VERSION else None
+
+
+def build_version(build: str | None) -> int:
+    """The route version of a recorded runner build ("fork-tw-16.15.3.15" -> 15); 0 for Appium's, or none recorded."""
+    found = re.fullmatch(r"fork-tw-\d+\.\d+\.\d+\.(\d+)", build or "")
+    return int(found.group(1)) if found else 0
+_PHONE_TIME = re.compile(r"no element answered at the point \(hit (\d+(?:\.\d+)?) ms, (client|daemon)\b")
 # (round L, review RK M1) how young the clear of a banner wait's last poll must be for the hands' gate that runs again
 # right after it (under the hands' lock, a hold known) to take it instead of asking
 GATE_FRESH = 1.0
@@ -770,6 +799,11 @@ COVERED_SLOW = ("covered: what is at the top of the screen can't be told right n
 # (round G) the hit test couldn't say what is at the top of the screen, though the route names the app
 COVERED_UNSURE = ("covered: can't tell whether a notification is over the top of the screen (the phone's runner didn't "
                   "answer what is there), so nothing was touched; aim at an element (by ref, id or label), or lower.")
+# (round N, phone 2026-11-28 N-F5) the hit test answered another process's whole screen, neither SpringBoard nor the app
+# in front: a system sheet over the app (a rating prompt's, every point answering it in 11-13 ms). Refused as before,
+# with what it is
+COVERED_SHEET = "covered: another app's sheet ({bundle}) is over the screen; look again."
+SHEET_NOTE = "Note: another app's sheet ({bundle}) is over the screen; look again."
 COVERED_HOME = ("covered: a notification may be over the top of the home screen, so nothing was touched; aim at an "
                 "element (by ref, id or label), or look again.")
 # (review RF H1) the app in front known only from iOS's process list, which can't see a banner
@@ -780,6 +814,37 @@ COVERED_GUESS = ("covered: can't tell whether a notification is over the top of 
 class _BannerUp(Exception):
     """(review RP2 H1) The front check would wait a banner out: raised inside the hands' `before`, so the wait happens
     with the hands' lock let go (Session._by_hands), and the guard and the check run again right before the touch."""
+
+
+class RunnerHeld(AppNotAnswering):
+    """(2.0.3 round N, N-F2) The runner was held past HIT_HELD by the app's pending accessibility request (the clock
+    said a slow "no element answered", or nothing, the whole while): nothing through accessibility is sent into it (the
+    front route, a tree read), and the line isn't taken for lost on the strength of such a request: the runner answers.
+    The daemon answers `not_answering` until the clock answers again; close_app, open_app and the home button are how
+    an agent gets out. The app is named from iOS's process list (the device channel), never from the runner."""
+
+    def __init__(self, bundle_id: str, name: str) -> None:
+        super().__init__(bundle_id, name)
+        if not bundle_id:  # (iOS's process list couldn't say, and no read named the app)
+            self.args = ("the app in front isn't answering, so nothing on the phone can be read",)
+
+
+def phone_time(said: str, version: int) -> float | None:
+    """(round N) The phone's own time of a "no element answered", in seconds, from runner 16's words ("(hit 304 ms,
+    client...)"); None from an older runner, words with no time, or a lookup asked the daemon's way (runner 15's rules
+    then)."""
+    if version < PHONE_TIME_VERSION:
+        return None
+    found = _PHONE_TIME.search(said)
+    if found is None or found.group(2) != "client":
+        return None
+    return float(found.group(1)) / 1000.0
+
+
+def slow_nothing(phone: float | None, took: float) -> bool:
+    """(round N) Is a "no element answered" slow: by the phone's own time when runner 16 gave it (HIT_PHONE_SLOW), else
+    by the daemon's clock (HIT_NOTHING_SLOW, rounds K-M)."""
+    return phone >= HIT_PHONE_SLOW if phone is not None else took >= HIT_NOTHING_SLOW
 
 
 class _HeldUp(Exception):
@@ -1122,6 +1187,7 @@ class Session:
             pass
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
+        self.runner_held = None  # (round N: a new runner holds nothing)
         self.scale = self.app = self.read_app = None
         self.scale_read = False
         self.items, self.offscreen, self.behind = [], [], []
@@ -2106,6 +2172,7 @@ class Session:
             trace.note("banner_turn", {"at": [round(at[0]), round(at[1])], "turn": self.turn})
             return BANNER_UNSURE
         where = {"at": [round(at[0]), round(at[1])]}
+        self.sheet_over = None  # (round N: another app's sheet over the screen, as this check found it)
         if self._held():
             trace.note("banner_held", where)  # (the runner waits on the app: nothing is asked)
             return BANNER_SLOW
@@ -2125,7 +2192,7 @@ class Session:
                 if kind in ("silent", "quiet"):
                     return BANNER_SLOW
                 if kind == "nothing":
-                    if t_w >= HIT_NOTHING_SLOW:
+                    if slow_nothing(value, t_w):  # (round N: by the phone's time on runner 16)
                         self._hold("witness", at)
                         return BANNER_SLOW
                     trace.note("banner_moving", {**where, "witness": True})  # (the status bar being redrawn)
@@ -2142,10 +2209,26 @@ class Session:
             if kind in ("silent", "quiet"):
                 return BANNER_SLOW
             if kind == "nothing":
-                if took >= HIT_NOTHING_SLOW:
+                if slow_nothing(value, took):
                     self._hold("point", at)  # (review RL H1: the runner held, whatever the verdict below)
                 if point[1] < HIT_NOTHING_ABOVE:  # (review RH L5: the portrait panel's top edge)
                     return BANNER_CLEAR  # (the screen's top edge: a banner there would have answered)
+                if value is not None:
+                    # (round N) runner 16 timed its own lookup: the phone's time says it. Fast: nothing is there right
+                    # now (a banner in motion). Slow with SpringBoard's status bar answering at the clock: the app didn't
+                    # answer where SpringBoard would have, clear on both paths (the lookup was bounded on the phone:
+                    # nothing is held, so nothing lands late) with no confirm and no promptness asked of the clock.
+                    # Slow with no witness: the app can't be told from SpringBoard, slow (the hold set above either way)
+                    ms = round(value * 1000)
+                    if value < HIT_PHONE_SLOW:
+                        trace.note("banner_moving", {**where, "phone_ms": ms})
+                        self._banner_moving = True
+                        return BANNER_OVER
+                    if holds is None:
+                        trace.note("banner_slow", {**where, "phone_ms": ms})
+                        return BANNER_SLOW
+                    trace.note("banner_witness", {**where, "frame": holds, "phone_ms": ms, "hands": hands})
+                    return BANNER_CLEAR
                 if holds is not None and t_w >= HIT_WITNESS_PROMPT:
                     # (round M, the lead) the status bar answered, but not promptly: its time can't vouch for the
                     # point's, so a "nothing" there is neither a clear nor a banner in motion: slow (no confirm asked)
@@ -2197,7 +2280,8 @@ class Session:
                         wait: float | None = None) -> "tuple[str, object, float]":
         """(round K, L) One hit question at a portrait point, `once`, inside the call's deadline (or `wait` seconds):
         (kind, the answer, the seconds it took, as the daemon saw them). "answer"; "nothing" ("no element answered":
-        the caller judges its time against the clock's own round trip, review RK H1); "unasked" (no such route);
+        the caller judges its time against the clock's own round trip, review RK H1; round N: its answer is the phone's
+        own time of the lookup, in seconds, from runner 16, else None: phone_time); "unasked" (no such route);
         "error" (another refusal); "silent" (no answer in time: the quiet is set, review RH M1); "quiet" (none sent:
         HIT_QUIET after a silence, or too little time left)."""
         quiet = getattr(self, "_hit_quiet_until", 0.0) - time.monotonic()
@@ -2221,7 +2305,7 @@ class Session:
         except DeviceError as e:
             said = str(e).lower()
             if HIT_NOTHING in said:
-                return "nothing", None, time.monotonic() - began
+                return "nothing", phone_time(said, self.tw_version), time.monotonic() - began
             return ("unasked" if "unknown command" in said or "unknown method" in said else "error"), None, \
                 time.monotonic() - began
         except Exception:  # noqa: BLE001 - no answer in time (or the wait failed): the runner may be on it still
@@ -2256,8 +2340,9 @@ class Session:
     # ---- (round K) the runner held by a question the app didn't answer ----
     def _held(self) -> bool:
         """Is the runner known to be held: a hit question got a slow "no element answered" within HIT_HELD, and no real
-        answer has come since (channel_free)?"""
-        return getattr(self, "_held_until", 0.0) > time.monotonic()
+        answer has come since (channel_free)? (Round N) Or a hold was given up (RunnerHeld) and the clock hasn't
+        answered since."""
+        return getattr(self, "runner_held", None) is not None or getattr(self, "_held_until", 0.0) > time.monotonic()
 
     def _hold(self, why: str, at: tuple[float, float]) -> None:
         """A slow "no element answered": XCTest's daemon keeps the app's unanswered request, and every hit question and
@@ -2275,7 +2360,12 @@ class Session:
         guard (a pause, a lock, a person's turn), when the path has one, is asked at each poll. Instead of a front
         question that stalls for 8 s and is taken for a lost connection, the read after a touch on a hung app comes up
         to about 10 s later. `until` (round M: a hands touch's own deadline): False when it came first, the runner
-        still held; else True."""
+        still held; else True.
+        (Round N, N-F2) At HIT_HELD the hold is given up and nothing goes into the runner: RunnerHeld (the app in front
+        named from iOS's process list) is raised, and raised again at once by every later call (nothing asked) until
+        the clock answers (held_answers, _free_step)."""
+        if (held := getattr(self, "runner_held", None)) is not None:
+            raise RunnerHeld(held.bundle_id, held.name)
         if not self._held():
             return True
         began = time.monotonic()
@@ -2295,7 +2385,39 @@ class Session:
             if pause > 0 and self._held():
                 await asyncio.sleep(min(pause, max(0.0, end - time.monotonic())))
         trace.note("runner_free", {"gave_up": round(time.monotonic() - began, 1)})
-        return True
+        held = self.runner_held = await self._given_up()
+        raise RunnerHeld(held.bundle_id, held.name)
+
+    async def _given_up(self) -> RunnerHeld:
+        """(round N) The runner held past HIT_HELD: the state, its app named by iOS's process list (the device channel,
+        what the service asks after a reconnect), else by the newest read or open_app; never by the runner."""
+        in_front: list = []
+        try:
+            in_front = list(await asyncio.wait_for(self.device.foreground_apps(), HELD_FRONT_WAIT))
+        except Exception:  # noqa: BLE001 - the newest read names it then
+            pass
+        known = getattr(self, "app", None)
+        bundle = (in_front[0] if in_front else known[1] if isinstance(known, tuple) else
+                  getattr(self, "opened_app", None) or "")
+        names = getattr(self, "app_names", None)
+        if names is None:
+            names = self.app_names = {}
+        if bundle and bundle not in names:
+            try:
+                await asyncio.wait_for(self.read_app_names(), HELD_FRONT_WAIT)
+            except Exception:  # noqa: BLE001 - the bundle id names it well enough
+                pass
+        name = names.get(bundle) or (known[0] if isinstance(known, tuple) and known[1] == bundle else "") or bundle
+        trace.note("runner_given_up", {"b": bundle})
+        return RunnerHeld(bundle, name)
+
+    async def held_answers(self) -> bool:
+        """(round N) The state a given-up hold left (RunnerHeld): one question at the clock, HELD_ASK_WAIT at most. A
+        real answer ends it (True); a slow or fast "no element answered", a silence, or the quiet after one leave it
+        (False), and nothing else is asked. True at once when there is no such state."""
+        if getattr(self, "runner_held", None) is None:
+            return True
+        return await self._free_step(HELD_ASK_WAIT)
 
     async def _held_wait(self) -> None:
         """(round L, M) A hands touch's wait for a held runner, with the hands' lock let go: inside the touch's single
@@ -2307,19 +2429,23 @@ class Session:
             self._gate_at, self._banner_seen, self._banner_until = None, False, None
             raise Refused("not_actionable", COVERED_SLOW)
 
-    async def _free_step(self) -> bool:
+    async def _free_step(self, wait: float | None = None) -> bool:
         """(round L) One question at the clock while a hold is known, under the hit lock: True when it ended the hold (a
-        real answer; or no such route, where nothing could be asked again)."""
+        real answer; or no such route, where nothing could be asked again). `wait`: the question's bound (HIT_FREE_WAIT).
+        (Round N) A real answer ends a given-up hold (RunnerHeld) too."""
+        wait = HIT_FREE_WAIT if wait is None else wait
         lock = getattr(self, "_hit_lock", None)
         if lock is None:
             lock = self._hit_lock = asyncio.Lock()
         async with lock:
             if not self._held():
                 return True
-            kind, _, _ = await self._hit_once(HIT_WITNESS, time.monotonic() + HIT_FREE_WAIT, {"at": [66, 22]},
-                                              wait=HIT_FREE_WAIT)
+            kind, _, _ = await self._hit_once(HIT_WITNESS, time.monotonic() + wait, {"at": [66, 22]}, wait=wait)
         if kind in ("answer", "unasked"):
             self._held_until = 0.0
+            if getattr(self, "runner_held", None) is not None:
+                self.runner_held = None
+                trace.note("runner_free", "answered")
             return True
         return False
 
@@ -2357,6 +2483,8 @@ class Session:
         if app is None or hit.bundle == app or hit.bundle.startswith(WEB_CONTENT) or hit.bundle in ui.KEYBOARD_HOSTS:
             return BANNER_CLEAR  # (the home screen's widgets; the app itself; a web page's content; the keyboard)
         trace.note("banner_other", where)  # (review RG H2) another process over the app: it can't be told
+        if x <= 1 and y <= 1 and w >= pw - 1 and h >= ph - 1:
+            self.sheet_over = hit.bundle  # (round N, N-F5: its whole screen: a sheet over the app; said so)
         return BANNER_UNSURE
 
     async def front_state(self) -> "Front | None":
@@ -2510,7 +2638,8 @@ class Session:
                     elif said == BANNER_SLOW:
                         raise Refused("not_actionable", COVERED_SLOW)  # (round I: an element too, review RH M2)
                     elif said == BANNER_UNSURE and not rules.element:
-                        raise Refused("not_actionable", COVERED_UNSURE)
+                        sheet = getattr(self, "sheet_over", None)
+                        raise Refused("not_actionable", COVERED_SHEET.format(bundle=sheet) if sheet else COVERED_UNSURE)
                     self.found_front = now  # (review RP2 M2: what the agent saw over the app has gone)
                     return
                 break
@@ -2818,7 +2947,7 @@ class Session:
             if isinstance(e, Unanswered):
                 self._hit_quiet_until = time.monotonic() + HIT_QUIET  # (review RH L3: the runner may still be on it)
             elif (isinstance(e, DeviceError) and HIT_NOTHING in str(e).lower()
-                  and time.monotonic() - began >= HIT_NOTHING_SLOW):
+                  and slow_nothing(phone_time(str(e).lower(), self.tw_version), time.monotonic() - began)):
                 # (review RK H2) the process at the point didn't answer: the runner is held until it does, and the front
                 # route after this must wait for it (no witness here: the absolute time; a hold set by mistake costs one
                 # question at the clock)

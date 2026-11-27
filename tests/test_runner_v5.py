@@ -337,9 +337,10 @@ def test_no_answer_force_or_a_point_tap_as_before():
 
 def test_the_runner_pinned_is_tw_16_15_3_7():
     repo, tag, sha, folder = store.WDA_SOURCES["fork"]
-    assert (repo, tag, folder) == ("bo5amis/WebDriverAgent", "tw-16.15.3.15", "fork-tw-16.15.3.15")
-    assert sha == "bcbc21c4b87b931bcc1de1641527f2a57b0b377e1fcdac4a82d0e969eb1e1665"
-    assert store.WDA_VERSION == "fork-tw-16.15.3.15"
+    assert (repo, tag, folder) == ("bo5amis/WebDriverAgent", "tw-16.15.3.16", "fork-tw-16.15.3.16")
+    # (2.0.3 round N) LEAD: once CI has built tw-16.15.3.16, pin the release's checksum here as the hex itself
+    assert sha == store.WDA_16_SHA256
+    assert store.WDA_VERSION == "fork-tw-16.15.3.16"
 
 
 # ---- a cover the tree only guesses: the runner's hit test decides ----

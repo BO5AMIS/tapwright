@@ -708,6 +708,17 @@ class Device:
                 await control.kill(pid)
         return len(pids)
 
+    @_traced
+    async def launch_app(self, bundle_id: str, arguments: list[str] | None = None) -> int:
+        """(2.0.3 round N) Start the app, or bring it forward when it runs, through iOS's process control: what
+        open_app uses while the runner is held by an app that isn't answering (WebDriverAgent's launch waits on
+        accessibility). Its pid."""
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
+        async with DvtProvider(self.rsd) as dvt, ProcessControl(dvt) as control:
+            await check_before_send()
+            return await control.launch(bundle_id, arguments=arguments or None, kill_existing=False)
+
     # ---- diagnostics (AGENT-TOOLS §15) ----
     @_traced
     async def processes(self) -> list["Proc"]:

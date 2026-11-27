@@ -47,10 +47,17 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # landscape Vision, told the screenshot's orientation, read the text upside down on iOS 26.5).
 # tw-16.15.3.15 (tw version 15, 2.0.0): a widget's renderer process is never the app in front (SpringBoard is).
 # tw-16.15.3.14 (tw version 14): a turned screen is read both ways up and the better reading kept; the answer says `turn`.
+# tw-16.15.3.16 (tw version 16, 2.0.3): the hit test's point lookup (and the front route's, when several apps are active)
+# runs inside XCTest's accessibility timeout (0.3 s) instead of a request with none, which an app that doesn't answer
+# held for minutes; its "no element answered" says the phone's own time and the way it asked ("(hit 304 ms, client)"),
+# `how=daemon` asks the old way.
+# LEAD: the SHA-256 below is a placeholder until CI has built the tw-16.15.3.16 release: put the release's
+# WebDriverAgentRunner-Runner.zip checksum in its place (a download is refused until then: it can't match).
+WDA_16_SHA256 = "LEAD-FILLS-IN-the-SHA-256-of-tw-16.15.3.16-WebDriverAgentRunner-Runner.zip"
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
-    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.15", "bcbc21c4b87b931bcc1de1641527f2a57b0b377e1fcdac4a82d0e969eb1e1665", "fork-tw-16.15.3.15"),
+    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.16", WDA_16_SHA256, "fork-tw-16.15.3.16"),
 }
 WDA_DEFAULT = "fork"
 WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]

@@ -330,8 +330,12 @@ def test_channel_free_gives_up_at_the_holds_end(scaled):
         s = _phone_session(free_at=time.monotonic() + 60.0)
         s._held_until = time.monotonic() + session_module.HIT_HELD
         began = time.monotonic()
-        await s.channel_free()
-        assert not s._held() and session_module.HIT_HELD - 0.1 <= time.monotonic() - began < session_module.HIT_HELD + 0.3
+        # (round N, N-F2) given up at the hold's end: nothing more goes into the runner, the app isn't answering
+        with pytest.raises(session_module.RunnerHeld):
+            await s.channel_free()
+        assert session_module.HIT_HELD - 0.1 <= time.monotonic() - began < session_module.HIT_HELD + 0.3
+        assert s._held() and s.runner_held is not None
+        assert {p for _, p in s.device.asked} == {session_module.HIT_PATH}
     run(go)
 
 

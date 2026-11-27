@@ -61,6 +61,9 @@ CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
 CLOSE_KILL_CAP = 5.0  # the longest close_app waits for iOS's process control to end the app
 HOME_STUCK_CAP = 10.0  # press_button home while the app in front is frozen: WebDriverAgent's home screen route
+# (2.0.3 round N) a given-up hold (session.RunnerHeld): after close_app, open_app or the home button, the clock is asked
+# about every HIT_FREE_EVERY for this long at most; iOS's launch of an app is waited for this long at most
+HELD_AFTER_WAIT, HELD_LAUNCH_CAP = 2.0, 10.0
 HOME_LOCK_CAP = 2.0  # ... and the lock question asked before it
 CLOSE_TERMINATE_CAP = 3.0  # ... and for WebDriverAgent's terminate afterwards, which has nothing left to wait for
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
@@ -1706,7 +1709,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 "fps": self.hub.fps(), "driver": self.control.driver, "paused": self.control.paused,
                 "in_use": self.phone_in_use(),  # (the schedules' busy test, §22.3; `driver` is the queue's own)
                 "size": {"w": w, "h": h}, "quality": self.preset,
-                "accepts": [*ACCEPTS, "video"] if self.video is not None and self.video.live else ACCEPTS}
+                "accepts": [*ACCEPTS, "video"] if self.video is not None and self.video.live else ACCEPTS,
+                **self._runner_status()}
+
+    def _runner_status(self) -> dict:
+        """(2.0.3 round N) The phone's runner's route version once it answered, and what an older one than 16 costs."""
+        version = getattr(self.session, "tw_version", 0)
+        if not isinstance(version, int) or isinstance(version, bool) or version <= 0:
+            return {}
+        note = session_module.runner_note(version)
+        return {"runner": version, **({"runner_note": note} if note else {})}
 
     def subscribe(self) -> asyncio.Queue:
         self._asked_for()
@@ -1996,10 +2008,26 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # would stop the runner and the add with it. The add reports a real drop itself when it ends.
             self.log(f"no answer while a media add holds the runner ({self._photo_wait_kind}): {reason}")
             return
+        if isinstance(reason, session_module.RunnerHeld):
+            # (2.0.3 round N, N-F2) the app in front holds XCTest's accessibility past HIT_HELD while the runner answers:
+            # no reconnect, no new session, no request into it; agents are answered not_answering until the clock
+            # answers again (_held_call), or they get out with close_app, open_app or the home button
+            if not isinstance(self.stuck, session_module.RunnerHeld):
+                self.log(f"runner held: {reason}")
+            self.stuck = reason
+            self._set_state("not-answering", self._redact(str(reason))[:200])
+            for view in self.control.clients.values():
+                view.dropped = True  # (the screen may have changed under every agent's list meanwhile)
+            self._thin_place = None
+            return
+        held = isinstance(self.stuck, session_module.RunnerHeld)
+        if held:  # (round N) a real drop while a hold was given up: reconnect, as for any drop
+            self.stuck = None
+            self.session.runner_held = None
         stuck = reason if isinstance(reason, AppNotAnswering) else None
         if stuck is not None:
             self.stuck = stuck
-        if self.state in ("live", "locked"):
+        if self.state in ("live", "locked") or held:
             self.log(f"connection lost: {reason}")
             self._set_state("not-answering" if stuck is not None else "reconnecting", self._redact(str(reason))[:200])
         for view in self.control.clients.values():
@@ -2347,7 +2375,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     async def _supervise(self, stop: asyncio.Event) -> None:
         attempt = failures = 0
         while not stop.is_set():
-            if self.state not in ("live", "locked"):
+            # (round N) a given-up hold keeps the line: nothing to reconnect (the heartbeat's check is refused meanwhile)
+            if self.state not in ("live", "locked") and not isinstance(self.stuck, session_module.RunnerHeld):
                 self._connecting = True
                 try:
                     try:
@@ -4259,6 +4288,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         shown_before = not self.unsettled and self.control.client(client_id).unlooked == 0
         pid_before = self._log_pids.get(before) if before else None
         try:
+            if isinstance(self.stuck, session_module.RunnerHeld):
+                await self._held_ask(name, args)  # (round N: the clock first, before anything waits for the line)
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
@@ -4561,6 +4592,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view = self.control.client(client_id)
         # an agent that hasn't looked yet has no "last look": its first list is whole anyway
         notes = [NOTE_PERSON] if 0 <= view.seen < self.control.person_generation else []
+        if isinstance(self.stuck, session_module.RunnerHeld):
+            return await self._held_call(view, name, args, notes)
         if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
             return await self._close_stuck(self.stuck, args["app"], notes)
         if name == "press_button" and args.get("name") == "home" and isinstance(self.stuck, AppNotAnswering):
@@ -4865,7 +4898,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self.lost(e)
             if isinstance(e, AppNotAnswering):  # the action went out, then the app stopped answering
                 self._announce("agent", name, ok=False, code="not_answering")
-                raise self._not_connected() from None
+                refusal = self._not_connected()
+                if isinstance(e, session_module.RunnerHeld) and box.get("input"):
+                    # (round N) a touch of this call was delivered: said first, as a delivered touch whose read fails
+                    point = self.session.last_point
+                    where = f" at ({round(point[0])}, {round(point[1])})" if point else ""
+                    refusal = Refused(refusal.code, f"The {touch_name(name)} was delivered{where}; then: {refusal}")
+                raise refusal from None
             self._announce("agent", name, ok=False, code="reconnecting")
             raise Refused("reconnecting", "the connection dropped during the action; look to check what "
                                           "happened") from None
@@ -5099,6 +5138,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         nothing of the screen and leaves the check for the next call; open_app makes it moot."""
         if name == "apps" or (pending := self._recheck.pop(client_id, None)) is None or name == "open_app":
             return
+        if isinstance(self.stuck, session_module.RunnerHeld):
+            return  # (round N: only a way out gets here then; nothing of the screen can be read)
         before, when, persons = pending
         if time.monotonic() - when > RECHECK_WITHIN or self.control.person_generation != persons:
             return
@@ -6248,6 +6289,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise
         except DeviceError as e:
             raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
+        return self._after_open(view, a, bundle_id, shown, before, resume, back)
+
+    def _after_open(self, view, a: dict, bundle_id: str, shown: str, before, resume: bool, back: bool) -> str:
+        """What an app's launch leaves (open_app; round N: open_app while a hold was given up, _open_held): its launch
+        conditions, the agent's aim, the app's language, the crash watch; the answer's line."""
         conditions = launchlib.check(a)
         if conditions:
             self._launched_with[bundle_id] = conditions
@@ -6374,6 +6420,167 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         1.10.1's `_blind_tool` (`git show wip/1.10.1-speed:tapwright/daemon.py`) has the wording and the failure codes
         (a touch that went out and got no answer is `timeout`, never `internal`)."""
         return None
+
+    async def _held_ask(self, name: str, args: dict) -> None:
+        """(2.0.3 round N, N-F2) A call while a given-up hold stands (`self.stuck` a session.RunnerHeld, state
+        `not-answering`, the line kept), before anything of it waits for the line: the clock is asked once
+        (Session.held_answers, HELD_ASK_WAIT at most). A real answer ends the state and the call goes on as usual. Else
+        close_app, open_app and the home button go on, by the device channel (_held_call: how an agent gets out);
+        anything else is answered `not_answering` at once, nothing else asked."""
+        try:
+            answered = await self.control.read(self.session.held_answers)
+        except ConnectionLost as e:
+            self.lost(e)
+            raise self._not_connected() from None
+        if answered:
+            self._end_held("the clock answered")
+            return
+        if not isinstance(self.stuck, session_module.RunnerHeld):
+            return  # (the line dropped meanwhile: the call goes the usual way, and waits for it)
+        if name in ("close_app", "open_app") or (name == "press_button" and args.get("name") == "home"):
+            return
+        raise self._not_connected()
+
+    async def _held_call(self, view, name: str, args: dict, notes: list) -> dict:
+        """(round N) close_app, open_app and the home button while a given-up hold stands (_held_ask let them on): by
+        the device channel. Anything else (a call that came by another way): `not_answering`, nothing asked."""
+        stuck = self.stuck
+        if name == "close_app":
+            return await self._close_held(view, stuck, args["app"], notes)
+        if name == "open_app":
+            return await self._open_held(view, stuck, args, notes)
+        if name == "press_button" and args.get("name") == "home":
+            answer = await self._home_stuck(stuck, notes)
+            await self._held_freed("after the home button")
+            return answer
+        raise self._not_connected()
+
+    def _end_held(self, why: str) -> None:
+        """(round N) The clock answered: the given-up hold is over, the line live again (the heartbeat says locked)."""
+        if isinstance(self.stuck, session_module.RunnerHeld):
+            self.stuck = None
+            self.log(f"the runner answers again ({why})")
+            self._set_state("live")
+
+    async def _held_freed(self, why: str) -> bool:
+        """(round N) After a way out (close_app, open_app, the home button): the clock asked right away and about every
+        HIT_FREE_EVERY for HELD_AFTER_WAIT at most; True when it answered (the state ended)."""
+        until = time.monotonic() + HELD_AFTER_WAIT
+        while isinstance(self.stuck, session_module.RunnerHeld):
+            try:
+                answered = await self.control.read(self.session.held_answers)
+            except ConnectionLost as e:
+                self.lost(e)
+                return False
+            if answered:
+                self._end_held(why)
+                return True
+            left = until - time.monotonic()
+            if left <= 0:
+                return False
+            await asyncio.sleep(min(session_module.HIT_FREE_EVERY, left))
+        return False
+
+    def _held_guard(self, device) -> "Callable[[], Awaitable[None]]":
+        """(round N) What a way out checks right before it sends: the pause, a person's input, the same line, the
+        state still standing."""
+        generation = self.control.person_generation
+
+        async def guard():
+            if self.control.paused:
+                raise Refused("paused", "the phone is paused; ask the user to resume it")
+            if self.control.person_generation != generation or self.control.person_active():
+                raise Refused("busy", "a person used the phone before delivery; look again before acting")
+            if not isinstance(self.stuck, session_module.RunnerHeld) or self.session.device is not device:
+                raise Refused("reconnecting", "the phone connection changed; look before acting")
+        return guard
+
+    def _held_note(self, stuck: AppNotAnswering) -> str:
+        return (f"the phone's runner hasn't answered since {stuck.name} held it, so nothing on the phone can be read "
+                f"yet; look in a moment (close_app {stuck.name} if it stays).")
+
+    async def _close_held(self, view, stuck: AppNotAnswering, query: str, notes: list) -> dict:
+        """(round N) close_app while a given-up hold stands: the app ended through iOS's process control (the runner's
+        own terminate would wait on accessibility), the line kept; the state ends when the clock answers (_held_freed;
+        else at the next call's question). The runner is told of the close once it answers."""
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        bundle_id, shown = await self._app(query, partial=False)
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        guard = self._held_guard(device)
+
+        async def close() -> int:
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                await guard()
+                return await asyncio.wait_for(device.kill_app(bundle_id), CLOSE_KILL_CAP)
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+
+        try:
+            found = await self.control.agent(close)
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - iOS's process control refused or was slow
+            raise Refused("not_answering", f"{stuck}, and iOS didn't close {shown} ({e or 'no answer in time'}). "
+                                           "Try close_app again, or press_button home.") from None
+        if bundle_id == stuck.bundle_id:
+            self.session._hit_quiet_until = 0.0  # (the app that kept a question is gone: the clock may be asked)
+        self._launched_with.pop(bundle_id, None)
+        self._closed_on_purpose = (bundle_id, view)
+        self.log(f"closed {bundle_id} through iOS process control while the runner was held ({found} processes)")
+        self._announce("agent", "close_app", label=_bare_name(shown, bundle_id))
+        freed = await self._held_freed(f"after close_app {bundle_id}")
+        if freed and found:
+            self._tell_runner_closed(bundle_id)
+        line = f"Closed {shown}." if found else f"{shown} wasn't running."
+        return _answer([line], notes if freed else [*notes, self._held_note(stuck)])
+
+    async def _open_held(self, view, stuck: AppNotAnswering, a: dict, notes: list) -> dict:
+        """(round N) open_app while a given-up hold stands: launched through iOS's process control (WebDriverAgent's
+        launch waits on accessibility). The app that holds the runner, an app with launch conditions, or one that runs
+        with conditions of an earlier launch, is ended first and started again (it can't be brought forward
+        answering); another is brought forward or started. Then the clock, as after close_app."""
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        bundle_id, shown = await self._app(a["app"])
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        extra = launchlib.arguments(a)
+        before = self._launched_with.get(bundle_id)
+        back = bool(before) and not extra
+        again = bundle_id == stuck.bundle_id or bool(extra) or back
+        guard = self._held_guard(device)
+
+        async def launch() -> None:
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                await guard()
+                if again:
+                    await asyncio.wait_for(device.kill_app(bundle_id), CLOSE_KILL_CAP)
+                    await guard()
+                await asyncio.wait_for(device.launch_app(bundle_id, extra or None), HELD_LAUNCH_CAP)
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+
+        try:
+            await self.control.agent(launch)
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - iOS's process control refused or was slow
+            raise Refused("not_answering", f"{stuck}, and iOS didn't open {shown} ({e or 'no answer in time'}). "
+                                           "close_app can still close it; then open_app it again.") from None
+        if bundle_id == stuck.bundle_id:
+            self.session._hit_quiet_until = 0.0
+        said = self._after_open(view, a, bundle_id, shown, before, False, back)
+        view.moved = True  # (nothing was read after it)
+        self.log(f"opened {bundle_id} through iOS process control while the runner was held")
+        self._announce("agent", "open_app", label=_bare_name(shown, bundle_id))
+        freed = await self._held_freed(f"after open_app {bundle_id}")
+        return _answer([said], [*notes, "look to see it."] if freed else [*notes, self._held_note(stuck)])
 
     async def _close_stuck(self, stuck: AppNotAnswering, query: str, notes: list) -> dict:
         """close_app while the app in front is frozen: end its processes through iOS (WebDriverAgent's own
@@ -6877,8 +7084,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         width, height = self.session.screen
         top = STATUS_BAR if height > width else 0.0  # (the clock and the battery are the phone's, as in a look's o refs)
+        self.session.sheet_over = None
         if await self._banner_shown():
             top = max(top, session_module.BANNER_ZONE)  # (the banner's own words are no part of the app's screen)
+        sheet = getattr(self.session, "sheet_over", None)  # (round N, N-F5: the hit test found another app's sheet)
         lines = [(s, " ".join(s.text.casefold().split())) for s in seen if s.rect[1] >= top]
         if whole:
             known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
@@ -6912,7 +7121,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 f"the touch {'would go' if args.get('dry_run') else 'went'} to its centre.")
         lines_out = answer["text"].split("\n")
         at = next((i for i, line in enumerate(lines_out) if line.startswith("Hint: ")), len(lines_out))
-        return {**answer, "text": "\n".join([*lines_out[:at], note, *lines_out[at:]])}
+        sheet_note = [session_module.SHEET_NOTE.format(bundle=sheet)] if sheet else []
+        return {**answer, "text": "\n".join([*lines_out[:at], note, *sheet_note, *lines_out[at:]])}
 
     def _tier_now(self) -> str:
         """How much of the tree the newest read got (Session.last_tier, runner route version 9): "full", "shallow" or
@@ -10347,7 +10557,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 raise
             view.moved = True  # no list came back: the screen has probably changed
             view.place = None
-            return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
+            return _answer(lines, [*notes, f"couldn't look afterwards: {str(e).rstrip('.')}."])
         text, mapped = self._mapped_look(view, text)
         if (over := self._over_line(view)) is not None:
             text = f"{over}\n{text}"
@@ -10396,7 +10606,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             snap, up = await self._read(read)
         except Exception as e:
             view.moved = True  # no list came back: the screen has probably changed
-            return _answer([result, *tail], [*notes, f"couldn't look afterwards: {e}."])
+            return _answer([result, *tail], [*notes, f"couldn't look afterwards: {str(e).rstrip('.')}."])
         cut = _cut_short(snap.tree)
         over = [o] if (o := self._over_line(view)) is not None else []  # (2.0.3: SpringBoard over the app, said first)
         covered = not snap.tree.items and bool(view.shown) and not cut  # the agent saw elements; now there are none
