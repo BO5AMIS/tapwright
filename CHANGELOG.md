@@ -4,15 +4,21 @@
 
 - Runner 16 (`tw-16.15.3.16`). The hit test's point lookup ran outside any accessibility timeout: an app that didn't
   answer it kept it for as long as the app liked (more than 80 s on a video feed, measured), and every accessibility
-  question after it waited behind it. Now the lookup runs inside XCTest's accessibility timeout (0.3 s), as the
-  runner's snapshots and tree reads do, and so does the front route's own lookup when several apps are active. Its
-  "no element answered" says the phone's own time and the way it asked (`(hit 304 ms, client)`), and the daemon judges
-  slow and fast by that time: 0.25 s or more is an app that didn't answer, less is nothing there right now (a banner
-  coming or going), however slow the link. On a busy app a touch near the top is clear on both paths (the computer's
-  hands and the phone's runner) with no confirm question, the clock's own promptness no longer asked: one question
-  fewer, about 0.3 s sooner. The hold is still marked and waited for before the next read. A runner older than 16
-  keeps the rules below; `tapwright doctor` and the service's status say when the phone's runner is older than 16,
-  what that costs and how to update it (`tapwright doctor --fix`).
+  question after it waited behind it. What runner 16 does: the point lookup is the accessibility client's own, given
+  0.3 s by XCTest's accessibility timeout (as the runner's snapshots and tree reads are given theirs), and so are the
+  front route's own lookup when several apps are active and the tap's check of the app in front (personal mode's
+  `apps`), which asked the same unbounded question. A lookup that raises is asked the old way and says so. Its "no
+  element answered" says the lookup's own time, the whole question's time and the way it asked (`(hit 304 ms, all
+  318 ms, client)`); when the accessibility timeout can't be put back after the lookup, the hit test refuses, and the
+  touch is refused as when it can't say. The daemon judges slow and fast by the lookup's own time: 0.25 s or more is
+  an app that didn't answer, less is nothing there right now (a banner coming or going), however slow the link. On a
+  busy app a touch near the top by the computer's hands is clear after the clock and the point, with no confirm
+  question and no promptness asked of the clock: one question fewer, about 0.3 s sooner. A touch through the phone's
+  runner goes only when the clock, asked once more, answers (the runner is free); else it is refused slow, as before.
+  The hold is still marked and waited for before the next read. A runner older than 16 keeps the rules below;
+  `tapwright doctor` and the service's status say when the phone's runner is older than 16, what that costs and how to
+  update it (`tapwright doctor --fix`).
+  Measured on a phone: (the lead fills this in).
 - A runner held by an app no longer costs the connection. On a video feed opened a second time, the runner stayed held
   after a touch for more than 80 s; the wait for it gave up after 12 s, its next question went into the held runner,
   was taken for a lost connection, and a reconnect and a new session followed: the tool call took 82 s. Now, when the
@@ -21,9 +27,11 @@
   close_app can still close it; then open_app it again.", the app named by iOS's process list), and a touch that went
   out says so first ("Tapped (x, y). ... couldn't look afterwards: ..."). Every later call first asks the status bar's
   clock once (under 0.5 s): when it answers, the call goes on as usual; when it doesn't, the call answers
-  `not_answering` at once. `close_app` and `open_app` (another app, or the same one, which is started again) go through
-  iOS's process control, and `press_button home` as before, and the clock is asked right after them. The service's
-  status says `not-answering` meanwhile.
+  `not_answering` at once. `close_app` and `open_app` (another app, or the same one, which is started again, and its
+  answer says so) go through iOS's process control, and `press_button home` as before, and the clock is asked right
+  after them. The service's status says `not-answering` meanwhile, and the service asks the clock once every few seconds
+  by itself, so the state ends when the app answers again with no call (a person who closed the app on the phone can
+  use the live view again).
 - A system sheet over the app is named. A rating prompt's sheet (another process's whole screen over a system app) was
   refused at the top with "can't tell whether a notification is over the top of the screen": the runner had answered.
   Now: `covered: another app's sheet (<bundle id>) is over the screen; look again.`, and a touch by the picture's text
@@ -34,12 +42,13 @@
   picture's text once more right before it goes (the runner's text reading, 0.15-0.55 s, or this computer's when the
   look used it), and goes at the text's centre as read now only when the same text is within 12 pt of where the look
   read it. Gone, moved further, or the picture not readable now: `stale` (`o1 "..." is no longer where your last look
-  read it (it is at (x, y) now); nothing was touched. Look again.`): it is never touched where it moved to. `force`
-  skips the check; `dry_run` runs it. The check's read is no look: the `o` refs stay.
+  read it (it is at (x, y) now); nothing was touched. Look again.`): it is never touched where it moved to. When more
+  than 1 s passes between that read and the touch (another call's read held the phone, a notification was waited out),
+  the text is read once more right before the touch, which goes only when the text is still within 12 pt of it.
+  `force` skips the check; `dry_run` runs it. The check's read is no look: the `o` refs stay.
 - A look's picture was refused "the phone is being unlocked" half an hour after the only unlock, twice, both right after
   a long read: the read's frame had dropped out of the stream's short history, and any unlock still remembered (an
   hour) made such a frame private. Now its own time stamp says when it came.
-
 - A touch can no longer land in an app the agent hasn't seen. On a person's phone, an agent aimed two taps at points
   of a screen whose elements weren't read. A notification banner was over the top of the screen: the first tap opened
   the banner's app on a conversation, and the second landed on that conversation's call button and started a call.
