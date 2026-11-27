@@ -192,24 +192,31 @@
   phone's runner waiting for it, 2.5 to 9.8 s, during which every hit question and the front route get nothing. Now,
   over an app held upright, the clock (66, 22) is asked first: a banner there (a timer's, a call's, or SpringBoard's
   whole screen while one comes or goes) holds every touch in the zone; "no element answered" there, slow (the runner
-  held); SpringBoard's status bar there, then the touch's point, once: a real answer decides as before; "no element
-  answered" there that took at least 0.25 s longer than the clock's own answer (the link's time is in both) is the
-  app not answering, and the clock is then asked once more: when it says nothing too, as slowly, the runner is held,
-  the app didn't answer where SpringBoard would have, and a touch by the computer's hands goes; when it answers, the
-  point's "nothing" was SpringBoard's (a banner in motion): the touch waits a poll. A touch that would go through the
-  phone's runner (no hands) is refused slow there instead: the runner is held, and its touch would land seconds late.
-  A fast "no element answered" anywhere is a banner in motion: the touch waits a poll. SpringBoard's whole screen at
-  the point over an app is a banner. Within one check no point is asked twice. After a question the app didn't answer
-  (the banner check's, or the one that proves a touch on a view another process draws), the runner is known to be
-  held: hit questions stop, the front route and tree reads wait (asking the clock every 0.7 s, 12 s at most) instead
-  of stalling into a lost connection, and a touch by the hands waits for it with the hands let go; so the answer after
-  a touch on a hung app can take up to about 10 s. A banner wait stays within its 8 s for the touch (and one
-  question's time), asking the clock once a poll while the runner is held. The read's banner note asks nothing after
+  held); SpringBoard's status bar there, then the touch's point, once: a real answer decides as before. A "no element
+  answered" there is the app not answering only when the clock answered promptly (under 0.15 s: a link slow already
+  can't vouch for anything; a late clock and a "nothing" at the point is slow) and the "nothing" took at least 0.2 s
+  longer than the clock (the link's time is in both); the clock is then asked once more: when it says nothing too, as
+  slowly, the runner is held, the app didn't answer where SpringBoard would have, and a touch by the computer's hands
+  goes; when it answers, the point's "nothing" was SpringBoard's (a banner in motion): the touch waits a poll. A touch
+  that would go through the phone's runner (no hands) is refused slow there instead: the runner is held, and its touch
+  would land seconds late. A fast "no element answered" anywhere but the screen's top edge is a banner in motion: the
+  touch waits a poll. SpringBoard's whole screen at the point over an app is a banner. In one check the app's point is
+  asked once and the clock at most twice. Any "no element answered" that took 0.25 s or more marks the runner held,
+  whatever the verdict (a hold missed costs the connection, one set by mistake one question). Known limit: while a
+  banner comes or goes the clock too says a fast "nothing", so two answers delayed 0.2 s on the link after a prompt
+  one, in that half second, could read as clear; it needs a fast "nothing" at a point below the status bar, not seen
+  on the phone; the runner timing its own lookup (2.0.4) closes it. After a question the app didn't answer (the
+  banner check's, or the one that proves a touch on a view another process draws), the runner is known to be held:
+  hit questions stop, the front route and tree reads wait (asking the clock every 0.7 s, 12 s at most) instead of
+  stalling into a lost connection, so the answer after a touch on a hung app can take up to about 10 s; a touch by
+  the hands waits for it with the hands let go, within its own 8 s, then is refused with the slow words. A banner wait
+  stays within its 8 s for the touch (and one poll), asking the clock once a poll while the runner is held. The read's banner note asks nothing after
   a read that was cut short (its question to a busy app held the runner: a tap by text took 8.5 s). Landscape, the
   home screen and a point inside the status bar ask the touch's point once. A home-button phone has no status bar at
   the clock: the app answers there (or, busy, says nothing and the touch is refused slow), and the point is asked once.
-  The window between the check and the touch is wider on a busy app (the point's 0.3 s and a round trip): made small,
-  not closed.
+  The window between the check and the touch is wider on a busy app: about 0.65 s between the point's answer and the
+  touch (the point's 0.3 s wait and the confirm's), up to about 1.65 s after a banner wait (the wait's clear is taken
+  for 1 s): made small, not closed.
 - A tap that worked is no longer answered "No visible change." because the app was slow to show it. In a read-only
   sweep of a React Native app, two taps on buttons were answered "No visible change." after 0.38 s, and the look right
   after showed the next screen: the app had started its navigation a few hundred ms later. Since 2.0 a tap takes about
