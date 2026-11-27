@@ -163,7 +163,8 @@
   element answered" at every point for about 3.5 s, and a pile of questions held the runner until it was restarted.
   So "no element answered" is an answer only at the screen's top edge (the portrait panel's, in landscape too); below
   it the question is asked once (no longer three times: see the banner check's entry below), and "no element answered"
-  with nothing to tell the app from SpringBoard, or no answer within about 1.2 s, refuses a touch that starts in the top 200 pt, a point or an element alike, with its own words
+  with nothing to tell the app from SpringBoard, or no answer within about 1.2 s, refuses a touch that starts in the
+  top 200 pt, a point or an element alike, with its own words
   ("can't be told right now, because the app in front is slow to answer ...; try again in a moment, or aim lower"):
   the phone showed the hit test silent at a banner's own points over such an app. Such a silence never counts as a
   dropped line (no reconnect); never more than one hit question is out, the hit test that proves a touch's element
@@ -192,13 +193,23 @@
   over an app held upright, the clock (66, 22) is asked first: a banner there (a timer's, a call's, or SpringBoard's
   whole screen while one comes or goes) holds every touch in the zone; "no element answered" there, slow (the runner
   held); SpringBoard's status bar there, then the touch's point, once: a real answer decides as before; "no element
-  answered" after the runner's 0.3 s means the app didn't answer where SpringBoard would have, and the touch goes; a
-  fast one is SpringBoard's own (a banner in motion): the touch waits a poll. SpringBoard's whole screen at the point
-  over an app is a banner. No hit question is ever asked twice. After a question the app didn't answer, the runner is
-  known to be held: hit questions stop, and the front route and tree reads wait (asking the clock every 0.7 s, 12 s at
-  most) instead of stalling into a lost connection, so the answer after a touch on a hung app can take up to about
-  10 s. The read's banner note asks nothing after a read that was cut short (its question to a busy app held the
-  runner: a tap by text took 8.5 s). Landscape, the home screen and a home-button phone ask the touch's point once.
+  answered" there that took at least 0.25 s longer than the clock's own answer (the link's time is in both) is the
+  app not answering, and the clock is then asked once more: when it says nothing too, as slowly, the runner is held,
+  the app didn't answer where SpringBoard would have, and a touch by the computer's hands goes; when it answers, the
+  point's "nothing" was SpringBoard's (a banner in motion): the touch waits a poll. A touch that would go through the
+  phone's runner (no hands) is refused slow there instead: the runner is held, and its touch would land seconds late.
+  A fast "no element answered" anywhere is a banner in motion: the touch waits a poll. SpringBoard's whole screen at
+  the point over an app is a banner. Within one check no point is asked twice. After a question the app didn't answer
+  (the banner check's, or the one that proves a touch on a view another process draws), the runner is known to be
+  held: hit questions stop, the front route and tree reads wait (asking the clock every 0.7 s, 12 s at most) instead
+  of stalling into a lost connection, and a touch by the hands waits for it with the hands let go; so the answer after
+  a touch on a hung app can take up to about 10 s. A banner wait stays within its 8 s for the touch (and one
+  question's time), asking the clock once a poll while the runner is held. The read's banner note asks nothing after
+  a read that was cut short (its question to a busy app held the runner: a tap by text took 8.5 s). Landscape, the
+  home screen and a point inside the status bar ask the touch's point once. A home-button phone has no status bar at
+  the clock: the app answers there (or, busy, says nothing and the touch is refused slow), and the point is asked once.
+  The window between the check and the touch is wider on a busy app (the point's 0.3 s and a round trip): made small,
+  not closed.
 - A tap that worked is no longer answered "No visible change." because the app was slow to show it. In a read-only
   sweep of a React Native app, two taps on buttons were answered "No visible change." after 0.38 s, and the look right
   after showed the next screen: the app had started its navigation a few hundred ms later. Since 2.0 a tap takes about
