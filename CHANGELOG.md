@@ -210,8 +210,9 @@
   hit questions stop, the front route and tree reads wait (asking the clock every 0.7 s, 12 s at most) instead of
   stalling into a lost connection, so the answer after a touch on a hung app can take up to about 10 s; a touch by
   the hands waits for it with the hands let go, within its own 8 s, then is refused with the slow words. A banner wait
-  stays within its 8 s for the touch (and one poll), asking the clock once a poll while the runner is held. The read's banner note asks nothing after
-  a read that was cut short (its question to a busy app held the runner: a tap by text took 8.5 s). Landscape, the
+  stays within its 8 s for the touch (and one poll), asking the clock once a poll while the runner is held. The read's
+  banner note asks nothing after a read that was cut short (its question to a busy app held the runner: a tap by text
+  took 8.5 s). Landscape, the
   home screen and a point inside the status bar ask the touch's point once. A home-button phone has no status bar at
   the clock: the app answers there (or, busy, says nothing and the touch is refused slow), and the point is asked once.
   The window between the check and the touch is wider on a busy app: about 0.65 s between the point's answer and the
