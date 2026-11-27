@@ -65,6 +65,7 @@ class PointSession(DescribingSession):
     _hold = _real("_hold")
     channel_free = _real("channel_free")
     _free_step = _real("_free_step")
+    _held_wait = _real("_held_wait")
     _covered_at_bound = _real("_covered_at_bound")
 
     def __init__(self, app=SHOP) -> None:
@@ -121,7 +122,7 @@ class PointSession(DescribingSession):
                     except session_module._BannerUp:
                         await self._wait_banner()
                     except session_module._HeldUp:
-                        await self.channel_free()
+                        await self._held_wait()
             else:
                 await self._gate()  # (as the runner's touch request runs it)
         self._record(kind)

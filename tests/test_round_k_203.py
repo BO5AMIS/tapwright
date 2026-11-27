@@ -306,6 +306,9 @@ def scaled(monkeypatch):
     monkeypatch.setattr(session_module, "HIT_FREE_EVERY", 0.07)
     monkeypatch.setattr(session_module, "HIT_FREE_WAIT", 0.1)
     monkeypatch.setattr(session_module, "HIT_NOTHING_SLOW", 0.025)
+    # (round M: the clear's lines, at a tenth too)
+    monkeypatch.setattr(session_module, "HIT_NOTHING_MARGIN", 0.02)
+    monkeypatch.setattr(session_module, "HIT_WITNESS_PROMPT", 0.015)
 
 
 def test_channel_free_asks_the_witness_every_poll_and_ends_the_hold_at_the_first_answer(scaled):

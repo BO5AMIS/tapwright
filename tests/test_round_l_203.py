@@ -22,7 +22,9 @@ from tapwright.session import SPRINGBOARD, Session
 # ---- RK-H1: the link's time is no "slow" ----
 
 class _LateDev:
-    """The phone answers at once; the link adds `latency` to every question (or to the point's alone)."""
+    """The phone answers at once; the link adds `latency` to every question (or to the point's alone). A banner is
+    coming in after the clock's first answer: SpringBoard's fast "nothing" at the point, and (round M, BRIEF-K F2) at
+    the clock too from then on, as the phone does, never the status bar again."""
     rsd = object()
 
     def __init__(self, latency: float, point_only: bool = False):
@@ -37,7 +39,7 @@ class _LateDev:
         if not (self.point_only and witness):
             await asyncio.sleep(self.latency)
         self.asked.append(q)
-        if witness:
+        if witness and len(self.asked) == 1:
             return {"value": {"t": "XCUIElementTypeStaticText", "r": CLOCK, "b": SPRINGBOARD, "identity": "verified"}}
         raise DeviceError(f"unsupported operation: {session_module.HIT_NOTHING}")  # (SpringBoard's own: fast)
 
@@ -54,23 +56,31 @@ def _late_session(latency: float, point_only: bool = False):
     return s
 
 
-@pytest.mark.parametrize("latency", [0.0, 0.2, 0.26, 0.4])
-@pytest.mark.parametrize("point_only", [False, True])
-def test_rk_h1_a_fast_nothing_late_on_the_link_is_never_clear(latency, point_only):
+# (round M) with the clock answering as the phone does while a banner moves (F2), and the hold set by any "nothing" of
+# HIT_NOTHING_SLOW or more (review RL H1): never clear; the verdict and the hold by the link's time
+@pytest.mark.parametrize("latency,point_only,want", [
+    # (a late link on the clock's first answer too: not prompt, so a "nothing" at the point is slow: the lead, round M)
+    (0.0, False, session_module.BANNER_OVER), (0.2, False, session_module.BANNER_SLOW),
+    (0.26, False, session_module.BANNER_SLOW), (0.4, False, session_module.BANNER_SLOW),
+    (0.0, True, session_module.BANNER_OVER), (0.22, True, session_module.BANNER_SLOW),
+    (0.26, True, session_module.BANNER_SLOW), (0.4, True, session_module.BANNER_SLOW),
+])
+def test_rk_h1_a_fast_nothing_late_on_the_link_is_never_clear(latency, point_only, want):
     async def go():
         s = _late_session(latency, point_only)
         said = await s.banner_at((215.0, 80.0), SHOP[1], hands=True)
-        assert said == session_module.BANNER_OVER, (latency, point_only, said, s.device.asked)
-        assert not s._held()
+        assert said == want, (latency, point_only, said, s.device.asked)
+        assert s._held() is (latency >= session_module.HIT_NOTHING_SLOW)
     run(go)
 
 
+# (round M, review RL H1: the point's "nothing" took the runner's 0.3 s, so the hold is set whatever the verdict)
 @pytest.mark.parametrize("confirm,want,held", [
     (nothing(), session_module.BANNER_CLEAR, True),  # the runner held: the app didn't answer the point
-    (status_bar(), session_module.BANNER_OVER, False),  # the runner isn't held: the point's "nothing" was SpringBoard's
-    (hit_of(SPRINGBOARD, PLATE), session_module.BANNER_OVER, False),
-    (nothing(fast=True), session_module.BANNER_SLOW, False),
-    (Unanswered("no answer"), session_module.BANNER_SLOW, False),
+    (status_bar(), session_module.BANNER_OVER, True),  # the runner isn't held: the point's "nothing" was SpringBoard's
+    (hit_of(SPRINGBOARD, PLATE), session_module.BANNER_OVER, True),
+    (nothing(fast=True), session_module.BANNER_SLOW, True),
+    (Unanswered("no answer"), session_module.BANNER_SLOW, True),
 ])
 def test_rk_h1_the_hold_confirmed_by_the_clock_asked_once_more(confirm, want, held):
     async def go():
@@ -203,7 +213,10 @@ def test_rk_m1_a_stale_wait_clear_under_the_hands_lock_is_refused_with_nothing_a
     run(go)
 
 
-def test_rk_m1_a_hands_touch_with_the_runner_held_waits_for_it_outside_the_hands_lock(scaled):
+def test_rk_m1_a_hands_touch_with_the_runner_held_waits_for_it_outside_the_hands_lock(scaled, monkeypatch):
+    # (round M, review RL L2: that wait is inside the touch's single BANNER_WAIT, which the fixture's 0.04 s would end)
+    monkeypatch.setattr(session_module, "BANNER_WAIT", 0.8)
+
     async def go():
         s = unread()
         s.by_hands = True

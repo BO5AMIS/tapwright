@@ -726,6 +726,12 @@ HIT_WITNESS = (66.0, 22.0)
 # didn't answer (304-342 ms measured); a faster one is SpringBoard saying "nothing here right now" (8-18 ms: a banner
 # coming or going)
 HIT_NOTHING_SLOW = 0.25
+# (round M, review RL H1) two questions, two lines. Is the runner held? Any "no element answered" that took at least
+# HIT_NOTHING_SLOW (absolute) sets the hold, whatever the verdict: a hold set by mistake costs one question at the clock,
+# a hold missed costs the connection. Is it clear? Only when the clock's first answer was prompt (under
+# HIT_WITNESS_PROMPT: a link already slow can't vouch for anything) and the point's and the confirm's "nothing" each
+# took at least HIT_NOTHING_MARGIN longer than it (the phone: the clock 26-60 ms, the busy point 304-342 ms)
+HIT_WITNESS_PROMPT, HIT_NOTHING_MARGIN = 0.15, 0.2
 # (round K) after a slow "no element answered" the runner is held until the app answers XCTest's pending request: every
 # hit question and the front route get nothing meanwhile (2.5 s on a shopping app, 9.8 s on a hung feed, measured after
 # one question). Requests through accessibility wait for it (Session.channel_free), asking the clock every
@@ -2087,10 +2093,11 @@ class Session:
         element at the clock (a home-button phone) gets no witness. The home screen, landscape, a turn not known, a
         point in the status bar: no witness, the point once. Trace notes: the point, the frame, the process, never a
         label.
-        (Round L, review RK) A "no element answered" is slow only when it took HIT_NOTHING_SLOW longer than the clock's own
-        round trip (H1: the link's time is in both), and the clock's clear needs the hold confirmed: the clock asked
-        once more says nothing too, as slowly (a real answer there: the runner isn't held, the point's "nothing" was
-        SpringBoard's, over). `hands`: the touch goes by the hands; the runner's touch goes through XCTest, held now,
+        (Rounds L, M) Two lines (review RK H1, RL H1): any "no element answered" of HIT_NOTHING_SLOW or more sets the
+        hold, whatever the verdict; clear is decided strictly: a prompt first answer at the clock (HIT_WITNESS_PROMPT),
+        the point's "nothing" HIT_NOTHING_MARGIN slower than it, and the clock asked once more saying "nothing" as
+        slowly (a real answer there: the runner isn't held, the point's "nothing" was SpringBoard's, over). A clock
+        that answered the status bar but not promptly still lets the point decide, except that its "nothing" is slow. `hands`: the touch goes by the hands; the runner's touch goes through XCTest, held now,
         and would land late (M2): no clear then, slow."""
         if HIT_CHECK == "0" or self.tw_version < 6:
             return BANNER_UNASKED
@@ -2135,12 +2142,16 @@ class Session:
             if kind in ("silent", "quiet"):
                 return BANNER_SLOW
             if kind == "nothing":
-                slow = took >= t_w + HIT_NOTHING_SLOW  # (review RK H1: against the clock's round trip, not zero)
+                if took >= HIT_NOTHING_SLOW:
+                    self._hold("point", at)  # (review RL H1: the runner held, whatever the verdict below)
                 if point[1] < HIT_NOTHING_ABOVE:  # (review RH L5: the portrait panel's top edge)
-                    if slow:
-                        self._hold("top edge", at)  # (review RK L2: SpringBoard says nothing there in ~7 ms)
                     return BANNER_CLEAR  # (the screen's top edge: a banner there would have answered)
-                if not slow:
+                if holds is not None and t_w >= HIT_WITNESS_PROMPT:
+                    # (round M, the lead) the status bar answered, but not promptly: its time can't vouch for the
+                    # point's, so a "nothing" there is neither a clear nor a banner in motion: slow (no confirm asked)
+                    trace.note("banner_slow", {**where, "witness_ms": round(t_w * 1000)})
+                    return BANNER_SLOW
+                if took < t_w + HIT_NOTHING_MARGIN:
                     # (review RK L1) SpringBoard's own "nothing here right now", every path: a banner in motion
                     trace.note("banner_moving", where)
                     self._banner_moving = True
@@ -2148,13 +2159,20 @@ class Session:
                 if holds is None or not hands:
                     # no witness to tell the app from SpringBoard; or (review RK M2) the touch goes through the runner,
                     # which is held now: it would land seconds late, past any check
-                    self._hold("point", at)
-                    trace.note("banner_slow", {**where, "hands": hands})
+                    trace.note("banner_slow", {**where, "hands": hands, "ms": round(t_w * 1000)})
                     return BANNER_SLOW
-                # (review RK H1) the runner held after the point's question is the physical sign that the app didn't
-                # answer it: the clock asked once more must say nothing too, as slowly
+                # Clear needs three things (review RK H1, RL H1): the clock's prompt answer, SpringBoard's status bar
+                # (SpringBoard answers); the point's "nothing" HIT_NOTHING_MARGIN slower than it (the app didn't
+                # answer); and the clock asked once more saying "nothing" as slowly (the runner is held by the app's
+                # pending request, BRIEF-K F4). The known limit (review RL H2, accepted for 2.0.3 by the lead): while a
+                # banner comes or goes the clock too says a fast "nothing" (F2), so two answers delayed on the link by
+                # HIT_NOTHING_MARGIN after a prompt first one, in that half second, AND a fast "nothing" at a point
+                # below the status bar (not seen on the phone) would read as clear. The runner timing its own lookup
+                # (2.0.4) closes it.
                 again, _, t_again = await self._hit_once(HIT_WITNESS, deadline, where, wait=HIT_FREE_WAIT)
-                if again == "nothing" and t_again >= t_w + HIT_NOTHING_SLOW:
+                if again == "nothing" and t_again >= HIT_NOTHING_SLOW:
+                    self._hold("confirm", at)
+                if again == "nothing" and t_again >= t_w + HIT_NOTHING_MARGIN:
                     self._hold("point", at)
                     trace.note("banner_witness", {**where, "frame": holds,
                                                   "ms": [round(t_w * 1000), round(took * 1000), round(t_again * 1000)]})
@@ -2248,7 +2266,7 @@ class Session:
         self._held_until = time.monotonic() + HIT_HELD
         trace.note("runner_held", {"why": why, "at": [round(at[0]), round(at[1])]})
 
-    async def channel_free(self) -> None:
+    async def channel_free(self, until: float | None = None) -> bool:
         """(round K, L) Before a request through XCTest's accessibility (the front route, a tree read) while the runner is
         known to be held: the hit test at the status bar's clock (HIT_WITNESS, portrait points whatever the turn), about
         every HIT_FREE_EVERY seconds, HIT_FREE_WAIT at most a question; only a real answer (an element) ends the hold
@@ -2256,22 +2274,38 @@ class Session:
         a runner with no such route ends the waiting, the hold with it (nothing could ever be asked). The execution
         guard (a pause, a lock, a person's turn), when the path has one, is asked at each poll. Instead of a front
         question that stalls for 8 s and is taken for a lost connection, the read after a touch on a hung app comes up
-        to about 10 s later."""
+        to about 10 s later. `until` (round M: a hands touch's own deadline): False when it came first, the runner
+        still held; else True."""
         if not self._held():
-            return
+            return True
         began = time.monotonic()
         while self._held():
+            if until is not None and time.monotonic() >= until:
+                trace.note("runner_free", {"touch_deadline": round(time.monotonic() - began, 1)})
+                return False
             guard = getattr(self, "execution_guard", None)
             if guard is not None:
                 await guard()
             asked = time.monotonic()
             if await self._free_step():
                 trace.note("runner_free", round(time.monotonic() - began, 1))
-                return
+                return True
             pause = HIT_FREE_EVERY - (time.monotonic() - asked)
+            end = self._held_until if until is None else min(self._held_until, until)
             if pause > 0 and self._held():
-                await asyncio.sleep(min(pause, max(0.0, self._held_until - time.monotonic())))
+                await asyncio.sleep(min(pause, max(0.0, end - time.monotonic())))
         trace.note("runner_free", {"gave_up": round(time.monotonic() - began, 1)})
+        return True
+
+    async def _held_wait(self) -> None:
+        """(round L, M) A hands touch's wait for a held runner, with the hands' lock let go: inside the touch's single
+        deadline (_banner_until, set here if no banner wait set it: BANNER_WAIT); at it, the slow words."""
+        until = getattr(self, "_banner_until", None)
+        if until is None:
+            until = self._banner_until = time.monotonic() + BANNER_WAIT
+        if not await self.channel_free(until):
+            self._gate_at, self._banner_seen, self._banner_until = None, False, None
+            raise Refused("not_actionable", COVERED_SLOW)
 
     async def _free_step(self) -> bool:
         """(round L) One question at the clock while a hold is known, under the hit lock: True when it ended the hold (a
@@ -2656,8 +2690,9 @@ class Session:
                     # person's touch goes first), then the touch starts again: the check and the guard run again
                     await self._wait_banner()
                 except _HeldUp:
-                    # (review RK M1) the runner held by the app: waited for with the hands' lock let go, then again
-                    await self.channel_free()
+                    # (review RK M1) the runner held by the app: waited for with the hands' lock let go, then again;
+                    # (review RL L2) inside the touch's single BANNER_WAIT, which a new hold doesn't restart
+                    await self._held_wait()
         except hands_module.HandsUnavailable:
             return False
         except BaseException:
