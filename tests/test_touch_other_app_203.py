@@ -55,6 +55,7 @@ class PointSession(DescribingSession):
     _words = _real("_words")
     see_front = _real("see_front")
     _wait_banner = _real("_wait_banner")
+    _banner_guard = _real("_banner_guard")
     banner_at = _real("banner_at")
     _portrait_point = _real("_portrait_point")
     _banner_of = _real("_banner_of")

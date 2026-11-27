@@ -737,7 +737,9 @@ COVERED_BANNER = ("covered: a notification is over the top of the screen, so not
 # (round I, the lead on review RH M2) an element is refused too: the phone showed the hit test silent at a banner's own
 # points over a slow app, and one touch on a call's banner is too much
 COVERED_SLOW = ("covered: what is at the top of the screen can't be told right now, because the app in front is slow to "
-                "answer, so nothing was touched; try again in a moment, or aim lower.")
+                "answer, so nothing was touched; try again in a moment, or aim lower. If a notification is there and "
+                "stays, a quick swipe from it up off the top edge sends it away (swipe {x0: 215, y0: 70, x1: 215, "
+                "y1: 2}).")
 # (round G) the hit test couldn't say what is at the top of the screen, though the route names the app
 COVERED_UNSURE = ("covered: can't tell whether a notification is over the top of the screen (the phone's runner didn't "
                   "answer what is there), so nothing was touched; aim at an element (by ref, id or label), or lower.")
@@ -1938,6 +1940,7 @@ class Session:
         front inside that window isn't caught: the window is made small, not closed."""
         self.input_point = at
         self._banner_seen = False  # (review RH H2) a banner seen at this touch's start: only "clear" ends its wait
+        self._banner_until: float | None = None  # (review RI M1) the touch's one banner deadline, across its waits
         if self.banner_guard and at is not None and self.touch_rules is None:
             await self._clear_of_banner(at)  # (a touch without the agent's rules: the banner wait as before 2.0.3)
         if at is not None:
@@ -1964,17 +1967,22 @@ class Session:
         except _BannerUp:
             raise  # (the gate stays: it runs again once the banner is waited out)
         except BaseException:
-            self._gate_at, self._banner_seen = None, False
+            self._gate_at, self._banner_seen, self._banner_until = None, False, None
             raise
-        self._gate_at, self._banner_seen = None, False
+        self._gate_at, self._banner_seen, self._banner_until = None, False, None
 
     async def _wait_banner(self) -> None:
-        """(review RP2 H1) Wait a banner out with no lock held, up to BANNER_WAIT; refused `covered` if it stays."""
+        """(review RP2 H1) Wait a banner out with no lock held, up to BANNER_WAIT; refused `covered` if it stays.
+        (Review RI M1) BANNER_WAIT is the touch's in all, across every wait its gate starts (the gate and these polls
+        can disagree: "clear" here, silence there), and the guard (a pause, a lock, a person's turn) is asked at every
+        poll, so the touch ends within a poll of either."""
         self._banner_seen = True  # (review RH H2) the gate saw one (_BannerUp): only "clear" ends the wait now
-        waited = 0.0
-        while waited < BANNER_WAIT:
+        until = getattr(self, "_banner_until", None)
+        if until is None:
+            until = self._banner_until = time.monotonic() + BANNER_WAIT
+        while time.monotonic() < until:
             await asyncio.sleep(BANNER_POLL)
-            waited += BANNER_POLL
+            await self._banner_guard()
             now = await self.front_state()
             if now is None or now.kind not in (FRONT_OVER, FRONT_APP, FRONT_HOME):
                 return
@@ -1988,8 +1996,20 @@ class Session:
                 # (review RH H2) once a banner was seen, only "clear" says it left: a silence or "can't say" waits on
                 if said == BANNER_CLEAR or (said != BANNER_OVER and not getattr(self, "_banner_seen", False)):
                     return  # (the gate runs again in full: the check, then the guard)
-        self._gate_at, self._banner_seen = None, False
+        self._gate_at, self._banner_seen, self._banner_until = None, False, None
         raise Refused("not_actionable", COVERED_BANNER)
+
+    async def _banner_guard(self) -> None:
+        """(review RI M1) The execution guard (a pause, a lock, a person's turn), asked at each poll of a banner wait: a
+        refusal ends the touch, and its gate with it."""
+        guard = getattr(self, "execution_guard", None)
+        if guard is None:
+            return
+        try:
+            await guard()
+        except BaseException:
+            self._gate_at, self._banner_seen, self._banner_until = None, False, None
+            raise
 
     def _portrait_point(self, at: tuple[float, float]) -> "tuple[float, float] | None":
         """(round H, review RG M2) The point as the hit route takes it, in portrait points (as Hands maps a turn: to_hid).
@@ -2204,6 +2224,7 @@ class Session:
                 raise Refused("not_actionable", COVERED_BANNER)
             await asyncio.sleep(BANNER_POLL)
             waited += BANNER_POLL
+            await self._banner_guard()  # (review RI M1: a pause during the wait is heard within a poll)
             return await self.front_state() or Front(FRONT_UNKNOWN)
         while True:
             if now.kind == FRONT_APP:
@@ -2214,8 +2235,10 @@ class Session:
                     # (round G, iOS 26.5) the route names the app while a timer's banner is over it: in the zone, the
                     # hit test at the touch's start says whether SpringBoard is there
                     said = await self.banner_at(at, now.app, rules.aimed) if zone else BANNER_UNASKED
-                    if said == BANNER_OVER and rules.flick:
-                        pass  # (round G) the flick up that sends it away
+                    if said in (BANNER_OVER, BANNER_SLOW) and rules.flick:
+                        # (round G) the flick up that sends it away; (round J, the lead) on "slow" too: on a banner it
+                        # sends it away, and with none it is the agent's own swipe of the app's top
+                        pass
                     elif said == BANNER_OVER or (getattr(self, "_banner_seen", False)
                                                  and said in (BANNER_SLOW, BANNER_UNSURE)):
                         # (review RH H2) a banner, or after one was seen, anything but "clear": waited out, then covered
@@ -2236,8 +2259,8 @@ class Session:
                     # (round G) the hit test tells a banner from the home screen's own top: a banner is waited out as
                     # over an app; the top edge (a pull for Control or Notification Center), the status bar, a widget go
                     said = await self.banner_at(at, None, rules.aimed)
-                    if said == BANNER_OVER and rules.flick:
-                        return  # (round G) the flick up that sends it away
+                    if said in (BANNER_OVER, BANNER_SLOW) and rules.flick:
+                        return  # (round G, J) the flick up that sends it away
                     if said == BANNER_OVER and not rules.element and not getattr(self, "_banner_seen", False):
                         # (review RG M1) a point on SpringBoard's own screen can't be told from a banner's
                         raise Refused("not_actionable", COVERED_HOME)
@@ -2516,8 +2539,10 @@ class Session:
         """hit_at's question, under the hit lock."""
         began = time.monotonic()
         try:
-            # (not asked twice when it gets no answer: a stalled check is skipped, Unanswered, not waited on again)
-            answer = await self._call("GET", f"{HIT_PATH}?x={x:.2f}&y={y:.2f}", timeout=HIT_WAIT, again=False)
+            # (not asked twice when it gets no answer: a stalled check is skipped, Unanswered, not waited on again;
+            # review RI L1: `once`, so its silence is no dropped line either: no /status, no reconnect, the quiet set)
+            answer = await self._call("GET", f"{HIT_PATH}?x={x:.2f}&y={y:.2f}", timeout=HIT_WAIT, again=False,
+                                      once=True)
         except ConnectionLost:
             raise
         except Exception as e:  # noqa: BLE001 - whatever stopped the check, the touch goes unchecked
