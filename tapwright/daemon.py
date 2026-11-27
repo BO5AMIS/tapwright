@@ -98,6 +98,10 @@ NOTE_NO_OCR = "no OCR reading, so this look is the elements alone. " + ocr.INSTA
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
             "in its picture.")
 OCR_REF = re.compile(r"o[1-9][0-9]*")
+# (2.0.3 round N, N-F7) an o ref is touched only when its text is still within this many points of where the look read
+# it: the picture's text is read once more right before the touch (an o ref tapped 6 s after the look, on a list cut
+# short, went to another control: the screen had moved and nothing said so)
+O_REF_STILL = 12.0
 OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its centre):"
 OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
 # (2.0) the calls that need no read of the app: while one blocks even the runner's bounded routes (not-answering),
@@ -4569,7 +4573,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
         if name in DIAG_TOOLS:  # a dedicated device; personal mode answers these in _within
             return await self._diag_tool(name, args, None)
+        target_in = args.get("target")
+        o_ref = target_in.get("ref") if isinstance(target_in, dict) else None
         args, read_at = self._ocr_target(client_id, args)
+        if read_at is not None and isinstance(o_ref, str) and not args.get("force"):
+            args = await self._o_ref_still(client_id, name, o_ref, args)  # (round N, N-F7: `dry_run` checks too)
         if read_at is not None:
             # (CodeRabbit, PR #26) an o ref is a point of the screen as its text was read: the touch is refused `stale`
             # in its turn when another's action came since (a person, another agent), as a {text} by picture is (K-H2)
@@ -6818,6 +6826,45 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                        "whose elements weren't read gets o refs with any look).")
         return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}, view.ocr_gen
 
+    async def _o_ref_still(self, client_id: str, name: str, ref: str, args: dict) -> dict:
+        """(2.0.3 round N, N-F7) Right before a touch aimed by an o ref: the picture's text read once more (as the look
+        read it: _screen_text, the runner's OCR, else this computer's), and the touch goes only when the ref's text
+        (casefolded, its spaces made one, as a touch by the picture's text matches) is found with its centre within
+        O_REF_STILL of where the look read it: at the centre read now. Not found, found only further away (said where:
+        never touched there) or the picture not readable now: `stale`. Where the look's list was whole, the picture
+        rule (_moved_under) is asked first (it is cheaper). This read is no look: the o refs, the list and the picture
+        rule's mark stay as they were."""
+        view = self.control.client(client_id)
+        text = view.ocr_text.get(ref)
+        point = (float(args["target"]["x"]), float(args["target"]["y"]))
+        if text is None:
+            return args  # (a ref made before its text was kept: as before)
+        if name in ("tap", "long_press") and self._moved_under(view, *point):
+            x, y = (round(c) for c in point)
+            raise Refused("stale", f"the screen around ({x}, {y}) changed since your last look; "
+                                   "look again, or pass force: true to touch there anyway.")
+        try:
+            seen, note = await self._screen_text("accurate", implicit=True)
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - the picture can't be read now: the touch isn't made
+            seen, note = [], f"{type(e).__name__}"
+        want = " ".join(text.casefold().split())
+        alike = sorted((s for s in seen if " ".join(s.text.casefold().split()) == want),
+                       key=lambda s: math.dist(s.center, point))
+        if alike and math.dist(alike[0].center, point) <= O_REF_STILL:
+            x, y = alike[0].center
+            return {**args, "target": {**args["target"], "x": round(x, 1), "y": round(y, 1)}}
+        if alike:
+            where = f" (it is at ({round(alike[0].center[0])}, {round(alike[0].center[1])}) now)"
+        elif note or not seen:
+            where = " (the picture can't be read now)"
+        else:
+            where = ""
+        trace.note("o_ref_moved", {"ref": ref, "found": bool(alike)})
+        raise Refused("stale", f'{ref} "{ui.shown(text)}" is no longer where your last look read it{where}; nothing was '
+                               "touched. Look again.")
+
     def _guards_banners(self, name: str, target: "ui.Target | None") -> bool:
         """Does this action's touch wait out a notification banner over the top of the screen (Session.banner_guard,
         _clear_of_banner: only touches in the top BANNER_ZONE are held)? (2.0.3) Every touch of an agent's action,
@@ -7099,6 +7146,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         said = ui.shown(str(target.text))
         if target.index is None and len(hits) > 1:
             view.ocr, view.ocr_gen = {f"o{n}": s.center for n, s in enumerate(hits, 1)}, aimed_at
+            view.ocr_text = {f"o{n}": s.text for n, s in enumerate(hits, 1)}
             listed = "\n".join(dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(hits, 1))
             raise Refused("ambiguous", f'{len(hits)} texts in the picture show "{said}" (this screen\'s elements weren\'t '
                                        f'read, so they are what there is). Touch one by its ref, or add "index" '
@@ -7225,6 +7273,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         top = STATUS_BAR if height > width else 0.0  # the clock and the battery are the phone's, not the app's
         new = [s for s in seen if s.rect[1] >= top and not _said(s.text, known)]
         view.ocr, view.ocr_gen = {f"o{n}": s.center for n, s in enumerate(new, 1)}, gen
+        view.ocr_text = {f"o{n}": s.text for n, s in enumerate(new, 1)}
         lines = answer["text"].split("\n")
         cut = next((i for i, line in enumerate(lines) if line.startswith("Note: ")), len(lines))
         refs = [dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(new, 1)]

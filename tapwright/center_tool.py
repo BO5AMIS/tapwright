@@ -37,6 +37,7 @@ CENTER_PULL = 0.6  # how far down the swipe goes, in screen heights
 CENTER_SWIPE_MS = 300
 CENTER_OPEN_WAIT = 0.6  # seconds for Notification Center to come down before its tree is read
 CENTER_CLOSE_WAIT = 0.4  # seconds for it to go up again before the app in front is asked
+UNLOCK_ARRIVAL_SLACK = 1.0  # (round N) seconds before a frame's stamp an unlock still makes it private
 CENTER_HIDE_AFTER_S = 3.0  # a recording leaves out frames this long after Notification Center's close was confirmed: it
 # slides up, WebDriverAgent's frames queue on a slow link, and AirPlay sends pictures again
 OPEN_WAIT = 1.0  # seconds for an opened notification's app to come to the front
@@ -161,7 +162,16 @@ class CenterTools:
             return True
         arrived = self.hub.arrival_of(frame.seq)
         if arrived is None:
-            return bool(self.__dict__.get("_unlock_spans"))
+            # (2.0.3 round N, phone 2026-11-28) the hub keeps the arrivals of its last HISTORY frames only: the frame of
+            # a read that took 10 s has dropped out of them. Its own stamp (`at`, epoch ms on the hub's clock) says
+            # about when it came: private when an unlock ran since UNLOCK_ARRIVAL_SLACK before that. Before, any unlock
+            # span still kept (an hour) made every such frame private: "the phone is being unlocked" half an hour after
+            # the only unlock. A frame with no stamp: fail-closed, as before
+            at = getattr(frame, "at", None)
+            if not isinstance(at, (int, float)) or isinstance(at, bool):
+                return bool(self.__dict__.get("_unlock_spans"))
+            came = self.hub.mono() - max(0.0, (self.hub.now_ms() - at) / 1000.0)
+            return self.unlocked_since(came - UNLOCK_ARRIVAL_SLACK)
         return self.unlock_covers(arrived)
 
     def recording_hides(self, hub, frame) -> bool:

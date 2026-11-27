@@ -64,6 +64,7 @@ class ClientView:
     moved: bool = False  # an action that returned no list ran since: the screen has probably changed
     ocr: dict[str, tuple[float, float]] = field(default_factory=dict)  # ref (o1…) -> centre, from the last OCR reading
     ocr_gen: int = -1  # the generation as that text was read: another's action since moves the screen under the refs
+    ocr_text: dict[str, str] = field(default_factory=dict)  # (2.0.3 round N) ref -> its text as that reading read it
     unlooked: int = 0  # how many answers since the last list or change block carried none (`look: false`)
     shown_off: list = field(default_factory=list)  # what lay off screen at the agent's last answer (for `~` lines)
     dropped: bool = False  # the connection dropped since `items` was read
