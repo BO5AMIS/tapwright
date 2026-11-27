@@ -153,7 +153,9 @@ def test_rg_m6_no_element_answered_below_the_status_bar_three_times_is_refused_a
         s.hit = lambda x, y: NOTHING
         e = await refused(d, "tap", {"target": {"x": 200, "y": 85}, "look": False})
         assert e.code == "not_actionable" and str(e) == session_module.COVERED_SLOW and s.sent == []
-        assert len(s.hit_questions) == session_module.HIT_TRIES == 3
+        # (round K: the status bar's clock is asked first, and says nothing either: slow, the point never asked, and
+        # no question repeated: HIT_TRIES is 1)
+        assert s.hit_questions == [session_module.HIT_WITNESS] and session_module.HIT_TRIES == 1
         await finish(stop, task)
     run(go)
 
@@ -162,9 +164,12 @@ def test_the_phones_feed_two_no_answers_then_the_apps_own_the_touch_goes():
     async def go():
         s = unread()
         d, stop, task = await _looked(s)
-        s.hit = lambda x, y: NOTHING if len(s.hit_questions) <= 2 else other(s.app[1], (0, 0, 430, 932))
+        # (round K: the status bar's clock answers SpringBoard's status bar, the feed's point "no element answered" after
+        # the runner's 0.3 s: the app didn't answer where SpringBoard would have, the touch goes at once, two questions)
+        s.hit = lambda x, y: (other("com.apple.springboard", (55, 18, 52, 23), "XCUIElementTypeStaticText")
+                              if (x, y) == session_module.HIT_WITNESS else NOTHING)
         await d.run_tool("a", "tap", {"target": {"x": 200, "y": 85}, "look": False})
-        assert s.sent == [("tap", (200, 85))] and len(s.hit_questions) == 3
+        assert s.sent == [("tap", (200, 85))] and s.hit_questions == [session_module.HIT_WITNESS, (200.0, 85.0)]
         await finish(stop, task)
     run(go)
 
@@ -194,7 +199,8 @@ def test_after_a_silent_hit_question_none_is_sent_for_hit_quiet(monkeypatch):
         await asyncio.sleep(0.35)
         s.hit = lambda x, y: other(s.app[1], (0, 0, 430, 932))
         await d.run_tool("a", "tap", {"target": {"x": 200, "y": 85}, "look": False})
-        assert len(s.hit_questions) == 2 and s.sent == [("tap", (200, 85))]
+        # (round K: the clock, then the point: three questions in all)
+        assert len(s.hit_questions) == 3 and s.sent == [("tap", (200, 85))]
         await finish(stop, task)
     run(go)
 

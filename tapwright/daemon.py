@@ -6742,6 +6742,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if not callable(banner_at):
             return False
         app = read_app[1] if isinstance(read_app, tuple) else None
+        # (round K) only after a read that answered in time with elements: after a read cut short (or not asked) the app
+        # is busy, and a question to it would hold the runner for seconds (phone, 2026-11-27: a tap by text took 8.5 s)
+        tier = getattr(s, "last_tier", "full")
+        if tier == "root" or (tier != "full" and not session_module._has_elements(getattr(s, "last_source", None))):
+            return False
         return await banner_at((s.screen[0] / 2, BANNER_PROBE_Y), app) == session_module.BANNER_OVER
 
     async def _locked_by_press(self) -> bool:

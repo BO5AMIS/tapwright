@@ -51,7 +51,9 @@ def test_the_incident_a_point_tap_on_a_timers_banner_the_route_doesnt_see_is_ref
         e = await refused(d, "tap", {"target": {"x": 200, "y": 85}, "look": False})
         assert e.code == "not_actionable" and str(e) == session_module.COVERED_BANNER
         assert s.sent == [] and s.front == (SHOP[1], 7)  # (the route named the app the whole time)
-        assert (200.0, 85.0) in s.hit_questions and len(s.hit_questions) >= 2  # (asked again while it waited)
+        # (asked again while it waited; round K: at the status bar's clock, which the timer's banner covers: the point
+        # isn't asked while the clock shows a banner)
+        assert set(s.hit_questions) == {session_module.HIT_WITNESS} and len(s.hit_questions) >= 2
         await finish(stop, task)
     run(go)
 
@@ -62,7 +64,8 @@ def test_the_touch_goes_once_the_banner_has_left():
         d, stop, task = await _looked(s)
         banner_up(s, leaves_after=2)
         await d.run_tool("a", "tap", {"target": {"x": 200, "y": 85}, "look": False})
-        assert s.sent == [("tap", (200, 85))] and len(s.hit_questions) == 3
+        # (round K: two polls see the banner at the clock; the third, the clock and then the point: four questions)
+        assert s.sent == [("tap", (200, 85))] and len(s.hit_questions) == 4
         await finish(stop, task)
     run(go)
 
@@ -241,7 +244,8 @@ def test_banner_shown_asks_the_hit_test_at_the_zones_probe_point():
         d = make(s)
         assert not await d._banner_shown()
         banner_up(s)
-        assert await d._banner_shown() and s.hit_questions[-1] == (215.0, 80.0)
+        # (round K: the status bar's clock first; with the timer's banner over it, the point isn't asked)
+        assert await d._banner_shown() and s.hit_questions[-1] == session_module.HIT_WITNESS
     run(go)
 
 
@@ -258,18 +262,24 @@ def test_nothing_at_the_point_is_an_answer_and_the_touch_goes():
     run(go)
 
 
-@pytest.mark.parametrize("frame,kind", [([0, 0, 430, 54], "XCUIElementTypeOther"),  # the status bar, in an app
-                                        ([370, 21, 31, 15], "XCUIElementTypeOther"),
-                                        ([0, 0, 430, 932], "XCUIElementTypeOther"),  # the home screen's whole screen
-                                        ([209, 91, 110, 111], "XCUIElementTypeIcon")])  # an icon
-def test_what_isnt_over_by_the_one_definition(frame, kind):
+@pytest.mark.parametrize("frame,kind,goes", [([0, 0, 430, 54], "XCUIElementTypeOther", True),  # the status bar, in an app
+                                             ([370, 21, 31, 15], "XCUIElementTypeOther", True),
+                                             # (round K, phone F2: over an app SpringBoard's whole screen is a banner
+                                             # coming or going; on the home screen it stays clear)
+                                             ([0, 0, 430, 932], "XCUIElementTypeOther", False),
+                                             ([209, 91, 110, 111], "XCUIElementTypeIcon", True)])  # an icon
+def test_what_isnt_over_by_the_one_definition(frame, kind, goes):
     async def go():
         s = unread()
         s.screen = (430.0, 932.0)
         d, stop, task = await _looked(s)
         s.hit = lambda x, y: springboard(frame, kind)
-        await d.run_tool("a", "tap", {"target": {"x": 215, "y": 30}, "look": False})
-        assert s.sent == [("tap", (215, 30))]
+        if goes:
+            await d.run_tool("a", "tap", {"target": {"x": 215, "y": 30}, "look": False})
+            assert s.sent == [("tap", (215, 30))]
+        else:
+            e = await refused(d, "tap", {"target": {"x": 215, "y": 30}, "look": False})
+            assert str(e) == session_module.COVERED_BANNER and s.sent == []
         await finish(stop, task)
     run(go)
 

@@ -703,16 +703,34 @@ HIT_NOTHING = "tapwright hit: no element answered at the point"
 # (round H, review RG M6; phone 2026-11-27) the runner says HIT_NOTHING also when its lookup got no answer in 0.3 s: on a
 # video app's feed it said so at every point, the status bar's included, 309-342 ms each, for two rounds, then three of
 # five points named the app. So it is an answer (nothing there) only above HIT_NOTHING_ABOVE (the screen's top edge,
-# above every status-bar frame measured); below, it is asked again, HIT_TRIES questions in about HIT_TRIES_FOR seconds,
-# and none answering is BANNER_SLOW
+# above every status-bar frame measured); below, it is BANNER_SLOW, never asked again (round K: the status bar's points
+# said it only because they were asked after the app's, which held the runner)
 HIT_NOTHING_ABOVE = 11.0
-HIT_TRIES, HIT_TRIES_FOR = 3, 1.2  # (review RH L1: one deadline for all the tries, each try's wait included)
+# (round K) a question that got "no element answered" is never asked again: each holds the runner about 2 s, and three
+# at a hung app's point cost the connection. One deadline for the one or two questions of a call (the status bar's, then
+# the point's when the status bar can't say)
+HIT_TRIES, HIT_TRIES_FOR = 1, 1.2
 HIT_TRY_MIN = 0.2  # seconds: less than this left of HIT_TRIES_FOR asks no more
 # (round H, review RG M5; phone 2026-11-27) after a hit question got no answer in HIT_BANNER_WAIT, no other is sent for
 # this long: the runner is still working on it, and a dozen queued ones held it until the watchdog restarted it (the
 # phone then asked for its passcode)
 HIT_QUIET = 5.0
 IN_CALL = "com.apple.InCallService"  # (review RG H2) a call's banner: over, whatever its frame
+# (round K, phone 2026-11-27) the status bar's clock, in portrait points, on a phone with an island or a notch: asked
+# first over an app (Session.banner_at). SpringBoard answers there in tens of ms as long as nothing is pending (26 ms
+# right after a read cut short), a timer's banner covers it ([11, 11, 408, 490]), and an ordinary banner doesn't (its
+# plate [8, 56, 414, 73] is below the status bar): so the clock tells whether SpringBoard is answering, and the touch's
+# point, asked once after it, tells what is there. A home-button phone's clock isn't there: no witness.
+HIT_WITNESS = (66.0, 22.0)
+# (round K) a "no element answered" that took at least this long is the runner's 0.3 s wait running out: an app that
+# didn't answer (304-342 ms measured); a faster one is SpringBoard saying "nothing here right now" (8-18 ms: a banner
+# coming or going)
+HIT_NOTHING_SLOW = 0.25
+# (round K) after a slow "no element answered" the runner is held until the app answers XCTest's pending request: every
+# hit question and the front route get nothing meanwhile (2.5 s on a shopping app, 9.8 s on a hung feed, measured after
+# one question). Requests through accessibility wait for it (Session.channel_free), asking the clock every
+# HIT_FREE_EVERY s, HIT_FREE_WAIT s at most a question
+HIT_HELD, HIT_FREE_EVERY, HIT_FREE_WAIT = 12.0, 0.7, 1.0
 WEB_CONTENT = "com.apple.WebKit."  # (the phone: a web page's content in the zone names WebKit's content process)
 HIT_BANNER_WAIT = 1.5  # seconds the gate waits for the hit test's answer before it can't say
 BANNER_OVER, BANNER_CLEAR, BANNER_UNSURE, BANNER_UNASKED = "over", "clear", "unsure", "unasked"
@@ -1259,6 +1277,7 @@ class Session:
         """One read of the tree as /source's XML: through the fork's compact read when this runner has it (FAST_READ),
         else /source itself. `center` (Notification Center's read, review R200v L4): with the normal budget, outside the
         budget memory and the "unchanged" token."""
+        await self.channel_free()  # (round K: the runner held by the app's pending request: wait for it)
         self.last_tier, self.last_why = "full", ""
         if FAST_READ != "0" and self.fast_read is not False:
             await self.ensure()  # (2.0: a session's start learns the runner's version: no second question then)
@@ -1530,6 +1549,7 @@ class Session:
         or the question failed; a dropped line is raised."""
         if self.tw_version < FRONT_VERSION:
             return None
+        await self.channel_free()  # (round K: the runner held by the app's pending request: wait for it)
         try:
             answer = await self._call("GET", FRONT_PATH, timeout=FRONT_WAIT)
         except ConnectionLost:
@@ -1983,6 +2003,8 @@ class Session:
         while time.monotonic() < until:
             await asyncio.sleep(BANNER_POLL)
             await self._banner_guard()
+            if self._held():
+                continue  # (round K: the runner held, nothing is asked, and a hold is no clear; the deadline bounds it)
             now = await self.front_state()
             if now is None or now.kind not in (FRONT_OVER, FRONT_APP, FRONT_HOME):
                 return
@@ -2026,65 +2048,180 @@ class Session:
 
     async def banner_at(self, at: tuple[float, float], app: str | None = None,
                         aimed: "tuple[float, float, float, float] | None" = None) -> str:
-        """(round G, H) Is something over the app (`app`, the one the agent saw; None: the home screen) at this point:
-        the hit test (HIT_PATH, route version 6), at the point mapped to portrait. BANNER_OVER: a banner (_banner_of);
-        BANNER_CLEAR: the app itself, a web page's or the keyboard's process, SpringBoard's status bar, "no element
-        answered" above y HIT_NOTHING_ABOVE; BANNER_UNSURE: another process over the app, an error, a malformed or
-        unverified answer, a turn not known; BANNER_SLOW (review RG M5, M6; phone 2026-11-27): the app in front is slow
-        to answer: "no element answered" HIT_TRIES times (about a second), no answer in HIT_BANNER_WAIT, or within
-        HIT_QUIET after such a silence (the runner is still on it: no question is sent). BANNER_UNASKED (as before round
-        G): the check is off, or the runner is older or says it has no such route. One question out at a time: a pile of
-        them held the runner on the phone until the watchdog restarted it. Trace lines: the point, the frame and the
-        process, never a label."""
+        """(rounds G to K) Is something over the app (`app`, the one the agent saw; None: the home screen) at this point?
+        BANNER_OVER: a banner; BANNER_CLEAR: nothing over it; BANNER_UNSURE: it can't be told (another process over the
+        app, an error, a malformed or unverified answer, a turn not known); BANNER_SLOW: no answer, the quiet (HIT_QUIET
+        after a silence), the runner held (HIT_HELD), or "no element answered" with nothing to tell the app from
+        SpringBoard; BANNER_UNASKED: the check is off, or the runner is older or has no such route. One question out at
+        a time (the hit lock), and none repeated (HIT_TRIES 1): a question the app doesn't answer holds the runner until
+        it does (phone, 2026-11-27: 2.5 to 9.8 s after one question; three cost the connection).
+        (Round K) Over an app, upright, a point below the status bar: the status bar's clock (HIT_WITNESS) is asked
+        first. A banner there (or a call's, or SpringBoard's whole screen: one coming or going) is over, the point not
+        asked. A fast "no element answered" there is a banner coming or going: over. A slow one, or no answer, is slow
+        (the runner is held: the hold is set). SpringBoard's status bar there "holds": SpringBoard answers right now.
+        Then the touch's point, once: a real answer, _banner_of; a fast "no element answered", over (a banner in
+        motion); a slow one, the app didn't answer where SpringBoard would have: clear when the clock held, slow
+        otherwise, and the hold is set either way. An ordinary banner sits below the status bar, which keeps answering
+        as if nothing were there (its plate [8, 56, 414, 73]): only the point can see it. A phone with no status-bar
+        element at the clock (a home-button phone) gets no witness. The home screen, landscape, a turn not known, a
+        point in the status bar: no witness, the point once. Trace notes: the point, the frame, the process, never a
+        label."""
         if HIT_CHECK == "0" or self.tw_version < 6:
             return BANNER_UNASKED
         point = self._portrait_point(at)
         if point is None:
             trace.note("banner_turn", {"at": [round(at[0]), round(at[1])], "turn": self.turn})
             return BANNER_UNSURE
+        where = {"at": [round(at[0]), round(at[1])]}
+        if self._held():
+            trace.note("banner_held", where)  # (the runner waits on the app: nothing is asked)
+            return BANNER_SLOW
         lock = getattr(self, "_hit_lock", None)
         if lock is None:
             lock = self._hit_lock = asyncio.Lock()
         async with lock:
             deadline = time.monotonic() + HIT_TRIES_FOR
-            for n in range(HIT_TRIES):
-                quiet = getattr(self, "_hit_quiet_until", 0.0) - time.monotonic()
-                if quiet > 0:
-                    trace.note("banner_quiet", round(quiet, 1))  # (a hit question got no answer: none is sent)
+            holds = None  # (the clock's frame when SpringBoard's status bar answered there)
+            witnessing = app is not None and point is at and point[1] >= HIT_BANNER_BELOW
+            if witnessing:
+                kind, value = await self._hit_once(HIT_WITNESS, deadline, where)
+                if kind in ("silent", "quiet"):
                     return BANNER_SLOW
-                left = min(HIT_BANNER_WAIT, deadline - time.monotonic())
-                if left < HIT_TRY_MIN:
-                    trace.note("banner_slow", {"at": [round(at[0]), round(at[1])], "tries": n})
+                if kind == "nothing_slow":
+                    self._hold("witness", at)
                     return BANNER_SLOW
-                try:
-                    # (review RH M1) `once`: a silence is no dropped line (no /status, no reconnect), only "slow".
-                    # (review RH L1) one deadline for all the tries: a try that would pass it is given up
-                    answer = await asyncio.wait_for(
-                        self._call("GET", f"{HIT_PATH}?x={point[0]:.2f}&y={point[1]:.2f}", timeout=left,
-                                   again=False, once=True), left + 0.05)
-                except ConnectionLost:
-                    raise
-                except Unanswered:
-                    self._hit_quiet_until = time.monotonic() + HIT_QUIET
-                    trace.note("banner_silent", {"at": [round(at[0]), round(at[1])]})
-                    return BANNER_SLOW
-                except DeviceError as e:
-                    said = str(e).lower()
-                    if HIT_NOTHING in said:
-                        if point[1] < HIT_NOTHING_ABOVE:  # (review RH L5: the portrait panel's top edge)
-                            return BANNER_CLEAR  # (the screen's top edge, 7 ms: a banner there would have answered)
-                        if n + 1 < HIT_TRIES:
-                            trace.note("banner_nothing", n + 1)  # (the lookup got no answer in its 0.3 s: again)
-                            continue
-                        trace.note("banner_slow", {"at": [round(at[0]), round(at[1])], "tries": n + 1})
-                        return BANNER_SLOW
-                    return BANNER_UNASKED if "unknown command" in said or "unknown method" in said else BANNER_UNSURE
-                except Exception:  # noqa: BLE001 - no answer in time (or the wait failed): the runner may be on it still
-                    self._hit_quiet_until = time.monotonic() + HIT_QUIET
-                    trace.note("banner_silent", {"at": [round(at[0]), round(at[1])]})
-                    return BANNER_SLOW
-                return self._banner_of(answer, at, app, aimed, point is not at)
-            return BANNER_SLOW
+                if kind == "nothing_fast":
+                    trace.note("banner_moving", {**where, "witness": True})  # (the status bar being redrawn)
+                    return BANNER_OVER
+                if kind == "unasked":
+                    return BANNER_UNASKED
+                said, frame = self._witness_of(value, where) if kind == "answer" else (None, None)
+                if said == BANNER_OVER:
+                    return BANNER_OVER
+                holds = frame if said == "holds" else None
+            kind, value = await self._hit_once(point, deadline, where)
+            if kind in ("silent", "quiet"):
+                return BANNER_SLOW
+            if kind in ("nothing_slow", "nothing_fast"):
+                if point[1] < HIT_NOTHING_ABOVE:  # (review RH L5: the portrait panel's top edge)
+                    return BANNER_CLEAR  # (the screen's top edge, 7 ms: a banner there would have answered)
+                if kind == "nothing_fast" and witnessing:
+                    trace.note("banner_moving", where)  # (SpringBoard's "nothing here right now": a banner in motion)
+                    return BANNER_OVER
+                if kind == "nothing_slow":
+                    self._hold("point", at)
+                    if holds is not None:
+                        trace.note("banner_witness", {**where, "frame": holds})
+                        return BANNER_CLEAR  # (the app didn't answer where SpringBoard, answering, would have)
+                trace.note("banner_slow", where)
+                return BANNER_SLOW
+            if kind == "unasked":
+                return BANNER_UNASKED
+            if kind != "answer":
+                return BANNER_UNSURE
+            return self._banner_of(value, at, app, aimed, point is not at)
+
+    async def _hit_once(self, xy: tuple[float, float], deadline: float, where: dict,
+                        wait: float | None = None) -> "tuple[str, object]":
+        """(round K) One hit question at a portrait point, `once`, inside the call's deadline (or `wait` seconds): (kind,
+        the answer). "answer"; "nothing_fast" / "nothing_slow" ("no element answered" in less / at least
+        HIT_NOTHING_SLOW: SpringBoard's "nothing here right now", or the runner's wait for an app that didn't answer);
+        "unasked" (no such route); "error" (another refusal); "silent" (no answer in time: the quiet is set, review RH
+        M1); "quiet" (none sent: HIT_QUIET after a silence, or too little time left)."""
+        quiet = getattr(self, "_hit_quiet_until", 0.0) - time.monotonic()
+        if quiet > 0:
+            trace.note("banner_quiet", round(quiet, 1))  # (a hit question got no answer: none is sent)
+            return "quiet", None
+        left = min(HIT_BANNER_WAIT, deadline - time.monotonic()) if wait is None else wait
+        if wait is None and left < HIT_TRY_MIN:
+            return "quiet", None  # (too little of the call's deadline left: not asked)
+        began = time.monotonic()
+        try:
+            answer = await asyncio.wait_for(
+                self._call("GET", f"{HIT_PATH}?x={xy[0]:.2f}&y={xy[1]:.2f}", timeout=left, again=False, once=True),
+                left + 0.05)
+        except ConnectionLost:
+            raise
+        except Unanswered:
+            self._hit_quiet_until = time.monotonic() + HIT_QUIET
+            trace.note("banner_silent", {**where, "asked": [round(xy[0]), round(xy[1])]})
+            return "silent", None
+        except DeviceError as e:
+            said = str(e).lower()
+            if HIT_NOTHING in said:
+                return ("nothing_slow" if time.monotonic() - began >= HIT_NOTHING_SLOW else "nothing_fast"), None
+            return ("unasked" if "unknown command" in said or "unknown method" in said else "error"), None
+        except Exception:  # noqa: BLE001 - no answer in time (or the wait failed): the runner may be on it still
+            self._hit_quiet_until = time.monotonic() + HIT_QUIET
+            trace.note("banner_silent", {**where, "asked": [round(xy[0]), round(xy[1])]})
+            return "silent", None
+        return "answer", answer
+
+    def _witness_of(self, answer: object, where: dict) -> "tuple[str | None, list | None]":
+        """(round K) What the status bar's clock says: (BANNER_OVER, frame) for a banner there by _banner_of's rule, a
+        call's banner, or SpringBoard's whole screen (a banner coming or going); ("holds", frame) for SpringBoard's
+        status bar (verified, not an icon nor the whole screen, its bottom at or above HIT_BANNER_BELOW): SpringBoard
+        answers right now; (None, None) for anything else (no status bar there: no witness)."""
+        value = answer.get("value") if isinstance(answer, dict) else None
+        hit = ui.hit_of(value)
+        if hit is None or not isinstance(value, dict) or value.get("identity") != "verified":
+            return None, None
+        frame = [round(v) for v in hit.rect]
+        noted = {**where, "frame": frame, "b": hit.bundle, "witness": True}
+        if hit.bundle == IN_CALL:
+            trace.note("banner_hit", noted)
+            return BANNER_OVER, frame
+        if hit.bundle != SPRINGBOARD or hit.type == "Icon":
+            return None, None
+        x, y, w, h = hit.rect
+        pw, ph = min(self.screen), max(self.screen)
+        if (x <= 1 and y <= 1 and w >= pw - 1 and h >= ph - 1) or y + h > HIT_BANNER_BELOW:
+            trace.note("banner_hit", noted)
+            return BANNER_OVER, frame
+        return "holds", frame
+
+    # ---- (round K) the runner held by a question the app didn't answer ----
+    def _held(self) -> bool:
+        """Is the runner known to be held: a hit question got a slow "no element answered" within HIT_HELD, and no real
+        answer has come since (channel_free)?"""
+        return getattr(self, "_held_until", 0.0) > time.monotonic()
+
+    def _hold(self, why: str, at: tuple[float, float]) -> None:
+        """A slow "no element answered": XCTest's daemon keeps the app's unanswered request, and every hit question and
+        the front route get nothing until the app answers it (phone, 2026-11-27: 2.5 s on a shopping app, 9.8 s on a
+        hung feed)."""
+        self._held_until = time.monotonic() + HIT_HELD
+        trace.note("runner_held", {"why": why, "at": [round(at[0]), round(at[1])]})
+
+    async def channel_free(self) -> None:
+        """(round K) Before a request through XCTest's accessibility (the front route, a tree read) while the runner is
+        known to be held: the hit test at the status bar's clock (HIT_WITNESS, portrait points whatever the turn), about
+        every HIT_FREE_EVERY seconds, HIT_FREE_WAIT at most a question; the first real answer ends the hold; at
+        HIT_HELD it is given up (the request goes). The execution guard (a pause, a lock, a person's turn), when the
+        path has one, is asked at each poll. Instead of a front question that stalls for 8 s and is taken for a lost
+        connection, the read after a touch on a hung app comes up to about 10 s later."""
+        if not self._held():
+            return
+        began = time.monotonic()
+        lock = getattr(self, "_hit_lock", None)
+        if lock is None:
+            lock = self._hit_lock = asyncio.Lock()
+        while self._held():
+            guard = getattr(self, "execution_guard", None)
+            if guard is not None:
+                await guard()
+            asked = time.monotonic()
+            async with lock:
+                kind, _ = await self._hit_once(HIT_WITNESS, asked + HIT_FREE_WAIT, {"at": [66, 22]},
+                                               wait=HIT_FREE_WAIT)
+            if kind in ("answer", "error", "unasked"):
+                self._held_until = 0.0
+                trace.note("runner_free", round(time.monotonic() - began, 1))
+                return
+            pause = HIT_FREE_EVERY - (time.monotonic() - asked)
+            if pause > 0 and self._held():
+                await asyncio.sleep(min(pause, max(0.0, self._held_until - time.monotonic())))
+        trace.note("runner_free", {"gave_up": round(time.monotonic() - began, 1)})
 
     def _banner_of(self, answer: object, at: tuple[float, float], app: str | None,
                    aimed: "tuple[float, float, float, float] | None", turned: bool) -> str:
@@ -2103,6 +2240,9 @@ class Session:
         where = {"at": [round(at[0]), round(at[1])], "frame": [round(v) for v in hit.rect], "b": hit.bundle}
         if hit.bundle == SPRINGBOARD:
             whole = x <= 1 and y <= 1 and w >= pw - 1 and h >= ph - 1
+            if whole and app is not None:
+                trace.note("banner_hit", where)  # (round K: over an app, SpringBoard's whole screen is a banner in motion)
+                return BANNER_OVER
             # (in landscape there is no status bar to keep clear of: any SpringBoard element but an icon or the screen)
             if hit.type != "Icon" and not whole and (turned or y + h > HIT_BANNER_BELOW):
                 trace.note("banner_hit", where)
@@ -2225,6 +2365,8 @@ class Session:
             await asyncio.sleep(BANNER_POLL)
             waited += BANNER_POLL
             await self._banner_guard()  # (review RI M1: a pause during the wait is heard within a poll)
+            if self._held():
+                return now  # (round K: the runner held, nothing is asked; the touch's deadline stays BANNER_WAIT)
             return await self.front_state() or Front(FRONT_UNKNOWN)
         while True:
             if now.kind == FRONT_APP:
@@ -2526,9 +2668,9 @@ class Session:
             lock = self._hit_lock = asyncio.Lock()
         await lock.acquire()
         try:
-            if getattr(self, "_hit_quiet_until", 0.0) > time.monotonic():
+            if getattr(self, "_hit_quiet_until", 0.0) > time.monotonic() or self._held():
                 if strict_proof:
-                    raise unproven("hit_quiet")
+                    raise unproven("hit_quiet" if not self._held() else "hit_held")
                 return None
             return await self._hit_at_asked(x, y, strict_proof, unproven)
         finally:

@@ -214,7 +214,7 @@ def test_landscape_no_element_at_a_low_landscape_y_is_not_the_top_edge():
         s.screen, s.turn = (932.0, 430.0), 90  # (landscape y 5 maps to portrait y 932 - x)
         s.hit = lambda x, y: DeviceError(f"unsupported operation: {session_module.HIT_NOTHING}")
         assert await s.banner_at((200.0, 5.0), SHOP[1]) == session_module.BANNER_SLOW
-        assert len(s.hit_questions) == 3
+        assert s.hit_questions == [(5.0, 732.0)]  # (round K: one try, never repeated; no witness in landscape)
     run(go)
 
 

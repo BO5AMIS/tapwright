@@ -59,6 +59,11 @@ class PointSession(DescribingSession):
     banner_at = _real("banner_at")
     _portrait_point = _real("_portrait_point")
     _banner_of = _real("_banner_of")
+    _hit_once = _real("_hit_once")
+    _witness_of = _real("_witness_of")
+    _held = _real("_held")
+    _hold = _real("_hold")
+    channel_free = _real("channel_free")
 
     def __init__(self, app=SHOP) -> None:
         super().__init__()
@@ -94,6 +99,10 @@ class PointSession(DescribingSession):
         self.hit_questions.append((x, y))
         answer = self.hit(x, y)
         if isinstance(answer, BaseException):
+            # (round K) "no element answered" comes after the runner's 0.3 s wait for the app, as on the phone; one
+            # marked `fast` is SpringBoard's own "nothing here right now" (8-18 ms)
+            if session_module.HIT_NOTHING in str(answer) and not getattr(answer, "fast", False):
+                await asyncio.sleep(getattr(self, "nothing_takes", 0.3))
             raise answer
         return {"value": answer}
 
