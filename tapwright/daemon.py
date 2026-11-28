@@ -4787,9 +4787,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if box["note"] and spot is not None and not args.get("force"):
                 self._point_kept(view, spot, under_before)
             s.last_point = None
-            # the app the touch is meant for (see _taken_away, the next call's check, a keyboard tool's aim): (2.0.3 round
-            # R) the one the agent's last answer showed, as rule B knows it (_meant_app), not an older read's
-            box["app"], s.top_touch = self._meant_app(view), False
+            # the app the touch is meant for (see _taken_away, the next call's check, a keyboard tool's aim): this
+            # action's own read's (a target's, the reflex's: CodeRabbit, PR #18 cycle 2); else (2.0.3 round R) the one the
+            # agent's last answer showed, as rule B knows it (_meant_app), not an older read's
+            own = self._read_root[0] if self._read_root is not None else None
+            box["app"], s.top_touch = self._meant_app(view, own), False
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             trace.baseline(box["mark"][1])
             trace.mark("resolved")
@@ -6961,7 +6963,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return session_module.TouchRules(front if isinstance(front, session_module.Front) else None, element,
                                          name == "swipe" and _flick_up(args or {}), aimed)
 
-    def _meant_app(self, view) -> "tuple[str, str] | None":
+    def _meant_app(self, view, own: "tuple[str, str] | None" = None) -> "tuple[str, str] | None":
         """(2.0.3 round R, phone R-F1) The app an agent's touch is meant for, (name, bundle id): the one its last answer
         showed it, as rule B checks the touch against it (`view.seen_front`, recorded by every read's answer and by
         `open_app` and `open_url`, `look: false` too); SpringBoard for the home screen. Before, the newest READ's app:
@@ -6969,8 +6971,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         opened app was taken for a theft and the app before opened again. With nothing recorded (a runner older than
         route version 11) or an unknown state: the newest read's app only when the agent's last answer was that read (no
         action without a look since, no open_app); else None, no comparison: missing a theft is safer than reopening an
-        app the agent left on purpose."""
+        app the agent left on purpose. `own`: what a read this action made before its touch names (a target looked up
+        live, the keyboard reflex): the newest knowledge, the touch aimed from it (CodeRabbit, PR #18 cycle 2)."""
         s = self.session
+        if isinstance(own, tuple) and own[1]:
+            return own
         front = getattr(view, "seen_front", None)
         if isinstance(front, session_module.Front):
             if front.kind in (session_module.FRONT_APP, session_module.FRONT_OVER) and front.app:
