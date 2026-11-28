@@ -4370,6 +4370,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             session_module.READ_OWNER.reset(owner_token)
             if own_grants:
                 _GRANT_CALL.reset(grants_token)
+            self._carry_hold()
 
 
     # ---- personal mode: the agent stays in the apps it was given ----
@@ -6490,6 +6491,17 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             await self._held_freed("after the home button")
             return answer
         raise self._not_connected()
+
+    def _carry_hold(self) -> None:
+        """(2.0.3 round S, S-F2) At the end of every call: a hold that still stands (Session.hold_standing: a slow "no
+        element answered", and no real answer of the clock since) outlives the call that saw it as the given-up state.
+        The next call then asks the clock once first (_held_ask): a real answer goes on as usual, else `not_answering`
+        at once, with no front question into the held runner and no reconnect. (The practice: a touch refused slow at
+        its banner wait's limit, 8.9 s, under HIT_HELD; the next look's front route went into the hold.)"""
+        standing = getattr(self.session, "hold_standing", None)
+        if (self.state == "live" and not isinstance(self.stuck, session_module.RunnerHeld) and callable(standing)
+                and standing()):
+            self.lost(self.session.carry_hold())
 
     def _end_held(self, why: str) -> None:
         """(round N) The clock answered: the given-up hold is over, the line live again (the heartbeat says locked)."""

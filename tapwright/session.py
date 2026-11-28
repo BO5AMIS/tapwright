@@ -1653,9 +1653,22 @@ class Session:
         if self.tw_version < FRONT_VERSION:
             return None
         await self.channel_free()  # (round K: the runner held by the app's pending request: wait for it)
+        sid = self.sid
         try:
             answer = await self._call("GET", FRONT_PATH, timeout=FRONT_WAIT)
+        except AppNotAnswering:
+            raise
         except ConnectionLost:
+            # (round S, S-F2) no answer to the front route: before it is taken for a dropped line, the clock once, in
+            # the same session (_call let it go: a new one would be asked of the held runner too, 30 s). The runner
+            # answering it "no element answered" is the app holding accessibility (the practice: a look's front route
+            # at 12:23:38 into a hold, "connection lost", a reconnect and a new session, 47.9 s): the given-up state,
+            # the line and the session kept
+            dropped, self.sid = self.sid, sid
+            if sid is not None and await self._runner_answers_held():
+                held = self.runner_held = await self._given_up()
+                raise RunnerHeld(held.bundle_id, held.name) from None
+            self.sid = dropped
             raise
         except DeviceError as e:
             getattr(self.device, "log", lambda *a: None)(f"the runner couldn't say which app is in front ({e})")
@@ -2387,6 +2400,8 @@ class Session:
                 self._hit_quiet_until = time.monotonic() + HIT_QUIET
             trace.note("banner_silent", {**where, "asked": [round(xy[0]), round(xy[1])]})
             return "silent", None, time.monotonic() - began
+        if xy == HIT_WITNESS:
+            self._clock_real_at = time.monotonic()  # (round S: the clock answered: the runner wasn't held then)
         return "answer", answer, time.monotonic() - began
 
     def _witness_of(self, answer: object, where: dict) -> "tuple[str | None, list | None]":
@@ -2423,7 +2438,8 @@ class Session:
         """A slow "no element answered": XCTest's daemon keeps the app's unanswered request, and every hit question and
         the front route get nothing until the app answers it (phone, 2026-11-27: 2.5 s on a shopping app, 9.8 s on a
         hung feed)."""
-        self._held_until = time.monotonic() + HIT_HELD
+        now = time.monotonic()
+        self._hold_at, self._held_until = now, now + HIT_HELD  # (round S: when it was set, for hold_standing)
         trace.note("runner_held", {"why": why, "at": [round(at[0]), round(at[1])]})
 
     async def channel_free(self, until: float | None = None) -> bool:
@@ -2480,6 +2496,46 @@ class Session:
         name = names.get(bundle) or (known[0] if isinstance(known, tuple) and known[1] == bundle else "") or bundle
         trace.note("runner_given_up", {"b": bundle})
         return RunnerHeld(bundle, name)
+
+    def hold_standing(self) -> bool:
+        """(2.0.3 round S, S-F2) Does a hold still stand that no real answer of the clock has come after: a slow "no
+        element answered" set it (_hold) and the clock, asked since, said nothing real (or wasn't asked)? Then the
+        daemon carries it past the call that saw it (carry_hold): a touch refused slow at its banner wait's limit, under
+        HIT_HELD, left it standing, and the next call's front route went into the held runner and was taken for a lost
+        line. False in the given-up state (RunnerHeld: already carried)."""
+        if getattr(self, "runner_held", None) is not None:
+            return False
+        if getattr(self, "_held_until", 0.0) <= time.monotonic():
+            return False
+        return getattr(self, "_clock_real_at", 0.0) < getattr(self, "_hold_at", 0.0)
+
+    def carry_hold(self) -> "RunnerHeld":
+        """(round S, S-F2) The standing hold as the given-up state (RunnerHeld), named with what is known (no device
+        question: the call is answering): the next call asks the clock once first (Daemon._held_ask)."""
+        known = getattr(self, "app", None)
+        bundle = known[1] if isinstance(known, tuple) else getattr(self, "opened_app", None) or ""
+        names = getattr(self, "app_names", None) or {}
+        name = names.get(bundle) or (known[0] if isinstance(known, tuple) and known[1] == bundle else "") or bundle
+        held = self.runner_held = RunnerHeld(bundle, name)
+        trace.note("runner_held_carried", {"b": bundle})
+        return held
+
+    async def _runner_answers_held(self) -> bool:
+        """(round S, S-F2) After a front question that got no answer (taken for a dropped line): one question at the
+        clock, HIT_FREE_WAIT at most, no quiet after it. True when the runner answers it "no element answered": the line
+        is alive and the app holds accessibility, which is no lost connection (round N part 2)."""
+        if self.tw_version < 6:
+            return False
+        lock = getattr(self, "_hit_lock", None)
+        if lock is None:
+            lock = self._hit_lock = asyncio.Lock()
+        try:
+            async with lock:
+                kind, _, _ = await self._hit_once(HIT_WITNESS, time.monotonic() + HIT_FREE_WAIT, {"at": [66, 22]},
+                                                  wait=HIT_FREE_WAIT, sets_quiet=False)
+        except ConnectionLost:
+            return False
+        return kind == "nothing"
 
     async def held_answers(self, wait: float | None = None) -> bool:
         """(round N) The state a given-up hold left (RunnerHeld): one question at the clock, `wait` (HELD_ASK_WAIT) at
