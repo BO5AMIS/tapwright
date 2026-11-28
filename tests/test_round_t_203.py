@@ -128,14 +128,15 @@ def test_rs_h1_a_call_waiting_out_a_carried_hold_leaves_the_queue_free_and_close
         for _ in range(3):
             assert await asyncio.wait_for(d.control.read(nothing), session_module.HIT_FREE_WAIT + 0.05)
             await asyncio.sleep(0.05)
-        r = await asyncio.wait_for(d.run_tool("b", "close_app", {"app": "com.example.shop"}), 3.0)
-        e = await asyncio.wait_for(look, 1.0)
+        # the look gives up at the hold's limit (from its first slow answer) plus a step and a question, by itself
+        e = await asyncio.wait_for(look, session_module.HIT_HELD + 1.0)
         ended = time.monotonic() - held_from
         assert e.code == "not_answering" and str(e) == HELD_WORDS
-        assert r["text"].startswith("Closed com.example.shop.") and s.device.kill_asks == [SHOP[1]]
-        # both by the hold's limit (from its first slow answer) plus a step, a question and the close
         assert ended < session_module.HIT_HELD + 0.4, ended
         assert set(s.hit_questions) == {WITNESS} and [k for k, t in s.runner_asks if t > held_from] == []
+        # then close_app gets out by the device channel
+        r = await asyncio.wait_for(d.run_tool("b", "close_app", {"app": "com.example.shop"}), 3.0)
+        assert r["text"].startswith("Closed com.example.shop.") and s.device.kill_asks == [SHOP[1]]
         assert d.state == "live" and d.stuck is None  # (the close freed the runner; the clock answered)
         await finish(stop, task)
     run(go)
