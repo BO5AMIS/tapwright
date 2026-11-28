@@ -663,3 +663,31 @@ def test_a_frame_of_an_unlock_stays_private_after_the_wall_clock_stepped_back_a_
         assert d.hub.arrival_of(after.seq) is None
         assert center_tool.CENTER_HIDE_AFTER_S < 30.0 and not d.frame_private(after)
     asyncio.run(go())
+
+
+# ---- 4728219256 (cycle 2): the held runner's wait comes off the read's time ----
+
+@pytest.mark.parametrize("held", [True, False])
+def test_a_reads_time_is_what_the_held_runner_left_of_it(monkeypatch, held):
+    from test_session import FastRunner
+    monkeypatch.setattr(session_module.store, "load_state", lambda: {"runner_id": "runner"})
+    clock = [500.0]
+    monkeypatch.setattr(session_module.time, "monotonic", lambda: clock[0])
+    s = Session(FastRunner(version=2))
+    s.tw_version, s.fast_read, s.fast_tap = session_module.BOUNDED_VERSION, True, True
+    planned: list[float] = []
+
+    async def ensure():
+        return None
+
+    async def channel_free(until=None):  # (the runner held by the app: 8 s of the call's 19.5 go waiting)
+        if held:
+            clock[0] += 8.0
+        return True
+
+    async def bounded(timeout):
+        planned.append(timeout)
+        return "<tree/>"
+    s.ensure, s._held, s.channel_free, s._bounded_tree = ensure, (lambda: held), channel_free, bounded
+    assert asyncio.run(s._read_tree(19.5)) == "<tree/>"
+    assert planned == ([11.5] if held else [19.5])  # (no hold: the whole time, a long read still possible)

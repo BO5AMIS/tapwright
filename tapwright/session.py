@@ -1419,7 +1419,12 @@ class Session:
         """One read of the tree as /source's XML: through the fork's compact read when this runner has it (FAST_READ),
         else /source itself. `center` (Notification Center's read, review R200v L4): with the normal budget, outside the
         budget memory and the "unchanged" token."""
+        held, began = self._held(), time.monotonic()
         await self.channel_free()  # (round K: the runner held by the app's pending request: wait for it)
+        if held:
+            # (CodeRabbit, PR #30 cycle 2) the wait for the held runner came off the caller's time (wait_for's deadline):
+            # the read gets what is left, so a long read isn't planned on time that has gone and cut in flight
+            timeout = max(0.1, timeout - (time.monotonic() - began))
         self.last_tier, self.last_why = "full", ""
         if FAST_READ != "0" and self.fast_read is not False:
             await self.ensure()  # (2.0: a session's start learns the runner's version: no second question then)
