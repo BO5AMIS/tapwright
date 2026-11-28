@@ -6,16 +6,20 @@
   answer it kept it for as long as the app liked (more than 80 s on a video feed, measured), and every accessibility
   question after it waited behind it. What runner 16 does: the point lookup is the accessibility client's own, given
   0.3 s by XCTest's accessibility timeout (as the runner's snapshots and tree reads are given theirs), and so are the
-  front route's own lookup when several apps are active and the tap's check of the app in front (personal mode's
-  `apps`), which asked the same unbounded question. A lookup that raises is asked the old way and says so. Its "no
+  point lookups of the front route (when several apps are active) and of the tap's check of the app in front
+  (personal mode's `apps`), which asked the same unbounded question; their list of the active apps is given 0.5 s. A
+  lookup that raises is asked the old way; the hit test says so (`how: daemon` and the exception's name), the front
+  route and the tap's check don't. Its "no
   element answered" says the lookup's own time, the whole question's time and the way it asked (`(hit 304 ms, all
   318 ms, client)`); when the accessibility timeout can't be put back after the lookup, the hit test refuses, and the
   touch is refused as when it can't say. The daemon judges slow and fast by the lookup's own time: 0.25 s or more is
   an app that didn't answer, less is nothing there right now (a banner coming or going), however slow the link. On a
   busy app a touch near the top by the computer's hands is clear after the clock and the point, with no confirm
-  question and no promptness asked of the clock: one question fewer, about 0.3 s sooner. A touch through the phone's
-  runner goes only when the clock, asked once more, answers (the runner is free); else it is refused slow, as before.
-  The hold is still marked and waited for before the next read. A runner older than 16 keeps the rules below;
+  question and no promptness asked of the clock: one question fewer, about 0.3 s sooner; the hold is still marked and
+  waited for before the next read. A touch through the phone's runner goes only when the clock, asked once more,
+  answers within 0.15 s (the runner is free, and the hold is cleared); an answer later than that ends the hold but the
+  touch is refused slow, a fast "no element answered" there is a banner in motion (the touch waits), and a slow one or
+  a silence is refused slow, the hold kept, as before. A runner older than 16 keeps the rules below;
   `tapwright doctor` and the service's status say when the phone's runner is older than 16, what that costs and how to
   update it (`tapwright doctor --fix`).
   Measured on a phone: (the lead fills this in).
@@ -43,8 +47,10 @@
   look used it), and goes at the text's centre as read now only when the same text is within 12 pt of where the look
   read it. Gone, moved further, or the picture not readable now: `stale` (`o1 "..." is no longer where your last look
   read it (it is at (x, y) now); nothing was touched. Look again.`): it is never touched where it moved to. When more
-  than 1 s passes between that read and the touch (another call's read held the phone, a notification was waited out),
-  the text is read once more right before the touch, which goes only when the text is still within 12 pt of it.
+  than 1 s passes between the start of that read and the touch (another call's read held the phone, a notification was
+  waited out), the text is read once more right before the touch, which goes only when the text is still within 12 pt
+  of where that first read found it; the check of what is in front and of a notification at the top then runs again
+  after it, so it is the last thing before the touch. Once a touch: a scroll's later drags don't read again.
   `force` skips the check; `dry_run` runs it. The check's read is no look: the `o` refs stay.
 - A look's picture was refused "the phone is being unlocked" half an hour after the only unlock, twice, both right after
   a long read: the read's frame had dropped out of the stream's short history, and any unlock still remembered (an
