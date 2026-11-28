@@ -4605,8 +4605,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         checked = None
         if read_at is not None and isinstance(o_ref, str) and not args.get("force"):
             asked = self.hub.mono()  # (round P, review RO-L4: the check's age counts from before its read)
-            args = await self._o_ref_still(client_id, name, o_ref, args)  # (round N, N-F7: `dry_run` checks too)
+            # (CodeRabbit, PR #30) the text the check judges, taken before it waits: the late check judges the same one
             text = self.control.client(client_id).ocr_text.get(o_ref)
+            args = await self._o_ref_still(client_id, name, o_ref, args)  # (round N, N-F7: `dry_run` checks too)
             found = (float(args["target"]["x"]), float(args["target"]["y"]))
             checked = (o_ref, text, asked, found) if text is not None else None
         if read_at is not None:

@@ -388,3 +388,29 @@ def test_pictures_of_two_sizes_cant_tell_another_screen_and_the_block_holds():
     assert d._other_screen(kept) is None
     d.hub.publish(_jpeg((430, 932), 20))  # (a real comparison that differs all over: another screen)
     assert d._other_screen(kept) is True
+
+
+# ---- review body, daemon.py:4603: the late o-ref check judges the text the first check judged ----
+
+def test_the_late_o_ref_check_gets_the_text_of_the_first_check(monkeypatch):
+    from test_round_p_203 import ScrollSession, _o_looked
+
+    async def go():
+        s = ScrollSession()
+        d, stop, task = await _o_looked(s)
+        real_still, real_late = d._o_ref_still, d._o_ref_late
+        judged: list[str] = []
+
+        async def still(client_id, name, ref, args):
+            out = await real_still(client_id, name, ref, args)
+            d.control.client(client_id).ocr_text[ref] = "Cancel"  # (another look of this client, meanwhile)
+            return out
+
+        def late(ref, text, checked, found):
+            judged.append(text)
+            return real_late(ref, text, checked, found)
+        d._o_ref_still, d._o_ref_late = still, late
+        await d.run_tool("a", "scroll", {"target": {"ref": "o1"}, "direction": "down", "look": False})
+        assert judged == ["Search"]
+        await finish(stop, task)
+    run(go)
