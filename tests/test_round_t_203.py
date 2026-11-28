@@ -20,9 +20,11 @@ from test_banner_hit_203 import _looked
 from test_daemon import finish
 from test_round_k_203 import WITNESS, _phone_session, scaled  # noqa: F401 (fixture)
 from test_round_n_203 import POINT, HeldSession
+from test_round_s2_203 import _StalledFront
 from test_touch_other_app_203 import CHAT, SHOP, _real, refused, run
 
 from tapwright import session as session_module
+from tapwright.device import ConnectionLost
 
 HELD_WORDS = ("Shop (com.example.shop) is in front and isn't answering, so nothing on the phone can be read. close_app "
               "can still close it; then open_app it again.")
@@ -199,3 +201,114 @@ def test_rs_h2_open_app_after_a_carried_hold_is_given_up_goes_by_ioss_process_co
         assert d.state == "live" and d.stuck is None
         await finish(stop, task)
     run(go)
+
+
+# ---- RS-M1, RS-M2: the long read's block ----
+
+def test_rs_m1_a_busy_cut_long_read_keeps_doubling_its_screens_block():
+    t = [0.0]
+    b = session_module.ReadBudget(clock=lambda: t[0])
+    spans = []
+    for _ in range(6):
+        b.long_sent("app.x")
+        b.answered("app.x", True, b.long_ms, 8000, sent_for="app.x", busy=True)
+        spans.append(b.block_span("app.x"))
+        assert b.misses("app.x") == 1 and b.block_state("app.x") != "app"  # (still no row toward the app-wide stop)
+        t[0] += 10000
+    first = session_module.LONG_MEMORY
+    assert spans == [min(session_module.LONG_MEMORY_MAX, first * 2 ** i) for i in range(6)], spans
+    b.long_sent("app.x")
+    b.answered("app.x", False, b.long_ms, 8000, sent_for="app.x")  # (a whole read resets it)
+    b.long_sent("app.x")
+    b.answered("app.x", True, b.long_ms, 8000, sent_for="app.x", busy=True)
+    assert b.block_span("app.x") == session_module.LONG_RETRY  # (readable now: the first span again)
+
+
+def test_rs_m1_a_long_read_answered_by_another_app_doesnt_grow_the_block():
+    t = [0.0]
+    b = session_module.ReadBudget(clock=lambda: t[0])
+    b.long_sent("app.x")
+    b.answered("app.x", True, b.long_ms, 8000, sent_for="app.x", busy=True)
+    span = b.block_span("app.x")
+    b.long_sent("app.x")
+    b.answered(session_module.SPRINGBOARD, False, b.long_ms, 100, sent_for="app.x")  # (a banner's tree answered)
+    assert b.block_span("app.x") == span
+
+
+def test_rs_m2_two_cut_screens_of_a_readable_app_dont_each_pay_a_long_read_at_every_switch():
+    t = [0.0]
+    b = session_module.ReadBudget(clock=lambda: t[0])
+    now = ["home"]
+    b.other = lambda picture: picture != now[0]
+    b.long_sent("app.x", "home")
+    b.answered("app.x", False, b.long_ms, 5000, sent_for="app.x")  # (read whole once: readable)
+    for screen in ("search", "grid"):
+        now[0] = screen
+        assert b.block_state("app.x") in ("", "other") and b.slow("app.x")  # (a new screen: a long read may go)
+        b.long_sent("app.x", screen)
+        b.answered("app.x", True, b.long_ms, 8000, sent_for="app.x")
+        t[0] += 5
+    for screen in ("search", "grid", "search"):  # (back and forth: both blocked, no long read)
+        now[0] = screen
+        assert b.block_state("app.x") == "same" and not b.slow("app.x") and not b.long_try("app.x")
+    now[0] = "cart"
+    assert b.block_state("app.x") == "other"  # (a screen not tried)
+    for screen in ("cart", "profile", "orders"):  # (LONG_PICS screens newer than "search")
+        now[0] = screen
+        b.long_sent("app.x", screen)
+        b.answered("app.x", True, b.long_ms, 8000, sent_for="app.x")
+    now[0] = "search"
+    assert b.block_state("app.x") == "other" and len(b._long_pics["app.x"]) == session_module.LONG_PICS
+    now[0] = "grid"
+    assert b.block_state("app.x") == "same"
+    b.long_sent("app.x", "grid")  # (a whole read lifts every screen's block)
+    b.answered("app.x", False, b.long_ms, 5000, sent_for="app.x")
+    assert b.block_state("app.x") == "" and "app.x" not in b._long_pics
+
+
+def test_rs_m2_each_kept_screen_blocks_for_its_own_span():
+    t = [0.0]
+    b = session_module.ReadBudget(clock=lambda: t[0])
+    now = ["a"]
+    b.other = lambda picture: picture != now[0]
+    span = session_module.LONG_MEMORY
+    b.long_sent("app.x", "a")
+    b.answered("app.x", True, b.long_ms, 8000, sent_for="app.x")  # (at 0)
+    t[0] += span * 2 / 3
+    now[0] = "b"
+    b.long_sent("app.x", "b")
+    b.answered("app.x", True, b.long_ms, 8000, sent_for="app.x")  # (at 2/3 of a span; the row's span is 2 now)
+    t[0] += span * 2 / 3
+    now[0] = "a"
+    assert b.block_state("app.x") == "same"  # (a's, at 4/3 of a span: within the doubled span)
+    t[0] += span * 5 / 6  # (13/6 of a span: a's own block, from 0, has run out; b's, from 2/3, hasn't)
+    assert b.block_state("app.x") == "other"
+    now[0] = "b"
+    assert b.block_state("app.x") == "same"
+    t[0] += span
+    assert b.block_state("app.x") == ""  # (b's, the newest, ran out too: no block)
+
+
+# ---- RS-M3, RS-L4: the front route with no answer ----
+
+@pytest.mark.parametrize("slow", [True, False])
+def test_rs_m3_only_a_slow_nothing_at_the_clock_after_a_silent_front_route_is_the_held_state(slow):
+    async def go():
+        s = _phone_session(free_at=time.monotonic() + 60.0)
+        s.device.__class__ = _StalledFront
+        s.device.nothing_takes = 0.3 if slow else 0.02  # (the runner's wait for the app, or SpringBoard redrawing)
+        s.app, s.app_names = ("Shop", SHOP[1]), {SHOP[1]: "Shop"}
+
+        async def in_front():
+            return [SHOP[1]]
+        s.device.foreground_apps = in_front
+        if slow:
+            with pytest.raises(session_module.RunnerHeld):
+                await s.front_app()
+            assert s.runner_held is not None and s.sid == "s1"
+        else:  # (a banner in motion says nothing of a hold: the silence is a dropped line, as before)
+            with pytest.raises(ConnectionLost) as e:
+                await s.front_app()
+            assert not isinstance(e.value, session_module.RunnerHeld) and getattr(s, "runner_held", None) is None
+        assert [p for _, p in s.device.asked].count(session_module.HIT_PATH) == 1
+    asyncio.run(go())

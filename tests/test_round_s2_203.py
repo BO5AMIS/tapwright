@@ -162,6 +162,7 @@ def test_a_front_route_with_no_answer_while_the_runner_answers_the_clock_is_the_
     async def go():
         s = _phone_session(free_at=time.monotonic() + (60.0 if held else 0.0))
         s.device.__class__ = _StalledFront
+        s.device.nothing_takes = 0.3  # (the runner's 0.3 s wait for the app: a slow "no element answered")
         s.app, s.app_names = ("Shop", SHOP[1]), {SHOP[1]: "Shop"}
 
         async def in_front():
