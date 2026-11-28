@@ -39,6 +39,7 @@
   of where that first read found it; the check of what is in front and of a notification at the top then runs again
   after it, so it is the last thing before the touch. Once a touch: a scroll's later drags don't read again.
   `force` skips the check; `dry_run` runs it. The check's read is no look: the `o` refs stay.
+- A touch near the top right after `open_app` with `look: false` no longer sends the phone back to the app before.
 - A look's picture was refused "the phone is being unlocked" half an hour after the only unlock, twice, both right after
   a long read: the read's frame had dropped out of the stream's short history, and any unlock still remembered (an
   hour) made such a frame private. Now its own time stamp says when it came.

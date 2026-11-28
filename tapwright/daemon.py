@@ -4787,10 +4787,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if box["note"] and spot is not None and not args.get("force"):
                 self._point_kept(view, spot, under_before)
             s.last_point = None
-            # the app the touch is meant for (see _taken_away): the newest read's, the reflex's or a target's own read
-            # included, before the touch goes out (CodeRabbit, PR #18 cycle 2); else the last snapshot's
-            read_app = getattr(s, "read_app", None)
-            box["app"], s.top_touch = (read_app if isinstance(read_app, tuple) else s.app), False
+            # the app the touch is meant for (see _taken_away, the next call's check, a keyboard tool's aim): (2.0.3 round
+            # R) the one the agent's last answer showed, as rule B knows it (_meant_app), not an older read's
+            box["app"], s.top_touch = self._meant_app(view), False
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             trace.baseline(box["mark"][1])
             trace.mark("resolved")
@@ -6961,6 +6960,38 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 aimed = None
         return session_module.TouchRules(front if isinstance(front, session_module.Front) else None, element,
                                          name == "swipe" and _flick_up(args or {}), aimed)
+
+    def _meant_app(self, view) -> "tuple[str, str] | None":
+        """(2.0.3 round R, phone R-F1) The app an agent's touch is meant for, (name, bundle id): the one its last answer
+        showed it, as rule B checks the touch against it (`view.seen_front`, recorded by every read's answer and by
+        `open_app` and `open_url`, `look: false` too); SpringBoard for the home screen. Before, the newest READ's app:
+        after `open_app` with `look: false` that was the app before, and a touch near the top that went rightly to the
+        opened app was taken for a theft and the app before opened again. With nothing recorded (a runner older than
+        route version 11) or an unknown state: the newest read's app only when the agent's last answer was that read (no
+        action without a look since, no open_app); else None, no comparison: missing a theft is safer than reopening an
+        app the agent left on purpose."""
+        s = self.session
+        front = getattr(view, "seen_front", None)
+        if isinstance(front, session_module.Front):
+            if front.kind in (session_module.FRONT_APP, session_module.FRONT_OVER) and front.app:
+                return self._app_named(front.app), front.app
+            if front.kind == session_module.FRONT_HOME:
+                return self._app_named(SPRINGBOARD), SPRINGBOARD
+        if getattr(view, "opened", False) or getattr(view, "unlooked", 0):
+            return None
+        read_app = getattr(s, "read_app", None)
+        return read_app if isinstance(read_app, tuple) else (s.app if isinstance(s.app, tuple) else None)
+
+    def _app_named(self, bundle: str) -> str:
+        """The name a note prints for an app: the installed apps' name for it, else a read's, else its bundle id."""
+        s = self.session
+        named = (getattr(s, "app_names", None) or {}).get(bundle)
+        if named:
+            return named
+        for known in (getattr(s, "read_app", None), getattr(s, "app", None)):
+            if isinstance(known, tuple) and known[1] == bundle and known[0]:
+                return known[0]
+        return "Home screen" if bundle == SPRINGBOARD else bundle
 
     async def _front_state_now(self) -> "session_module.Front | None":
         """Session.front_state, None without one (a fake, or a runner that answered a version below 11). (Not
