@@ -4933,7 +4933,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 # (round S2: until a read of this agent's answers again; round T, review RS-L1: set before the front is
                 # recorded, which may raise)
                 view.left_by_call = True
-                await self._record_front(view)  # (review RP M4: where it went, as the agent's, `look: false` too)
+                # (CodeRabbit, PR #30) after open_app, the app it opened must be the one in front as the record is
+                # made (another agent's queued call may have brought another forward since): else unknown
+                opened = view.aimed_app[1] if name == "open_app" and isinstance(view.aimed_app, tuple) else None
+                await self._record_front(view, opened)  # (review RP M4: where it went, as the agent's, `look: false` too)
         except Unanswered as e:
             # the line is alive and the session stays; the screen may or may not have changed under the agent's list
             view.moved = True

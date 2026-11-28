@@ -298,3 +298,47 @@ def test_an_expects_picture_check_of_another_app_credits_no_app():
         assert s.sent == [("tap", (200, 300))]
         await finish(stop, task)
     run(go)
+
+
+# ---- 4727955280: open_app's record of the front is the app it opened, or unknown ----
+
+def test_open_app_records_unknown_when_another_app_came_forward_before_its_record():
+    from test_daemon import make, started
+    from test_touch_other_app_203 import CHAT, SHOP
+
+    async def go():
+        s = unread()
+        s.app_names.update({SHOP[1]: SHOP[0], CHAT[1]: CHAT[0]})
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        real = d.control.agent
+
+        async def agent(act):
+            result = await real(act)
+            s.app, s.front, s.in_front = SHOP, (SHOP[1], 7), [SHOP[1]]  # (another agent's queued call, in between)
+            return result
+        d.control.agent = agent
+        await d.run_tool("a", "open_app", {"app": CHAT[1], "look": False})
+        assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_UNKNOWN)
+        d.control.agent = real
+        e = await refused(d, "tap", {"target": {"x": 200, "y": 400}, "look": False})
+        assert e.code == "not_actionable" and str(e) == session_module.UNSEEN_FRONT
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_app_records_the_app_it_opened():
+    from test_daemon import make, started
+    from test_touch_other_app_203 import CHAT, SHOP
+
+    async def go():
+        s = unread()
+        s.app_names.update({SHOP[1]: SHOP[0], CHAT[1]: CHAT[0]})
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "open_app", {"app": CHAT[1], "look": False})
+        assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_APP, CHAT[1])
+        await finish(stop, task)
+    run(go)
