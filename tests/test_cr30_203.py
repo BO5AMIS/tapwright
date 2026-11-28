@@ -486,3 +486,36 @@ def test_the_wait_for_an_element_touchs_change_counts_from_the_touch_not_the_cal
         assert deadlines[0] >= ended[0] + 0.5 - 0.05
         await finish(stop, task)
     run(go)
+
+
+# ---- review body, device.py:1218: a lookup with no result is a failure, never an empty app list ----
+
+def test_a_lookup_with_no_result_raises_and_an_empty_one_is_no_apps(monkeypatch):
+    import sys
+    import types
+
+    from tapwright import device as device_module
+
+    answers: list = [None]
+
+    class Proxy:
+        def __init__(self, lockdown=None):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def lookup(self, options):
+            return answers[0]
+    fake = types.ModuleType("pymobiledevice3.services.installation_proxy")
+    fake.InstallationProxyService = Proxy
+    monkeypatch.setitem(sys.modules, "pymobiledevice3.services.installation_proxy", fake)
+    d = device_module.Device.__new__(device_module.Device)
+    d.rsd = "tunnel"
+    with pytest.raises(DeviceError):
+        asyncio.run(d.user_apps())
+    answers[0] = {}
+    assert asyncio.run(d.user_apps()) == []

@@ -1215,7 +1215,9 @@ class Device:
             # look the loop was held 15.6 s on, phone 2026-11-26). An older pymobiledevice3 without `lookup` asks for all
             lookup = getattr(proxy, "lookup", None)
             apps = (await lookup({"ApplicationType": "User", "ReturnAttributes": list(APP_ATTRIBUTES)}) if lookup
-                    else await proxy.get_apps(application_type="User")) or {}
+                    else await proxy.get_apps(application_type="User"))
+        if apps is None:  # (CodeRabbit, PR #30) no LookupResult in the answer: a failed lookup, never "no apps"
+            raise DeviceError("the phone's app list came back without its result; try again")
         return sorted(({"bundle_id": bid, "name": info.get("CFBundleDisplayName") or info.get("CFBundleName", ""),
                         "version": info.get("CFBundleShortVersionString", ""),
                         "build": info.get("CFBundleVersion", ""),
