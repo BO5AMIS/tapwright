@@ -441,10 +441,10 @@ def test_the_status_names_the_runner_and_what_an_older_one_costs(version, noted)
     assert ("runner_note" in status) is noted
 
 
-def test_the_default_runner_is_16_and_its_checksum_place_is_marked():
+def test_the_default_runner_is_16_with_its_releases_checksum():
     from tapwright import store
     assert store.WDA_SOURCES["fork"][1] == "tw-16.15.3.16" and store.WDA_DEFAULT == "fork"
-    assert store.WDA_SOURCES["fork"][2] == store.WDA_16_SHA256
+    assert store.WDA_SOURCES["fork"][2] == store.WDA_16_SHA256 == store.WDA_SHA256 == "5e07ab73467a2528ada101dae27fc4c23c9fa6ac01673d8cbfed372834307347"
 
 
 @pytest.mark.parametrize("build,noted", [("fork-tw-16.15.3.15", True), ("fork-tw-16.15.3.16", False)])

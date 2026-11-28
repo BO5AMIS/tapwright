@@ -50,10 +50,9 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # tw-16.15.3.16 (tw version 16, 2.0.3): the hit test's point lookup (and the front route's, when several apps are active)
 # runs inside XCTest's accessibility timeout (0.3 s) instead of a request with none, which an app that doesn't answer
 # held for minutes; its "no element answered" says the phone's own time and the way it asked ("(hit 304 ms, client)"),
-# `how=daemon` asks the old way.
-# LEAD: the SHA-256 below is a placeholder until CI has built the tw-16.15.3.16 release: put the release's
-# WebDriverAgentRunner-Runner.zip checksum in its place (a download is refused until then: it can't match).
-WDA_16_SHA256 = "LEAD-FILLS-IN-the-SHA-256-of-tw-16.15.3.16-WebDriverAgentRunner-Runner.zip"
+# `how=daemon` asks the old way. (Review RN) Also the fast tap's `apps` check; "hit" is the lookup's own time and "all"
+# the whole. The SHA-256 of the release's WebDriverAgentRunner-Runner.zip (1,215,887 bytes; tag at c9dd3486, built by CI)
+WDA_16_SHA256 = "5e07ab73467a2528ada101dae27fc4c23c9fa6ac01673d8cbfed372834307347"
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
