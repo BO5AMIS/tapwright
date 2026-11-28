@@ -419,36 +419,27 @@ def test_16_the_hold_is_not_assumed_away_the_front_route_waits_for_the_clock(sca
     run(go)
 
 
-# ---- Part 3: doctor and the status say when the runner is older than 16 ----
+# ---- (round Q) runner 15 again: neither doctor nor the status says anything of an "older" runner ----
 
-def test_the_runner_note_is_for_the_forks_runner_older_than_16_only():
-    assert session_module.build_version("fork-tw-16.15.3.15") == 15
-    assert session_module.build_version("fork-tw-16.15.3.16") == 16
-    assert session_module.build_version("16.15.3") == 0 and session_module.build_version(None) == 0
-    note = session_module.runner_note(15)
-    assert note.startswith("the phone's runner is route version 15, older than 16")
-    assert "unreadable until it is closed" in note and "tapwright doctor --fix" in note
-    assert session_module.runner_note(16) is None and session_module.runner_note(0) is None
-
-
-@pytest.mark.parametrize("version,noted", [(15, True), (16, False), (0, False)])
-def test_the_status_names_the_runner_and_what_an_older_one_costs(version, noted):
+@pytest.mark.parametrize("version", [15, 0])
+def test_the_status_names_the_runners_version_and_no_note(version):
     from test_daemon import make
     d = make()
     d.session.tw_version = version
     status = d.status()
-    assert status.get("runner") == (version or None)
-    assert ("runner_note" in status) is noted
+    assert status.get("runner") == (version or None) and "runner_note" not in status
+    assert not hasattr(session_module, "runner_note") and not hasattr(session_module, "RUNNER_OLD")
 
 
-def test_the_default_runner_is_16_with_its_releases_checksum():
+def test_the_default_runner_is_15_again():
     from tapwright import store
-    assert store.WDA_SOURCES["fork"][1] == "tw-16.15.3.16" and store.WDA_DEFAULT == "fork"
-    assert store.WDA_SOURCES["fork"][2] == store.WDA_16_SHA256 == store.WDA_SHA256 == "5e07ab73467a2528ada101dae27fc4c23c9fa6ac01673d8cbfed372834307347"
+    assert store.WDA_SOURCES["fork"] == ("bo5amis/WebDriverAgent", "tw-16.15.3.15",
+                                         "bcbc21c4b87b931bcc1de1641527f2a57b0b377e1fcdac4a82d0e969eb1e1665",
+                                         "fork-tw-16.15.3.15")
+    assert store.WDA_DEFAULT == "fork" and not hasattr(store, "WDA_16_SHA256")
 
 
-@pytest.mark.parametrize("build,noted", [("fork-tw-16.15.3.15", True), ("fork-tw-16.15.3.16", False)])
-def test_doctor_says_when_the_installed_runner_is_older_than_16(monkeypatch, capsys, tmp_path, build, noted):
+def test_doctor_says_nothing_of_an_older_runner_on_runner_15(monkeypatch, capsys, tmp_path):
     from types import SimpleNamespace
 
     from pymobiledevice3 import usbmux
@@ -469,12 +460,12 @@ def test_doctor_says_when_the_installed_runner_is_older_than_16(monkeypatch, cap
     monkeypatch.setattr(signing, "PROFILE_FILE", tmp_path / "none.mobileprovision")
     monkeypatch.setattr(repair, "profile_expiry", lambda: None)
     monkeypatch.setattr(repair, "certificate_expiry", lambda: None)
-    monkeypatch.setattr(store, "load_state", lambda: {"runner_id": "r", "udid": "u", "wda_build": build,
+    monkeypatch.setattr(store, "load_state", lambda: {"runner_id": "r", "udid": "u", "wda_build": "fork-tw-16.15.3.15",
                                                       "pairing_port": 1})
     asyncio.run(cli.doctor(SimpleNamespace(fix=False, unattended=False)))
     out = capsys.readouterr().out
-    assert ("The phone's runner is route version 15, older than 16" in out) is noted
-    assert ("tapwright doctor --fix" in out) is noted or "doctor --fix repairs" in out
+    assert "WebDriverAgent set up for u" in out
+    assert "older than 16" not in out and "route version" not in out
 
 
 # ---- Part 4: another app's sheet over the screen (N-F5) ----

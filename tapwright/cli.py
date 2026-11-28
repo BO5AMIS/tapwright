@@ -617,10 +617,6 @@ async def doctor(a) -> int:
     state = store.load_state()
     if state.get("runner_id"):
         ok(f"WebDriverAgent set up for {state.get('phone') or state.get('udid')}")
-        from .session import build_version, runner_note
-        older = runner_note(build_version(state.get("wda_build")))
-        if older:  # (2.0.3 round N) what a runner older than 16 costs, and how to update it
-            note(older[0].upper() + older[1:])
     elif a.fix:
         note("WebDriverAgent isn't recorded as installed; checking the phone below")
     else:

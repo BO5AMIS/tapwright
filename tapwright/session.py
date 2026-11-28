@@ -749,22 +749,6 @@ HELD_FRONT_WAIT, HELD_ASK_WAIT = 3.0, 0.45
 # the link's delay no longer counts. Runner 15, a refusal with no time, or one asked the daemon's way: the daemon's own
 # clock and the rules of rounds K-M
 HIT_PHONE_SLOW, PHONE_TIME_VERSION = 0.25, 16
-RUNNER_OLD = ("the phone's runner is route version {version}, older than 16: the top of a busy app is checked the slow "
-              "way (a question more, judged by this computer's clock), and an app that stops answering can make the "
-              "phone unreadable until it is closed. To update it: plug the phone in, stop the service (tapwright serve "
-              "--stop), then run tapwright doctor --fix (or tapwright setup --force).")
-
-
-def runner_note(version: int) -> str | None:
-    """(round N) What doctor and the status say of the fork's runner older than PHONE_TIME_VERSION (None: 16 or later,
-    or not the fork's runner: nothing to compare)."""
-    return RUNNER_OLD.format(version=version) if 0 < version < PHONE_TIME_VERSION else None
-
-
-def build_version(build: str | None) -> int:
-    """The route version of a recorded runner build ("fork-tw-16.15.3.15" -> 15); 0 for Appium's, or none recorded."""
-    found = re.fullmatch(r"fork-tw-\d+\.\d+\.\d+\.(\d+)", build or "")
-    return int(found.group(1)) if found else 0
 # (round O, review RN-M1) runner 16 after c9dd3486 says the lookup's own time, then the whole (the AX timeout's lock,
 # install and restore): "(hit 12 ms, all 272 ms, client, ...)". The verdict is the lookup's own time; "all" and the
 # error's name go to the trace. A refusal of 4392284f's build (no "all") is read as round N read it
@@ -833,6 +817,9 @@ class RunnerHeld(AppNotAnswering):
             self.args = ("the app in front isn't answering, so nothing on the phone can be read",)
 
 
+# (2.0.3 round Q) No shipped runner answers this way: tw-16.15.3.16 (not shipped) answered "daemon" every time on iOS
+# 26.5 (its client lookup raised), so phone_time is None for every refusal 2.0.3 meets and runner 15's rules decide.
+# Kept, unchanged, for the runner of 2.0.4.
 def phone_time(said: str, version: int) -> float | None:
     """(round N) The phone's own time of a "no element answered", in seconds, from runner 16's words ("(hit 304 ms,
     client...)"); None from an older runner, words with no time, or a lookup asked the daemon's way (runner 15's rules
@@ -2242,6 +2229,8 @@ class Session:
                 if point[1] < HIT_NOTHING_ABOVE:  # (review RH L5: the portrait panel's top edge)
                     return BANNER_CLEAR  # (the screen's top edge: a banner there would have answered)
                 if value is not None:
+                    # (round Q) No shipped runner answers this way: tw-16.15.3.16 (not shipped) answered `daemon` every
+                    # time on iOS 26.5 (Q-F1), so `value` is None here with every runner 2.0.3 uses. Kept for 2.0.4's.
                     # (round N) runner 16 timed its own lookup: the phone's time says it. Fast: nothing is there right
                     # now (a banner in motion). Slow with SpringBoard's status bar answering at the clock: the app didn't
                     # answer where SpringBoard would have: clear by the hands with no confirm and no promptness asked of

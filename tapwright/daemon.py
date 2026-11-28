@@ -1724,12 +1724,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 **self._runner_status()}
 
     def _runner_status(self) -> dict:
-        """(2.0.3 round N) The phone's runner's route version once it answered, and what an older one than 16 costs."""
+        """(2.0.3 round N) The phone's runner's route version once it answered."""
         version = getattr(self.session, "tw_version", 0)
         if not isinstance(version, int) or isinstance(version, bool) or version <= 0:
             return {}
-        note = session_module.runner_note(version)
-        return {"runner": version, **({"runner_note": note} if note else {})}
+        return {"runner": version}
 
     def subscribe(self) -> asyncio.Queue:
         self._asked_for()
