@@ -297,9 +297,9 @@
   agent's list in the top 200 pt is refused `covered` when the hit test finds another app's sheet over the whole screen
   there, as a point is; an element of a list read with the system over the app (an alert's button, a Control Center
   tile) is refused `stale` once the app is alone in front again (its place is the app's now); a fast touch the runner
-  refuses before playing it is checked again before it is played another way. `open_app`'s record of what is in front is
-  the app it opened: when another app came forward before the record (another agent's call), the next touch is refused
-  `unknown_front`; a front record whose read fails leaves none (`no_look`), never the app before. A `run` step's
+  refuses before playing it is checked again before it is played another way. `open_app` and `open_url` read what is in
+  front inside their own action, right after the open, so another agent's call can't come in before the record;
+  `open_app` records it only when it is the app it opened, else the next touch is refused `unknown_front`; a front record whose read fails leaves none (`no_look`), never the app before. A `run` step's
   `expect` credits the app whose read found its text, id or label (a picture check read in another app makes it
   unknown), and an `open_url` step's link `expect` records its app as other steps' do (its next touch was refused
   `stale`). `type_text` without a target reads its field with a real normal-budget read (it could get the short budget,
