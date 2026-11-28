@@ -11,6 +11,7 @@ RS-M2: the failed pictures of the last LONG_PICS screens are kept, so two cut sc
 long read at every switch.
 RS-M3: only a slow "no element answered" after a silent front route is the held state.
 RS-L1: left_by_call is set on the held open_app path and when recording the front fails.
+RS-L3: type_text's own read (no long budget), cut on a readable app, doesn't give the app the short budget.
 RS-L4: "invalid session" (a restarted runner) is not taken for a hold."""
 import asyncio
 import time
@@ -18,13 +19,16 @@ import time
 import pytest
 from test_banner_hit_203 import _looked
 from test_daemon import finish
+from test_long_block_screen_203 import _on, _shop
 from test_round_k_203 import WITNESS, _phone_session, scaled  # noqa: F401 (fixture)
-from test_round_n_203 import POINT, HeldSession
+from test_round_n_203 import POINT, HeldSession, _held
+from test_round_r_203 import OpeningSession
 from test_round_s2_203 import _StalledFront
+from test_slow_readable_203 import CUT, WHOLE, ShopRunner, Stream, look, state  # noqa: F401 (fixture)
 from test_touch_other_app_203 import CHAT, SHOP, _real, refused, run
 
 from tapwright import session as session_module
-from tapwright.device import ConnectionLost
+from tapwright.device import ConnectionLost, DeviceError
 
 HELD_WORDS = ("Shop (com.example.shop) is in front and isn't answering, so nothing on the phone can be read. close_app "
               "can still close it; then open_app it again.")
@@ -199,6 +203,7 @@ def test_rs_h2_open_app_after_a_carried_hold_is_given_up_goes_by_ioss_process_co
         r = await d.run_tool("a", "open_app", {"app": "com.example.chat"})
         assert s.launched == [(CHAT[1], None)] and r["text"].startswith("Opened")
         assert d.state == "live" and d.stuck is None
+        assert d.control.client("a").left_by_call  # (RS-L1: the held path's open is the agent's leaving too)
         await finish(stop, task)
     run(go)
 
@@ -312,3 +317,79 @@ def test_rs_m3_only_a_slow_nothing_at_the_clock_after_a_silent_front_route_is_th
             assert not isinstance(e.value, session_module.RunnerHeld) and getattr(s, "runner_held", None) is None
         assert [p for _, p in s.device.asked].count(session_module.HIT_PATH) == 1
     asyncio.run(go())
+
+
+class _RestartedFront(type(_phone_session(0.0).device)):
+    """The front route answered "invalid session": WebDriverAgent restarted."""
+
+    async def http(self, method, path, payload=None, timeout=30.0):
+        if path.split("?")[0] == session_module.FRONT_PATH:
+            self.asked.append((time.monotonic(), session_module.FRONT_PATH))
+            raise DeviceError("invalid session id: Session does not exist")
+        return await super().http(method, path, payload, timeout)
+
+
+def test_rs_l4_invalid_session_on_the_front_route_is_a_restarted_runner_not_a_hold():
+    async def go():
+        s = _phone_session(free_at=time.monotonic() + 60.0)  # (the clock would say a slow "nothing")
+        s.device.__class__ = _RestartedFront
+        s.device.nothing_takes = 0.3
+        with pytest.raises(ConnectionLost) as e:
+            await s.front_app()
+        assert not isinstance(e.value, session_module.RunnerHeld) and getattr(s, "runner_held", None) is None
+        assert session_module.HIT_PATH not in [p for _, p in s.device.asked]  # (no clock question)
+        assert s.sid is None  # (the session is gone: the next call starts one)
+    asyncio.run(go())
+
+
+# ---- RS-L1: left_by_call ----
+
+def test_rs_l1_open_app_whose_front_record_fails_still_counts_as_leaving():
+    async def go():
+        s = OpeningSession()
+        d, stop, task = await _looked(s)
+        view = d.control.client("a")
+
+        async def fails(view, read_bundle=None):
+            raise RuntimeError("the front couldn't be recorded")
+        d._record_front = fails
+        with pytest.raises(Exception):
+            await d.run_tool("a", "open_app", {"app": CHAT[1], "look": False})
+        assert view.left_by_call is True
+        await finish(stop, task)
+    run(go)
+
+
+def test_rs_l1_open_app_while_the_runner_is_held_counts_as_leaving(scaled):
+    async def go():
+        s = HeldSession(hold_for=9.0)
+        s.frees_on_launch = {CHAT[1]}
+        d, stop, task = await _held(s)
+        view = d.control.client("a")
+        assert view.left_by_call is False
+        await d.run_tool("a", "open_app", {"app": "com.example.chat"})
+        assert view.left_by_call is True
+        await finish(stop, task)
+    run(go)
+
+
+# ---- RS-L3: type_text's own read and the budget memory ----
+
+def test_rs_l3_type_texts_own_cut_read_leaves_a_readable_apps_budget_memory_alone(state):
+    async def go():
+        stream = Stream()
+        s, runner = _shop(stream, ShopRunner(stream, answers={3000: CUT, 8000: WHOLE}))
+        _on(stream, b"home")
+        await look(s, stream)  # (the home reads whole with the long budget: readable)
+        s.budgets._cut.pop(SHOP[1], None)  # (the memory of its cut normal read has run out)
+        assert s.budgets.slow(SHOP[1]) and not s.budgets.short(SHOP[1])
+        runner.answers = {3000: CUT}
+        _on(stream, b"search, keyboard up")
+        stream.now[0] += 20.0
+        token = session_module.NO_LONG.set(True)
+        try:
+            await look(s, stream)  # (type_text's read for its field: the normal budget, cut)
+        finally:
+            session_module.NO_LONG.reset(token)
+        assert runner.budgets()[-1] == 3000 and SHOP[1] not in s.budgets._cut and not s.budgets.short(SHOP[1])
+    run(go)

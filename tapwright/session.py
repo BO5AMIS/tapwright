@@ -547,13 +547,15 @@ class ReadBudget:
         return self.budget(bundle) < self.normal_ms
 
     def answered(self, bundle: str | None, truncated: bool, budget_ms: int, took_ms: float | None = None,
-                 sent_for: str | None = None, partial: bool = False, busy: bool = False) -> None:
+                 sent_for: str | None = None, partial: bool = False, busy: bool = False, own_use: bool = False) -> None:
         """A read of `bundle` with `budget_ms` came back truncated or full, after `took_ms` (None: not timed). `sent_for`:
         the app a long read was sent for; an answer naming another app is no long read of either (long_elsewhere).
         `partial` (round G): a truncated answer above the root, with elements (shallow): for a long read, no miss.
         `busy` (round S, S-F1): cut while the app was busy (BUSY_WHY): a long read so is no miss in the app's row (its
         count goes back to what it was); the block of the screen it was made on holds as for any cut long read, and
-        (round T, review RS-M1) doubles as for any (its backoff counts it)."""
+        (round T, review RS-M1) doubles as for any (its backoff counts it). `own_use` (round T, review RS-L3): a read for
+        an action's own use with no long budget (NO_LONG: type_text's field): cut, it leaves a readable app's budget
+        memory alone (the short budget would answer a later read with less time "0 elements")."""
         held, self._by_still = self._by_still, None
         # (review K, question 4) a read that raised never came here: what its stillness gave is not the next read's
         by_still = held[0] if held is not None and self.clock() - held[1] < BY_STILL_FOR else None
@@ -602,7 +604,7 @@ class ReadBudget:
             if took_ms is None or took_ms >= self.short_ms:
                 self._cut.pop(bundle, None)
                 self._still_cut.pop(bundle, None)
-        elif budget_ms >= self.normal_ms:
+        elif budget_ms >= self.normal_ms and not (own_use and bundle in self._readable):
             self._cut[bundle] = self.clock()
             if by_still == bundle:
                 self._still_cut[bundle] = self.clock()  # its still screen didn't answer either
@@ -1694,7 +1696,9 @@ class Session:
             answer = await self._call("GET", FRONT_PATH, timeout=FRONT_WAIT)
         except AppNotAnswering:
             raise
-        except ConnectionLost:
+        except ConnectionLost as e:
+            if "didn't answer" not in str(e):
+                raise  # (round T, review RS-L4: "invalid session" is a restarted runner, no hold; a refused line neither)
             # (round S, S-F2) no answer to the front route: before it is taken for a dropped line, the clock once, in
             # the same session (_call let it go: a new one would be asked of the held runner too, 30 s). The runner
             # answering it "no element answered" is the app holding accessibility (the practice: a look's front route
@@ -1703,8 +1707,10 @@ class Session:
             dropped, self.sid = self.sid, sid
             if sid is not None and await self._runner_answers_held():
                 held = self.runner_held = await self._given_up()
+                self._hold_carried = False
                 raise RunnerHeld(held.bundle_id, held.name) from None
-            self.sid = dropped
+            if self.sid == sid:  # (review RS-L4: not over a session another task set meanwhile)
+                self.sid = dropped
             raise
         except DeviceError as e:
             getattr(self.device, "log", lambda *a: None)(f"the runner couldn't say which app is in front ({e})")
@@ -1819,7 +1825,8 @@ class Session:
                         f"\"{BUSY_WHY}\"): not counted in its row")
                 self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_asked or budget_ms,
                                       took_ms, sent_for=budget_for if long else None,
-                                      partial=tier == "shallow" and _has_elements(source), busy=long and busy)
+                                      partial=tier == "shallow" and _has_elements(source), busy=long and busy,
+                                      own_use=NO_LONG.get())
             if tier != "full":
                 getattr(self.device, "log", lambda *a: None)(
                     f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")

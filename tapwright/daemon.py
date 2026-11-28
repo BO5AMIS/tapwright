@@ -4924,8 +4924,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             result = await self.control.agent(act_as_agent)
             if name in ("open_app", "open_url") and not dry:
+                # (round S2: until a read of this agent's answers again; round T, review RS-L1: set before the front is
+                # recorded, which may raise)
+                view.left_by_call = True
                 await self._record_front(view)  # (review RP M4: where it went, as the agent's, `look: false` too)
-                view.left_by_call = True  # (round S2: until a read of this agent's answers again)
         except Unanswered as e:
             # the line is alive and the session stays; the screen may or may not have changed under the agent's list
             view.moved = True
@@ -6343,6 +6345,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if self._closed_on_purpose is not None and self._closed_on_purpose[0] == bundle_id:
             self._closed_on_purpose = None  # it runs again: its stopping would be news
         view.opened = True
+        view.left_by_call = True  # (round T, review RS-L1: open_app while the runner was held too, _open_held)
         view.auto = autoroute.Chain(bundle_id)  # (1.9.0, §30) the way from the app's start begins at what it shows now
         view.auto_begun.add(bundle_id)
         # (1.7.8, X item 4) nothing aimed at or typed into before belongs to the app that is opened: typing without a
