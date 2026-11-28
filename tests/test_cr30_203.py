@@ -628,3 +628,38 @@ def test_the_fakes_back_read_follows_the_tree_and_keeps_a_tests_own_items():
         await s.back_point()
         assert s.front_items is own
     asyncio.run(go())
+
+
+# ---- 4728219252 (cycle 2): a frame that left the hub's history is judged by its monotonic arrival ----
+
+def test_a_frame_of_an_unlock_stays_private_after_the_wall_clock_stepped_back_a_little():
+    from fakes import DescribingSession
+    from test_daemon import make
+
+    from tapwright import center_tool
+
+    async def go():
+        d = make(DescribingSession())
+        mono, wall = [1000.0], [5_000_000.0]
+        d.hub._mono, d.hub._clock = (lambda: mono[0]), (lambda: wall[0])
+        span = d._unlock_begin()
+        during = d.hub.publish(b"\xff\xd8keys")  # (a picture of the passcode keys, at monotonic 1000)
+        mono[0] += 0.01
+        for _ in range(80):  # (it drops out of the hub's kept history before the unlock ends)
+            d.hub.publish(b"\xff\xd8more")
+        mono[0], wall[0] = mono[0] + 3.0, wall[0] + 3.0
+        d._unlock_end(span)
+        mono[0], wall[0] = mono[0] + 30.0, wall[0] + 30.0
+        wall[0] -= 20.0  # (the wall clock stepped back 20 s: the stamp's age reads 10 s short, still positive)
+        assert d.hub.arrival_of(during.seq) is None and d.hub.now_ms() - during.at > 0
+        assert d.frame_private(during)
+        # a frame that came well after the unlock, out of the history too, still reaches an agent
+        after = d.hub.publish(b"\xff\xd8home")
+        mono[0] += 0.01
+        for _ in range(80):
+            d.hub.publish(b"\xff\xd8later")
+        mono[0] += 5.0
+        wall[0] -= 20.0
+        assert d.hub.arrival_of(after.seq) is None
+        assert center_tool.CENTER_HIDE_AFTER_S < 30.0 and not d.frame_private(after)
+    asyncio.run(go())

@@ -229,6 +229,9 @@ class FrameHub:
         self._seq += 1
         self.latest = make(self._seq, self.now_ms() - round(ago * 1000))
         arrived = self._mono() - ago
+        # (CodeRabbit, PR #30 cycle 2) the frame keeps its monotonic arrival: after it leaves the kept history, when it
+        # came is still known without the wall clock (a step back made a frame of an unlock look old enough to show)
+        object.__setattr__(self.latest, "arrived", arrived)  # (Frame is frozen; not a field: equality is unchanged)
         self._arrivals.append(arrived)
         self._recent.append((arrived, self.latest))
         self._new.set()

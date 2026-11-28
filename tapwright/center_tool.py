@@ -162,11 +162,16 @@ class CenterTools:
             return True
         arrived = self.hub.arrival_of(frame.seq)
         if arrived is None:
+            kept = getattr(frame, "arrived", None)  # (CodeRabbit, PR #30 cycle 2: the hub's own monotonic arrival)
+            if isinstance(kept, (int, float)) and not isinstance(kept, bool):
+                arrived = float(kept)
+        if arrived is None:
             # (2.0.3 round N, phone 2026-11-28) the hub keeps the arrivals of its last HISTORY frames only: the frame of
             # a read that took 10 s has dropped out of them. Its own stamp (`at`, epoch ms on the hub's clock) says
             # about when it came: private when an unlock ran since UNLOCK_ARRIVAL_SLACK before that. Before, any unlock
             # span still kept (an hour) made every such frame private: "the phone is being unlocked" half an hour after
-            # the only unlock. A frame with no stamp: fail-closed, as before
+            # the only unlock. A frame with no stamp: fail-closed, as before. (Every frame the hub made carries its
+            # monotonic arrival, above: this is only for a frame that doesn't)
             at = getattr(frame, "at", None)
             if not isinstance(at, (int, float)) or isinstance(at, bool):
                 return bool(self.__dict__.get("_unlock_spans"))
