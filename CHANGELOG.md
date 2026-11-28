@@ -9,7 +9,7 @@
   the connection kept (the next entry). A fix in the runner was tried and isn't shipped (runner 16: on iOS 26.5 Apple's
   own client lookup raises on every call, and the accessibility timeout doesn't bound the request); it is planned
   another way for 2.0.4. 2.0.3 stays on runner 15 (`tw-16.15.3.15`).
-  Measured on a phone: (the lead fills this in).
+  Measured on a phone (iPhone 14 Pro Max, iOS 26.5, runner 15, 2026-11-28): a shopping app 1.5 s after a fresh open held for about 4 s, waited out, then tapped, the connection kept; a video app's feed, eight touches at its top over 20 s after a fresh open: the first 3.9 s, then 0.5 to 1.2 s, its list read whole after them in 0.6 s; a timer's banner over a system app, the home screen and the shopping app: refused `covered` after about 8 s, a flick sent it away; on runner 16 one point question held the shopping app's channel 3.4 to 4.6 s whatever the accessibility timeout (0.3 s or 3 s).
 - A runner held by an app no longer costs the connection. On a video feed opened a second time, the runner stayed held
   after a touch for more than 80 s; the wait for it gave up after 12 s, its next question went into the held runner,
   was taken for a lost connection, and a reconnect and a new session followed: the tool call took 82 s. Now, when the
