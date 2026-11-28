@@ -2783,7 +2783,8 @@ class Session:
                 front = fresh[1]
                 seen = rules.seen
                 if (isinstance(front, Front) and isinstance(seen, Front)
-                        and (front.kind == FRONT_APP and seen.kind in (FRONT_APP, FRONT_OVER) and seen.app == front.app
+                        and (front.kind == FRONT_APP and seen.app == front.app
+                             and (seen.kind == FRONT_APP or seen.kind == FRONT_OVER and not rules.element)
                              or front.kind == FRONT_HOME and seen.kind == FRONT_HOME)):
                     trace.note("gate_fresh", {"at": [round(at[0]), round(at[1])]})
                     if front.kind == FRONT_APP:
@@ -2827,6 +2828,11 @@ class Session:
         while True:
             if now.kind == FRONT_APP:
                 if seen.kind in (FRONT_APP, FRONT_OVER) and seen.app == now.app:
+                    if seen.kind == FRONT_OVER and rules.element:
+                        # (CodeRabbit, PR #30) the element was of the list the agent read with the system over the
+                        # app (an alert's button, a Control Center tile): that has gone, and its place is the app's now
+                        raise Refused("stale", f"{self._words(now)} now, not {self._words(seen)} as your last look "
+                                               "showed. Nothing was touched; look again.")
                     if now.guessed and zone and not rules.element:
                         # (review RF H1) only the process list says so: a banner over the top can't be ruled out
                         raise Refused("not_actionable", COVERED_GUESS.format(app=self._words(now)))

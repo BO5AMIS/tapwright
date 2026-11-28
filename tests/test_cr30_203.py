@@ -40,3 +40,29 @@ def test_the_guides_send_a_sheet_to_a_new_look_and_say_which_runner_checks():
         assert "another app's sheet over the screen needs a new look" in text
         assert "route version 11 or later" in text
         assert "look again before aiming at a system sheet or alert that came up after your last look" in text
+
+
+# ---- 4727955295: an element of the system over the app, once the system has gone ----
+
+def test_an_element_of_the_system_over_the_app_is_stale_once_the_system_has_gone():
+    from test_daemon import make, started
+    from test_touch_other_app_203 import SHOP, banner_down
+
+    from tapwright import ui
+
+    async def go():
+        s = unread()
+        s.tree, s.tier = [button("e1", "Allow", rect=(100, 400, 200, 44))], "full"
+        banner_down(s)  # a permission prompt over the app: SpringBoard's, the app under it
+        s.last_alert = ui.Alert("Allow Shop to use your location?", ("Allow", "Don't Allow"), (40, 300, 320, 200))
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        s.front, s.in_front, s.last_alert = (SHOP[1], 7), [SHOP[1]], None  # the prompt went; Shop alone
+        e = await refused(d, "tap", {"target": {"label": "Allow"}, "look": False, "force": True})
+        assert e.code == "stale" and str(e).endswith("Nothing was touched; look again.")
+        assert s.sent == []
+        await d.run_tool("a", "tap", {"target": {"x": 200, "y": 600}, "look": False})  # a point on Shop alone: goes
+        assert s.sent == [("tap", (200, 600))]
+        await finish(stop, task)
+    run(go)
