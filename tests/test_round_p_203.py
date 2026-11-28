@@ -94,6 +94,22 @@ def test_ro_m1_the_late_check_judges_where_the_first_check_found_the_text_and_st
     run(go)
 
 
+def test_ro_m1_the_late_check_judges_the_first_checks_place_not_the_looks(monkeypatch):
+    # (CodeRabbit, PR #30) three places: the look's (85), the first check's (93, within O_REF_STILL of the look) and
+    # the one after the wait (77: 8 points from the look, 16 from the first check). Only a late check that judges
+    # against the first check's place refuses it
+    async def go():
+        s = ScrollSession()
+        d, stop, task = await _o_looked(s)
+        s.runner_text = [ocr.Seen("Search", (170.0, 83.0, 60.0, 20.0), 1.0)]  # (centre 200, 93)
+        _after_a_wait(d, monkeypatch, then=lambda: setattr(s, "runner_text", [
+            ocr.Seen("Search", (170.0, 67.0, 60.0, 20.0), 1.0)]))  # (centre 200, 77)
+        e = await refused(d, "scroll", {"target": {"ref": "o1"}, "direction": "down", "look": False})
+        assert e.code == "stale" and s.sent == []
+        await finish(stop, task)
+    run(go)
+
+
 def test_ro_m1_the_late_check_runs_once_an_action_a_scrolls_later_drags_dont_run_it():
     async def go():
         s = ScrollSession()

@@ -494,14 +494,20 @@ def test_the_reads_note_asks_nothing_after_a_read_cut_short(tier, source, asked)
 
 # ---- 15. never twice at one point ----
 
-@pytest.mark.parametrize("witness,point", [(status_bar(), nothing()), (nothing(), APP), (APP, nothing()),
-                                           (status_bar(), nothing(fast=True)), (Unanswered("x"), APP)])
-def test_never_a_second_question_at_one_point_within_a_call(witness, point):
+# (CodeRabbit, PR #30) the questions each row asks, in order: the point after a clock that lets it decide; the clock
+# alone when its answer ends the check (a "no element answered" there, a silence)
+ASKS_BOTH, ASKS_CLOCK = [WITNESS, (215.0, 80.0)], [WITNESS]
+
+
+@pytest.mark.parametrize("witness,point,asked", [
+    (status_bar(), nothing(), ASKS_BOTH), (nothing(), APP, ASKS_CLOCK), (APP, nothing(), ASKS_BOTH),
+    (status_bar(), nothing(fast=True), ASKS_BOTH), (Unanswered("x"), APP, ASKS_CLOCK)])
+def test_never_a_second_question_at_one_point_within_a_call(witness, point, asked):
     async def go():
         s = unread()
         answers(s, witness, point)
         await s.banner_at((215.0, 80.0), SHOP[1])
-        assert not asked_twice_at_one_point(s) and len(s.hit_questions) <= 2
+        assert not asked_twice_at_one_point(s) and s.hit_questions == asked
     run(go)
 
 

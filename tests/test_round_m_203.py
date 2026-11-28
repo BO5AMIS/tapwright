@@ -121,6 +121,7 @@ def test_rl_h1_the_front_question_after_the_hands_gate_never_goes_into_the_held_
                 first = not woke["done"]
                 woke["done"] = True
                 return (wake if first else 0.02), status_bar()
+            woke["target"] = True  # (CodeRabbit, PR #30: the touch's point was asked, and held the runner)
             dev.held_until = time.monotonic() + 0.31 + extra + 2.5
             return 0.31 + extra, NOTHING
         s = _session(script)
@@ -136,6 +137,7 @@ def test_rl_h1_the_front_question_after_the_hands_gate_never_goes_into_the_held_
                 pass
         except Refused:
             pass
+        assert woke.get("target") and s.device.held_until > 0.0  # (the point's question set a hold on the runner)
         assert s._held() or s.device.held_until <= time.monotonic()
         await s.front_app()  # (the agent's next look)
         assert not s.device.front_into_held

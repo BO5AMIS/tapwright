@@ -99,9 +99,10 @@ def test_rn_l2_giving_up_waits_for_ioss_list_once_and_asks_no_names(scaled, monk
 
     async def go():
         s = HeldSession(hold_for=9.0)
-        names_asked = []
+        names_asked, lists_asked = [], []
 
         async def slow_list():
+            lists_asked.append(1)  # (CodeRabbit, PR #30: counted on entry, before the sleep can be cancelled)
             await asyncio.sleep(5.0)
             return [SHOP[1]]
 
@@ -117,6 +118,7 @@ def test_rn_l2_giving_up_waits_for_ioss_list_once_and_asks_no_names(scaled, monk
             await s.front_app()
         assert time.monotonic() - began < session_module.HIT_HELD + 0.3 + 0.2
         assert names_asked == [] and e.value.bundle_id == SHOP[1]  # (the newest read names it)
+        assert lists_asked == [1]  # (iOS's list was asked, once)
     run(go)
 
 
@@ -162,12 +164,13 @@ def test_rn_m3_while_held_the_heartbeat_asks_the_clock_and_nothing_else(scaled):
         s = HeldSession(hold_for=9.0)
         d, stop, task = await _held(s)
         asks = list(s.runner_asks)
+        attempts = d._attempts  # (CodeRabbit, PR #30: before the heartbeat)
         d.heartbeat = 0.05
         d._lost.set()
         await asyncio.sleep(0.4)
         assert isinstance(d.stuck, session_module.RunnerHeld) and d.state == "not-answering"
         assert s.hit_questions and set(s.hit_questions) == {WITNESS} and s.runner_asks == asks
-        assert d._attempts == d._attempts  # (no reconnect: the supervisor stays out of the held state)
+        assert d._attempts == attempts  # (no reconnect: the supervisor stays out of the held state)
         await finish(stop, task)
     run(go)
 

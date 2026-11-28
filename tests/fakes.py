@@ -549,9 +549,11 @@ class FakeSession:
         return self.foreground
 
     async def back_point(self):
-        # (as Session.back_point: its read's own items, for `back`'s checks; a test that sets them keeps its own)
-        if getattr(self, "front_items", None) is None:
-            self.front_items = list(self.tree)
+        # (as Session.back_point: its read's own items, for `back`'s checks, read anew each time (CodeRabbit, PR #30);
+        # a test that sets them keeps its own)
+        current = getattr(self, "front_items", None)
+        if current is None or current is getattr(self, "_front_items_made", None):
+            self.front_items = self._front_items_made = list(self.tree)
         self.last_tier = self.tier
         if self.dismiss_at is not None:
             return ui.Back(False, None, self.dismiss_at)

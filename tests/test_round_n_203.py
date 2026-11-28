@@ -395,8 +395,11 @@ def test_16_hit_at_sets_the_hold_by_the_phones_time(ms, link, held):
         async def routes(strict=False):
             return None
         s._fast_routes = routes
-        with pytest.raises(Exception):
+        with pytest.raises(session_module.Refused) as e:
             await s.hit_at(215.0, 600.0)
+        # (CodeRabbit, PR #30) the strict refusal, made by the point's own question
+        assert e.value.hit_check["gate"] == "hit_request_failed"
+        assert [p for _, p in s.device.asked] == ["x=215.00&y=600.00"]
         assert s._held() is held
     run(go)
 

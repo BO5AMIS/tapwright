@@ -102,7 +102,7 @@ from tapwright.session import Refused, Session  # noqa: E402
 
 
 def _gated(runner, monkeypatch):
-    from test_session import FastRunner  # noqa: F401
+
     monkeypatch.setattr(session_module.store, "load_state", lambda: {"runner_id": "runner"})
     monkeypatch.setattr(session_module, "FAST_TAP", "1")
     monkeypatch.setattr(session_module, "FAST_DRAG", "1")
@@ -543,3 +543,24 @@ def test_open_app_whose_front_read_fails_leaves_no_record_of_the_app_before():
         assert d._meant_app(view) is None  # (no comparison: never Shop's, which the agent left)
         await finish(stop, task)
     run(go)
+
+
+# ---- review body, tests/fakes.py:553: the fake's back read takes the screen's items anew each time ----
+
+def test_the_fakes_back_read_follows_the_tree_and_keeps_a_tests_own_items():
+    from fakes import DescribingSession
+
+    async def go():
+        s = DescribingSession()
+        first, second = [button("e1", "Close", rect=(10, 60, 44, 44))], [button("e2", "Done", rect=(340, 60, 60, 44))]
+        s.tree = first
+        await s.back_point()
+        assert s.front_items == first
+        s.tree = second
+        await s.back_point()
+        assert s.front_items == second  # (the screen now, not the one before)
+        own = [button("e3", "Cancel", rect=(10, 60, 80, 44))]
+        s.front_items = own
+        await s.back_point()
+        assert s.front_items is own
+    asyncio.run(go())

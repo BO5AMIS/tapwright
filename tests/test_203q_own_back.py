@@ -52,7 +52,8 @@ def test_own_back_none_when_its_words_say_nothing_of_back():
 
 
 def test_own_back_none_when_two_qualify():
-    items = [_b("e3", "Back", "backA", rect=(10, 59, 40, 40)), _b("e4", "Back", "backB", rect=(60, 59, 40, 40))]
+    items = [_b("e3", "Back", "first_back_button", rect=(10, 59, 40, 40)),
+             _b("e4", "Back", "second_back_button", rect=(60, 59, 40, 40))]
     assert ui.own_back(items, UPRIGHT) is None
 
 
@@ -122,8 +123,8 @@ def test_back_with_two_candidates_swipes_as_before():
         d = make()
         stop, task = await started(d)
         d.session.screen = UPRIGHT
-        await looked(d, [button("e1", "Back", "backA", rect=(10, 59, 40, 40)),
-                         button("e2", "Back", "backB", rect=(60, 59, 40, 40))])
+        await looked(d, [button("e1", "Back", "first_back_button", rect=(10, 59, 40, 40)),
+                         button("e2", "Back", "second_back_button", rect=(60, 59, 40, 40))])
         r = await d.run_tool("a", "back", {})
         assert r["text"].startswith("Swiped from the left edge.") and d.session.tap_points == []
         await finish(stop, task)

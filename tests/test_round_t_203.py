@@ -24,7 +24,7 @@ from test_round_k_203 import WITNESS, _phone_session, scaled  # noqa: F401 (fixt
 from test_round_n_203 import POINT, HeldSession, _held
 from test_round_r_203 import OpeningSession
 from test_round_s2_203 import _StalledFront
-from test_slow_readable_203 import CUT, WHOLE, ShopRunner, Stream, look, state  # noqa: F401 (fixture)
+from test_slow_readable_203 import CUT, WHOLE, ShopRunner, Stream, budget, look, state  # noqa: F401 (fixture)
 from test_touch_other_app_203 import CHAT, SHOP, _real, refused, run
 
 from tapwright import session as session_module
@@ -213,7 +213,7 @@ def test_rs_h2_open_app_after_a_carried_hold_is_given_up_goes_by_ioss_process_co
 
 def test_rs_m1_a_busy_cut_long_read_keeps_doubling_its_screens_block():
     t = [0.0]
-    b = session_module.ReadBudget(clock=lambda: t[0])
+    b = budget(clock=lambda: t[0])
     spans = []
     for _ in range(6):
         b.long_sent("app.x")
@@ -232,7 +232,7 @@ def test_rs_m1_a_busy_cut_long_read_keeps_doubling_its_screens_block():
 
 def test_rs_m1_a_long_read_answered_by_another_app_doesnt_grow_the_block():
     t = [0.0]
-    b = session_module.ReadBudget(clock=lambda: t[0])
+    b = budget(clock=lambda: t[0])
     b.long_sent("app.x")
     b.answered("app.x", True, b.long_ms, 8000, sent_for="app.x", busy=True)
     span = b.block_span("app.x")
@@ -243,7 +243,7 @@ def test_rs_m1_a_long_read_answered_by_another_app_doesnt_grow_the_block():
 
 def test_rs_m2_two_cut_screens_of_a_readable_app_dont_each_pay_a_long_read_at_every_switch():
     t = [0.0]
-    b = session_module.ReadBudget(clock=lambda: t[0])
+    b = budget(clock=lambda: t[0])
     now = ["home"]
     b.other = lambda picture: picture != now[0]
     b.long_sent("app.x", "home")
@@ -274,7 +274,7 @@ def test_rs_m2_two_cut_screens_of_a_readable_app_dont_each_pay_a_long_read_at_ev
 
 def test_rs_m2_each_kept_screen_blocks_for_its_own_span():
     t = [0.0]
-    b = session_module.ReadBudget(clock=lambda: t[0])
+    b = budget(clock=lambda: t[0])
     now = ["a"]
     b.other = lambda picture: picture != now[0]
     span = session_module.LONG_MEMORY
