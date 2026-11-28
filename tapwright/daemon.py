@@ -8200,7 +8200,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         The target is tapped first by the session, which waits for the keyboard and for focus to arrive."""
         target = a.get("target")
         if target is None:
-            await self._silent_read(view)  # which inputs there are must be read now
+            # which inputs there are must be read now; (2.0.3 round S, S-F1) with the normal budget only: a long try
+            # here held the keys 8 s on a busy app, and a field that doesn't show in 3 s is typed into as focused
+            token = session_module.NO_LONG.set(True)
+            try:
+                await self._silent_read(view)
+            finally:
+                session_module.NO_LONG.reset(token)
             # the app this very read names (the session's own `app` is the last snapshot's, from before a switch:
             # CodeRabbit, PR #18); a read whose root names none falls back to it
             read_app = (self._read_root or (None, False))[0]

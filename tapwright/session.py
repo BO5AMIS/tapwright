@@ -219,6 +219,12 @@ LONG_NOTE = ("this screen took about {seconds:.1f} s to read, longer than the us
 # "took long" note goes into it, for that call's answer only (None: a read of no call, whose note is dropped). Held by
 # the call (CodeRabbit, PR #30): two calls that overlap can't take or overwrite each other's note
 READ_OWNER: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("tapwright_read_owner", default=None)
+# (2.0.3 round S, the practice S-F1) a read made for an action's own use right before its input (type_text's look for its
+# field): the normal budget only, no long try. One such read during type_text on a busy app cost the keys 8 s
+NO_LONG: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_no_long", default=False)
+# (round S, S-F1) the words of a tree read cut while the app was busy redrawing (XCTest lost the application element
+# mid-read): it says nothing about whether the screen reads, so a long read cut so isn't counted in the app's row
+BUSY_WHY = "is not present in the current view anymore"
 
 
 def read_wait(budget_ms: int | None, long: bool = False) -> float:
@@ -391,7 +397,9 @@ class ReadBudget:
         at = self._long_cut.get(bundle) if bundle is not None else None
         if at is None or bundle is None or self.clock() - at >= self.block_span(bundle):
             return ""
-        if self.misses(bundle) >= LONG_APP_MISSES:
+        if self.misses(bundle) >= LONG_APP_MISSES and bundle not in self._readable:
+            # (round S, S-F1) only for an app none of whose long reads has ever been whole in this service's life: a
+            # whole one proves some screens read, and from then on only the screen a read failed on is blocked
             return "app"
         picture, other = self._long_pic.get(bundle), self.other
         if picture is None or other is None:
@@ -511,10 +519,12 @@ class ReadBudget:
         return self.budget(bundle) < self.normal_ms
 
     def answered(self, bundle: str | None, truncated: bool, budget_ms: int, took_ms: float | None = None,
-                 sent_for: str | None = None, partial: bool = False) -> None:
+                 sent_for: str | None = None, partial: bool = False, busy: bool = False) -> None:
         """A read of `bundle` with `budget_ms` came back truncated or full, after `took_ms` (None: not timed). `sent_for`:
         the app a long read was sent for; an answer naming another app is no long read of either (long_elsewhere).
-        `partial` (round G): a truncated answer above the root, with elements (shallow): for a long read, no miss."""
+        `partial` (round G): a truncated answer above the root, with elements (shallow): for a long read, no miss.
+        `busy` (round S, S-F1): cut while the app was busy (BUSY_WHY): a long read so is no miss in the app's row (its
+        count goes back to what it was); the block of the screen it was made on holds as for any cut long read."""
         held, self._by_still = self._by_still, None
         # (review K, question 4) a read that raised never came here: what its stillness gave is not the next read's
         by_still = held[0] if held is not None and self.clock() - held[1] < BY_STILL_FOR else None
@@ -534,6 +544,13 @@ class ReadBudget:
             # (neither started nor lifted: only a whole answer lifts them)
             self.long_elsewhere(bundle)
             long = False
+        elif long and truncated and busy:
+            before = self._long_before.pop(bundle, None)
+            misses = before[1] if before is not None else None
+            if misses is None:
+                self._long_misses.pop(bundle, None)
+            else:
+                self._long_misses[bundle] = misses
         elif long and bundle is not None:
             self._long_before.pop(bundle, None)
         if long and truncated:
@@ -1406,8 +1423,9 @@ class Session:
         long_wait = read_wait(long_ms, long=True)
         # (2.0.3) a long read needs the caller's time for it (wait_for's reads may have less); the newest frame is kept
         # to compare with the one after a cut read (Daemon._still_across). Asked only when one could follow.
-        slow = self.budgets.slow(bundle)
-        bundle_long = self.budgets.long_on and timeout >= long_wait and (
+        # (round S, S-F1) a read for an action's own use right before its input: no long budget at all (NO_LONG)
+        slow = self.budgets.slow(bundle) and not NO_LONG.get()
+        bundle_long = self.budgets.long_on and timeout >= long_wait and not NO_LONG.get() and (
             bundle is None or slow or self.budgets.long_try(bundle))
         # (the lead, after the phone test) the newest frame is kept, to compare with the frame after a cut read; a slow
         # app's planned long read is given up only when something plays (Daemon._plays: the picture a second ago).
@@ -1744,10 +1762,15 @@ class Session:
                 return await self._compact_tree(timeout, since=False, budget_ms=left, budget_for=budget_for,
                                                 remember=remember, read_path=read_path,
                                                 budget_asked=budget_asked or budget_ms)
+            busy = tier != "full" and BUSY_WHY in self.last_why
             if remember:
+                if long and busy and TRACE:
+                    getattr(self.device, "log", lambda *a: None)(
+                        f"trace long read of {budget_for} cut while the app was busy (its application element "
+                        f"\"{BUSY_WHY}\"): not counted in its row")
                 self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_asked or budget_ms,
                                       took_ms, sent_for=budget_for if long else None,
-                                      partial=tier == "shallow" and _has_elements(source))
+                                      partial=tier == "shallow" and _has_elements(source), busy=long and busy)
             if tier != "full":
                 getattr(self.device, "log", lambda *a: None)(
                     f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")
