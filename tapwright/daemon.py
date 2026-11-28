@@ -7155,6 +7155,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """(2.0.3, review RP M4) What is in front now, as the agent's: after `open_app` and `open_url` (where they went,
         `look: false` too) and a run's step whose positive `expect` held (its read found what the agent expected; that
         read's app, `read_bundle`, must be the one in front: review RP2 H2)."""
+        # (CodeRabbit, PR #30) the record before this call is no answer of the agent's once the read below may fail: with
+        # none, _meant_app reaches left_by_call (no comparison) and a touch is refused no_look, never judged by it
+        view.seen_front = None
         state = await self._read(self._front_state_now)
         view.seen_front = self._front_agreed(None, state, read_bundle, compare=False)
         view.front_moved = ""

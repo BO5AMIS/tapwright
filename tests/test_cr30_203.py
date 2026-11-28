@@ -519,3 +519,27 @@ def test_a_lookup_with_no_result_raises_and_an_empty_one_is_no_apps(monkeypatch)
         asyncio.run(d.user_apps())
     answers[0] = {}
     assert asyncio.run(d.user_apps()) == []
+
+
+# ---- review body, test_round_r_203.py:68-71: a front record that fails leaves no older record standing ----
+
+def test_open_app_whose_front_read_fails_leaves_no_record_of_the_app_before():
+    from test_round_r_203 import OpeningSession
+    from test_touch_other_app_203 import CHAT, SHOP
+
+    async def go():
+        s = OpeningSession()
+        d, stop, task = await _looked(s)
+        view = d.control.client("a")
+        assert view.seen_front == session_module.Front(session_module.FRONT_APP, SHOP[1])
+
+        async def fails():
+            raise RuntimeError("the front couldn't be read")
+        d._front_state_now = fails
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "open_app", {"app": CHAT[1], "look": False})
+        assert "the front couldn't be read" in str(e.value)
+        assert view.seen_front is None and view.left_by_call is True
+        assert d._meant_app(view) is None  # (no comparison: never Shop's, which the agent left)
+        await finish(stop, task)
+    run(go)

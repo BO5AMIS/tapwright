@@ -354,8 +354,9 @@ def test_rs_l1_open_app_whose_front_record_fails_still_counts_as_leaving():
         async def fails(view, read_bundle=None):
             raise RuntimeError("the front couldn't be recorded")
         d._record_front = fails
-        with pytest.raises(Exception):
+        with pytest.raises(Exception) as e:
             await d.run_tool("a", "open_app", {"app": CHAT[1], "look": False})
+        assert "the front couldn't be recorded" in str(e.value)  # (CodeRabbit, PR #30: the stub's error, wrapped)
         assert view.left_by_call is True
         await finish(stop, task)
     run(go)
