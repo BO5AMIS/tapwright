@@ -2845,7 +2845,8 @@ class Session:
                         continue
                     elif said == BANNER_SLOW:
                         raise Refused("not_actionable", COVERED_SLOW)  # (round I: an element too, review RH M2)
-                    elif said == BANNER_UNSURE and not rules.element:
+                    elif said == BANNER_UNSURE and (not rules.element or getattr(self, "sheet_over", None)):
+                        # (CodeRabbit, PR #30) another app's whole-screen sheet: an element of the app under it too
                         sheet = getattr(self, "sheet_over", None)
                         raise Refused("not_actionable", COVERED_SHEET.format(bundle=sheet) if sheet else COVERED_UNSURE)
                     self.found_front = now  # (review RP2 M2: what the agent saw over the app has gone)
