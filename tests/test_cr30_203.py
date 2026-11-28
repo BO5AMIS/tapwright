@@ -144,3 +144,43 @@ def test_a_fast_touch_refused_unplayed_goes_by_w3c_once_checked_again(monkeypatc
     asyncio.run(s.tap(ui_module.Target(x=30, y=400)))
     assert checks == [(30.0, 400.0), (30.0, 400.0)] and _paths(runner)[-1] == "/actions"
     assert s._gate_at is None
+
+
+# ---- review body, session.py:1249: reset retires the old runner's hold ----
+
+def test_reset_forgets_the_old_runners_hold_and_a_new_slow_hit_sets_one_again(monkeypatch):
+    from test_session import Recorder
+    monkeypatch.setattr(session_module.store, "load_state", lambda: {"runner_id": "runner"})
+    s = Session(Recorder())
+    s._hold("point", (200.0, 85.0))
+    assert s._held()
+    asyncio.run(s.reset())
+    assert not s._held()
+    s._hold("point", (200.0, 85.0))
+    assert s._held()
+
+
+# ---- review body, session.py:2646: a touch's deadline is checked again once the hit lock is held ----
+
+def test_a_touchs_deadline_that_passed_while_the_hit_lock_was_busy_asks_nothing():
+    import time
+
+    from test_round_m_203 import _session
+
+    def script(n, path, dev):
+        return 0.0, {"t": "XCUIElementTypeStatusBar", "r": [0, 0, 430, 54], "b": "com.apple.springboard",
+                     "identity": "verified"}
+
+    async def go():
+        s = _session(script)
+        s._hold("point", (200.0, 85.0))
+        s._hit_lock = asyncio.Lock()
+        await s._hit_lock.acquire()  # (another touch's hit question holds the lock past this touch's deadline)
+        until = time.monotonic() + 0.1
+        later = asyncio.get_running_loop().call_later(0.3, s._hit_lock.release)
+        free = await s.channel_free(until)
+        later.cancel()
+        assert free is False
+        assert not [p for _, p in s.device.asked if p.startswith("x=")]  # (no clock question after the deadline)
+        assert s._held()
+    asyncio.run(go())

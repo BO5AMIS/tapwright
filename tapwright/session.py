@@ -1249,6 +1249,7 @@ class Session:
         self.sid = None
         self.runner_held = None  # (round N: a new runner holds nothing)
         self._hold_carried = False  # (round T: nor a hold carried from the old one)
+        self._held_until = 0.0  # (CodeRabbit, PR #30: nor the old runner's hold still under HIT_HELD; a new one sets its own)
         self.scale = self.app = self.read_app = None
         self.scale_read = False
         self.items, self.offscreen, self.behind = [], [], []
@@ -2539,9 +2540,12 @@ class Session:
             if guard is not None:
                 await guard()
             asked = time.monotonic()
-            if await self._free_step():
+            if await self._free_step(until=until):
                 trace.note("runner_free", round(time.monotonic() - began, 1))
                 return True
+            if until is not None and time.monotonic() >= until:  # (the touch's deadline came while the lock was busy)
+                trace.note("runner_free", {"touch_deadline": round(time.monotonic() - began, 1)})
+                return False
             asked_once = True
             now = time.monotonic()
             limit = min(getattr(self, "_held_until", 0.0), began + HIT_HELD)
@@ -2647,10 +2651,11 @@ class Session:
             self._gate_at, self._banner_seen, self._banner_until = None, False, None
             raise Refused("not_actionable", COVERED_SLOW)
 
-    async def _free_step(self, wait: float | None = None, quiet: bool = True) -> bool:
+    async def _free_step(self, wait: float | None = None, quiet: bool = True, until: float | None = None) -> bool:
         """(round L) One question at the clock while a hold is known, under the hit lock: True when it ended the hold (a
         real answer; or no such route, where nothing could be asked again). `wait`: the question's bound (HIT_FREE_WAIT).
-        (Round N) A real answer ends a given-up hold (RunnerHeld) too."""
+        (Round N) A real answer ends a given-up hold (RunnerHeld) too. `until` (CodeRabbit, PR #30): a touch's deadline,
+        checked again once the lock is held (another question may have held it that long): past it, nothing is asked."""
         wait = HIT_FREE_WAIT if wait is None else wait
         lock = getattr(self, "_hit_lock", None)
         if lock is None:
@@ -2658,6 +2663,8 @@ class Session:
         async with lock:
             if not self._held():
                 return True
+            if until is not None and time.monotonic() >= until:
+                return False
             kind, _, _ = await self._hit_once(HIT_WITNESS, time.monotonic() + wait, {"at": [66, 22]}, wait=wait,
                                               sets_quiet=quiet)
         if kind in ("answer", "unasked"):
