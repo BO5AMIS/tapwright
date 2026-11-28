@@ -66,10 +66,10 @@
     first, and if it stays the answer says so in its first line;
   - right before each touch goes out, the same question is asked again, and then whether a pause, a lock or a person's
     touch came meanwhile. The touch goes only when it finds what the agent was shown: the same app, or the home screen
-    it saw (a point in its top 200 pt is refused there: a notification over the home screen looks like the home
-    screen), or the system over the app it saw, for a touch aimed at an element of that answer. A point on the system
-    over an app is refused `covered`; in the top 200 pt a notification is waited out (up to 8 s) first. Another app is
-    refused `stale` ("Nothing was touched; look again.");
+    it saw (a point in its top 200 pt is refused there unless the hit test finds nothing of SpringBoard's at it, below:
+    a notification over the home screen looks like the home screen), or the system over the app it saw, for a touch
+    aimed at an element of that answer. A point on the system over an app is refused `covered`; in the top 200 pt a
+    notification is waited out (up to 8 s) first. Another app is refused `stale` ("Nothing was touched; look again.");
   - when Tapwright can't tell what is in front (asked twice), the touch is refused `unknown_front`, nothing touched;
     on a screen where the runner can't name the app, `open_app` names it. A runner whose version question failed is
     refused the same way, never treated as an old one. No look yet: `no_look`;
@@ -104,10 +104,11 @@
     its 8 s for its next screen). A warm read still takes what it takes (0.4-0.7 s);
   - an 8 s read that is cut, or gets no answer, is never asked again (one the runner gave up within its first quarter,
     with nothing to answer yet, is asked again within what is left of the 8 s, as any read is), and blocks that app's
-    next 8 s read, for longer each time in a row: for an app that never read whole with 8 s, 5 minutes, then 10, 20,
-    40 and so on; for an app that has, 1 minute, then 2, 4, 8 and so on (so one screen of it doesn't leave its readable
-    ones unread for long); up to 6 hours either way. A whole 8 s read ends it. The 2.0.2 rules apply meanwhile. The
-    block holds across a reconnect to the phone (a service restart starts afresh);
+    next 8 s read on the screen it failed on (another screen of the app still gets its 8 s; every screen of it only
+    after three in a row that weren't whole, below), for longer each time in a row: for an app that never read whole
+    with 8 s, 5 minutes, then 10, 20, 40 and so on; for an app that has, 1 minute, then 2, 4, 8 and so on (so one screen
+    of it doesn't leave its readable ones unread for long); up to 6 hours either way. A whole 8 s read ends it. The
+    2.0.2 rules apply meanwhile. The block holds across a reconnect to the phone (a service restart starts afresh);
   - a screen whose picture changes by more than the box across the read gets the same reads as in 2.0.2, plus a wait
     of up to 1 s (about 0.3 s on the phone) for one fresh picture after each cut 3 s read;
   - a read that could lead to an 8 s one, made while the picture stream has sent nothing for half a second (it closes
@@ -292,6 +293,19 @@
   a scroll, a swipe or a drag keep their times, and so does an app whose screen never stands still (its 0.5 s cap).
   What it costs: a touch on a button that does nothing now answers in about 1.5 s instead of 0.3 s (0.9 s with a touch
   from the computer); a touch whose screen changes costs nothing more.
+- Touches and the front record, tightened (CodeRabbit's second review of 2.0.3): a touch aimed at an element of the
+  agent's list in the top 200 pt is refused `covered` when the hit test finds another app's sheet over the whole screen
+  there, as a point is; an element of a list read with the system over the app (an alert's button, a Control Center
+  tile) is refused `stale` once the app is alone in front again (its place is the app's now); a fast touch the runner
+  refuses before playing it is checked again before it is played another way. `open_app`'s record of what is in front is
+  the app it opened: when another app came forward before the record (another agent's call), the next touch is refused
+  `unknown_front`; a front record whose read fails leaves none (`no_look`), never the app before. A `run` step's
+  `expect` credits the app whose read found its text, id or label (a picture check read in another app makes it
+  unknown), and an `open_url` step's link `expect` records its app as other steps' do (its next touch was refused
+  `stale`). `type_text` without a target reads its field with a real normal-budget read (it could get the short budget,
+  or no read at all, and type into whatever had focus). `back` reads again when a picture that came during its read
+  shows the sheet moved. The 1.5 s in which "No visible change." isn't believed after an element touch counts from the
+  touch, not from the call's start (a banner wait before the touch used it up).
 
 ## 2.0.2
 
