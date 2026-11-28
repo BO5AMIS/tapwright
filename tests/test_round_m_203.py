@@ -43,6 +43,7 @@ class _TimedDev:
             return {"value": {"b": SHOP[1], "pid": 9}}
         self.n += 1
         took, answer = self.script(self.n, path, self)
+        self.last_took = took
         await asyncio.sleep(took)
         if isinstance(answer, BaseException):
             raise answer
@@ -79,11 +80,25 @@ def busy(t_clock: float, t_point: float, hold: float = 2.5):
     return script
 
 
+@pytest.fixture
+def scripted_times(monkeypatch):
+    """banner_at judges each answer by the time it took. These tests sit tens of ms from its limits (the 0.12 s clock is
+    30 ms under HIT_WITNESS_PROMPT), and a loaded CI runner's wall clock crossed that once (2026-11-28). Each answer's
+    time is taken as the fake phone's scripted one, so the decision is tested at exactly those times; the waits still
+    happen in real time (the hold, the front route waiting for the runner)."""
+    real = Session._hit_once
+
+    async def scripted(self, *a, **k):
+        kind, value, took = await real(self, *a, **k)
+        return kind, value, getattr(self.device, "last_took", took)
+    monkeypatch.setattr(Session, "_hit_once", scripted)
+
+
 # ---- RL-H1: the phone's own numbers (the reviewer's probe_measured_margin) ----
 
 @pytest.mark.parametrize("t_clock", [0.026, 0.039, 0.060])
 @pytest.mark.parametrize("t_point", [0.304, 0.342])
-def test_rl_h1_a_busy_app_at_the_phones_measured_times_is_clear_every_time(t_clock, t_point):
+def test_rl_h1_a_busy_app_at_the_phones_measured_times_is_clear_every_time(t_clock, t_point, scripted_times):
     async def go():
         s = _session(busy(t_clock, t_point))
         assert await s.banner_at((383.0, 168.0), SHOP[1], hands=True) == session_module.BANNER_CLEAR
@@ -92,7 +107,7 @@ def test_rl_h1_a_busy_app_at_the_phones_measured_times_is_clear_every_time(t_clo
 
 
 @pytest.mark.parametrize("t_clock", [0.08, 0.12])
-def test_rl_h1_a_clock_slower_than_usual_never_leaves_the_runner_held_without_a_hold(t_clock):
+def test_rl_h1_a_clock_slower_than_usual_never_leaves_the_runner_held_without_a_hold(t_clock, scripted_times):
     # (round L read this as a banner in motion with no hold: the front route after it went into the held runner)
     async def go():
         s = _session(busy(t_clock, 0.31))
