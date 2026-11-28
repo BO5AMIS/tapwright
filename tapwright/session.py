@@ -754,6 +754,9 @@ HIT_WITNESS_PROMPT, HIT_NOTHING_MARGIN = 0.15, 0.2
 # one question). Requests through accessibility wait for it (Session.channel_free), asking the clock every
 # HIT_FREE_EVERY s, HIT_FREE_WAIT s at most a question
 HIT_HELD, HIT_FREE_EVERY, HIT_FREE_WAIT = 12.0, 0.7, 1.0
+# (2.0.3 round T, review RS-H1) the least pause between two of those clock questions, whatever the last one took: a
+# wait for the runner never asks back to back
+HIT_FREE_MIN = 0.25
 # (round N, phone 2026-11-28 N-F2) a hold that outlasts HIT_HELD is given up: nothing more goes into the runner through
 # accessibility (the front route asked into it stalled, was taken for a lost line, and a reconnect and a new session
 # followed: 82 s); the app in front, named by iOS's process list (HELD_FRONT_WAIT at most), isn't answering
@@ -2454,15 +2457,30 @@ class Session:
         still held; else True.
         (Round N, N-F2) At HIT_HELD the hold is given up and nothing goes into the runner: RunnerHeld (the app in front
         named from iOS's process list) is raised, and raised again at once by every later call (nothing asked) until
-        the clock answers (held_answers, _free_step)."""
+        the clock answers (held_answers, _free_step).
+        (2.0.3 round T, review RS-H1) The wait is bounded whatever happens meanwhile: it ends at the hold's limit
+        (HIT_HELD from the hold's start, and never more than HIT_HELD from this wait's start), after one question at
+        least (a hold carried past its limit: carry_hold); the given-up state set by another call meanwhile is raised at
+        the next step; two clock questions are HIT_FREE_MIN apart at least, never back to back."""
         if (held := getattr(self, "runner_held", None)) is not None:
             raise RunnerHeld(held.bundle_id, held.name)
         if not self._held():
             return True
         began = time.monotonic()
-        while self._held():
-            if until is not None and time.monotonic() >= until:
-                trace.note("runner_free", {"touch_deadline": round(time.monotonic() - began, 1)})
+        asked_once = False
+        while True:
+            if (held := getattr(self, "runner_held", None)) is not None:
+                trace.note("runner_free", {"given_up_meanwhile": round(time.monotonic() - began, 1)})
+                raise RunnerHeld(held.bundle_id, held.name)
+            now = time.monotonic()
+            limit = min(getattr(self, "_held_until", 0.0), began + HIT_HELD)
+            if asked_once and now >= limit:
+                break
+            if not self._held():  # (a real answer to another call's question ended it meanwhile)
+                trace.note("runner_free", round(now - began, 1))
+                return True
+            if until is not None and now >= until:
+                trace.note("runner_free", {"touch_deadline": round(now - began, 1)})
                 return False
             guard = getattr(self, "execution_guard", None)
             if guard is not None:
@@ -2471,12 +2489,16 @@ class Session:
             if await self._free_step():
                 trace.note("runner_free", round(time.monotonic() - began, 1))
                 return True
-            pause = HIT_FREE_EVERY - (time.monotonic() - asked)
-            end = self._held_until if until is None else min(self._held_until, until)
-            if pause > 0 and self._held():
-                await asyncio.sleep(min(pause, max(0.0, end - time.monotonic())))
+            asked_once = True
+            now = time.monotonic()
+            limit = min(getattr(self, "_held_until", 0.0), began + HIT_HELD)
+            if now >= limit:
+                continue  # (the given-up state of another call first, then the limit: given up)
+            pause = max(HIT_FREE_MIN, HIT_FREE_EVERY - (now - asked))
+            await asyncio.sleep(min(pause, limit - now, *(() if until is None else (max(0.0, until - now),))))
         trace.note("runner_free", {"gave_up": round(time.monotonic() - began, 1)})
         held = self.runner_held = await self._given_up()
+        self._hold_carried = False  # (the given-up state stands in for it)
         raise RunnerHeld(held.bundle_id, held.name)
 
     async def _given_up(self) -> RunnerHeld:

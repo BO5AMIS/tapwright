@@ -301,10 +301,12 @@ def _phone_session(free_at: float):
 
 @pytest.fixture
 def scaled(monkeypatch):
-    """The hold's times at a tenth: HIT_HELD 1.2 s, a poll every 0.07 s, 0.1 s at most a question."""
+    """The hold's times at a tenth: HIT_HELD 1.2 s, a poll every 0.07 s (0.025 s apart at least), 0.1 s at most a
+    question."""
     monkeypatch.setattr(session_module, "HIT_HELD", 1.2)
     monkeypatch.setattr(session_module, "HIT_FREE_EVERY", 0.07)
     monkeypatch.setattr(session_module, "HIT_FREE_WAIT", 0.1)
+    monkeypatch.setattr(session_module, "HIT_FREE_MIN", 0.025)  # (round T: the least pause between two, at a tenth)
     monkeypatch.setattr(session_module, "HIT_NOTHING_SLOW", 0.025)
     # (round M: the clear's lines, at a tenth too)
     monkeypatch.setattr(session_module, "HIT_NOTHING_MARGIN", 0.02)
