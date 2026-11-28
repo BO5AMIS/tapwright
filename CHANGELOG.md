@@ -22,7 +22,11 @@
   answer says so) go through iOS's process control, and `press_button home` as before, and the clock is asked right
   after them. The service's status says `not-answering` meanwhile, and the service asks the clock once every few seconds
   by itself, so the state ends when the app answers again with no call (a person who closed the app on the phone can
-  use the live view again).
+  use the live view again). A hold a call saw and didn't see end (a touch near the top refused slow at its 8 s limit,
+  under the 12 s, every clock question meanwhile "no element answered") is carried the same way, so the next call
+  asks the clock once and never sends the front question into the held runner; and a front question that gets no
+  answer while the runner answers the clock "no element answered" is that state too, not a lost connection (the next
+  look had been taken for one: a reconnect and a new session, 48 s).
 - A system sheet over the app is named. A rating prompt's sheet (another process's whole screen over a system app) was
   refused at the top with "can't tell whether a notification is over the top of the screen": the runner had answered.
   Now: `covered: another app's sheet (<bundle id>) is over the screen; look again.`, and a touch by the picture's text
@@ -123,7 +127,13 @@
   weren't whole: a screen whose picture differs from that one by more than a quarter gets its 8 s read at once (a
   product page that never read, the app's own timeouts, blocked the whole app for 60, 120, 240 s: its readable pages,
   the home screen after a relaunch too, answered "0 elements", and the moment the block ran out the home screen read
-  whole in 2.5 to 5.3 s); from the third in a row on, the block is the app's, as above. A long read that comes back
+  whole in 2.5 to 5.3 s); from the third in a row on, the block is the app's, as above, but only for an app none of
+  whose 8 s reads has ever come back whole since the service started: one whole one proves some of its screens read,
+  and from then on only the screens that failed are blocked (on a shopping app the path home, search, results tripped
+  the app's block before results, which reads, was ever tried, and a whole session got 0 elements). A long read cut
+  while the app was busy redrawing (XCTest lost its application element mid-read: "is not present in the current view
+  anymore") isn't counted in the row; its screen is blocked as any. `type_text` without a target reads its field with
+  the normal budget only, never 8 s more before the keys. A long read that comes back
   partly read (an element with a label, a name or a value, or more than five; not all of them) is no miss: it starts no
   block and counts nothing; on a still screen that only ever answers in part, each look then takes up to 8 s and
   returns that part. A page that never reads costs one 8 s read on each visit when the app's readable screens read
