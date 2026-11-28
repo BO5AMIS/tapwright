@@ -1475,6 +1475,10 @@ class Session:
         long_ok = slow and not plays and self.still_mark is not None and \
             timeout - (time.monotonic() - began) >= long_wait
         budget, unasked = self.budgets.plan(bundle, still=self.screen_still, long_ok=long_ok)
+        if NO_LONG.get():
+            # (CodeRabbit, PR #30) type_text's own read for its field: a real read with the normal budget, never the
+            # short one nor the root made here without asking (it would find no field and type into whatever has focus)
+            budget, unasked = normal, False
         if bundle_long and not slow and budget == normal and not unasked:
             mark, _ = await self._still_mark(check=False)
         if unasked and self.tw_version >= FRONT_VERSION and bundle is not None:
@@ -1505,7 +1509,10 @@ class Session:
         named = _root_bundle(source)
         if (source is not None and self.last_tier != "full" and budget < normal
                 and named is not None and named != bundle):
-            if self.budgets.long_on and self.budgets.long_try(named) and timeout >= long_wait:
+            # (CodeRabbit, PR #30) whether a long read may follow is the named app's, not the one the read was planned for
+            bundle_long = (self.budgets.long_on and timeout >= long_wait and not NO_LONG.get()
+                           and (self.budgets.slow(named) or self.budgets.long_try(named)))
+            if bundle_long:
                 mark, _ = await self._still_mark(check=False)  # (this read has the normal budget: a long one may follow)
             self.budgets.tried(named)
             source = await self._compact_tree(timeout, budget_ms=normal, budget_for=named,

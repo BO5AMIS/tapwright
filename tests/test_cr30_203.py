@@ -7,6 +7,8 @@ from test_daemon import finish
 from test_round_h_203 import other
 from test_touch_other_app_203 import refused, run, unread
 
+from test_slow_readable_203 import state  # noqa: F401 (fixture)
+
 from tapwright import session as session_module
 
 SHEET = "com.apple.ios.StoreKitUIService"
@@ -184,3 +186,56 @@ def test_a_touchs_deadline_that_passed_while_the_hit_lock_was_busy_asks_nothing(
         assert not [p for _, p in s.device.asked if p.startswith("x=")]  # (no clock question after the deadline)
         assert s._held()
     asyncio.run(go())
+
+
+# ---- 4727955286: type_text's own read for its field is a real read with the normal budget ----
+
+def test_type_texts_field_read_is_a_real_read_with_the_normal_budget_on_a_moving_screen(state):
+    from test_long_block_screen_203 import _on, _shop
+    from test_slow_readable_203 import ShopRunner, Stream, look
+
+    async def go():
+        stream = Stream()
+        s, runner = _shop(stream, ShopRunner(stream, answers={}))
+        _on(stream, b"a page")
+        await look(s, stream)
+        stream.now[0] += 20.0
+        stream.after = b"next video"
+        await look(s, stream, moving=True)
+        assert runner.budgets() == [3000, 8000, 1500]  # (an ordinary look there: the short budget)
+        token = session_module.NO_LONG.set(True)
+        try:
+            await look(s, stream, moving=True)  # (at once: an ordinary look could be left unasked here)
+        finally:
+            session_module.NO_LONG.reset(token)
+        assert runner.budgets() == [3000, 8000, 1500, 3000]  # (asked, with the normal budget)
+        assert runner.paths("/wda/tw/front") == []
+    run(go)
+
+
+# ---- 4727955289: a cut read that names another app gets that app's long try ----
+
+def test_a_short_read_that_names_another_app_gives_that_app_its_long_try(state):
+    from test_slow_readable_203 import CUT, ITEM, OTHER, SHOP, WHOLE, ShopRunner, Stream, look, shop
+    from test_vision_200 import _app
+
+    async def go():
+        stream = Stream()
+        s, runner = shop(stream, ShopRunner(stream, answers={}))
+        await look(s, stream)  # Shop: cut, its long try cut: Shop blocked
+        assert runner.budgets() == [3000, 8000] and s.budgets.blocked(SHOP)
+        runner.answers = {1500: {**CUT, "tree": _app(OTHER, "Other")}, 3000: {**CUT, "tree": _app(OTHER, "Other")},
+                          8000: {**WHOLE, "tree": _app(OTHER, "Other", [ITEM])}}
+        s.screen_still = lambda: False  # (Shop's plan: the short budget)
+
+        async def mark(check):
+            return b"still", False
+
+        async def across(mark):
+            return True
+        s.still_mark, s.still_across = mark, across
+        stream.now[0] += 20.0
+        tree = await look(s, stream)
+        assert runner.budgets()[2:] == [1500, 3000, 8000]  # (Other's own long try, though Shop is blocked)
+        assert tree.tier == "full"
+    run(go)
