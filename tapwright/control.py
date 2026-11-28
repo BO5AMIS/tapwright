@@ -64,7 +64,9 @@ class ClientView:
     moved: bool = False  # an action that returned no list ran since: the screen has probably changed
     ocr: dict[str, tuple[float, float]] = field(default_factory=dict)  # ref (o1…) -> centre, from the last OCR reading
     ocr_gen: int = -1  # the generation as that text was read: another's action since moves the screen under the refs
+    ocr_text: dict[str, str] = field(default_factory=dict)  # (2.0.3 round N) ref -> its text as that reading read it
     unlooked: int = 0  # how many answers since the last list or change block carried none (`look: false`)
+    left_by_call: bool = False  # (2.0.3 round S2) open_app or open_url answered last, and no read since
     shown_off: list = field(default_factory=list)  # what lay off screen at the agent's last answer (for `~` lines)
     dropped: bool = False  # the connection dropped since `items` was read
     opened: bool = False  # open_app made the last list: a screen still drawing its last parts (a floating search field)
@@ -85,6 +87,12 @@ class ClientView:
     # (name, bundle id) of the app the agent's last touch or open_app was meant for, until its next look: type_text
     # without a target types only there (1.7.8, X item 4)
     aimed_app: tuple[str, str] | None = None
+    # (2.0.3, review RP) what was in front as the agent's newest answer showed it the screen (session.Front, from the runner's
+    # front route and iOS's process list, never a tree's root); its touches are checked against it. None: none recorded
+    seen_front: object | None = None
+    # (review RP2 H2, RF L2) what came to the front while the newest answer was read: "" nothing, "banner" a notification
+    # passing over the same app, "app" another app or the home screen
+    front_moved: str = ""
     # (1.9.0, AGENT-TOOLS 1.17 §30) the way from the app's start this session is on (autoroute.Chain), the apps whose
     # `Known:` line was given, the hints given, the top-level calls made, single taps in a row along known roads, whether
     # `logs` was read, and whether the last move went along a road the map had

@@ -47,6 +47,9 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # landscape Vision, told the screenshot's orientation, read the text upside down on iOS 26.5).
 # tw-16.15.3.15 (tw version 15, 2.0.0): a widget's renderer process is never the app in front (SpringBoard is).
 # tw-16.15.3.14 (tw version 14): a turned screen is read both ways up and the better reading kept; the answer says `turn`.
+# tw-16.15.3.16 (tw version 16): built (fork commit c9dd3486), not shipped. Why (iOS 26.5, the phone, 2026-11-28):
+# the accessibility client's own point lookup raised on every call, so every lookup asked XCTest's daemon anyway, and
+# the accessibility timeout doesn't bound that request: during a hold its hit route waited the whole hold out.
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),

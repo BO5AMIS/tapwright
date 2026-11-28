@@ -37,6 +37,7 @@ CENTER_PULL = 0.6  # how far down the swipe goes, in screen heights
 CENTER_SWIPE_MS = 300
 CENTER_OPEN_WAIT = 0.6  # seconds for Notification Center to come down before its tree is read
 CENTER_CLOSE_WAIT = 0.4  # seconds for it to go up again before the app in front is asked
+UNLOCK_ARRIVAL_SLACK = 1.0  # (round N) seconds before a frame's stamp an unlock still makes it private
 CENTER_HIDE_AFTER_S = 3.0  # a recording leaves out frames this long after Notification Center's close was confirmed: it
 # slides up, WebDriverAgent's frames queue on a slow link, and AirPlay sends pictures again
 OPEN_WAIT = 1.0  # seconds for an opened notification's app to come to the front
@@ -161,7 +162,24 @@ class CenterTools:
             return True
         arrived = self.hub.arrival_of(frame.seq)
         if arrived is None:
-            return bool(self.__dict__.get("_unlock_spans"))
+            kept = getattr(frame, "arrived", None)  # (CodeRabbit, PR #30 cycle 2: the hub's own monotonic arrival)
+            if isinstance(kept, (int, float)) and not isinstance(kept, bool):
+                arrived = float(kept)
+        if arrived is None:
+            # (2.0.3 round N, phone 2026-11-28) the hub keeps the arrivals of its last HISTORY frames only: the frame of
+            # a read that took 10 s has dropped out of them. Its own stamp (`at`, epoch ms on the hub's clock) says
+            # about when it came: private when an unlock ran since UNLOCK_ARRIVAL_SLACK before that. Before, any unlock
+            # span still kept (an hour) made every such frame private: "the phone is being unlocked" half an hour after
+            # the only unlock. A frame with no stamp: fail-closed, as before. (Every frame the hub made carries its
+            # monotonic arrival, above: this is only for a frame that doesn't)
+            at = getattr(frame, "at", None)
+            if not isinstance(at, (int, float)) or isinstance(at, bool):
+                return bool(self.__dict__.get("_unlock_spans"))
+            age_ms = self.hub.now_ms() - at
+            if age_ms < 0:  # (CodeRabbit, PR #30) the wall clock stepped back since its stamp: when it came is unknown
+                return bool(self.__dict__.get("_unlock_spans"))
+            came = self.hub.mono() - age_ms / 1000.0
+            return self.unlocked_since(came - UNLOCK_ARRIVAL_SLACK)
         return self.unlock_covers(arrived)
 
     def recording_hides(self, hub, frame) -> bool:
@@ -223,6 +241,12 @@ class CenterTools:
             source = await s.read_center()
             if not notes_lib.is_center(source):
                 raise Refused("not_found", NOT_OPENED)
+            see = getattr(s, "see_front", None)
+            if callable(see):
+                rules_before = getattr(s, "touch_rules", None)
+                # (2.0.3, review RP L3) the tool's own touches here (a notification's row, the closing swipe) are checked
+                # against what it just opened and read, not the agent's older answer: it can close what it opened
+                await see(element=True)
             found = notes_lib.parse(source, names, keep)
             del source  # (every other app's notification goes with it)
             # (2.0, R200v L4) the runner may have cut the read short: what it left out may hold notifications
@@ -254,6 +278,9 @@ class CenterTools:
                 shown_closed = True
             finally:
                 self._center_end(shown_closed)
+                if "rules_before" in locals() and hasattr(s, "touch_rules"):
+                    # (review RP2 L1) the tool's looser rule ends with the center: the agent's own rules again
+                    s.touch_rules = rules_before
         return found, opened
 
     async def _same_notification(self, chosen: "notes_lib.Notification", n: int, names: dict[str, str],

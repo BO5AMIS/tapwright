@@ -175,6 +175,12 @@ def check_expect(expect: object, n: int, script: bool = False, tool: str = "") -
         raise Refused("bad_params", f"step {n}: expect's timeout must be from {EXPECT_MIN:g} to {EXPECT_MAX:g} s")
 
 
+def positive_expect(expect: dict) -> bool:
+    """(2.0.3, review RP2 H2) Does a step's `expect` say something is on the screen (text, an id or a label found), so
+    that its read showed the agent that screen? Not `gone`, and not a picture comparison alone."""
+    return any(expect.get(k) is not None for k in EXPECT_KINDS) and not expect.get("gone")
+
+
 def tool_args(step: dict) -> dict:
     """The step's own parameters for its tool: everything but the batch's keys (`route` is a drive's own argument)."""
     return {k: v for k, v in step.items() if k not in STEP_KEYS or (k == "route" and step.get("tool") == "drive")}

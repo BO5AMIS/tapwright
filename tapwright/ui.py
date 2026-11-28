@@ -1823,10 +1823,40 @@ def replayed(items: list[Element], target: Target, tool: str | None) -> Element 
     return switch_first(items, target) if tool == "toggle" else resolve(items, target)
 
 
+SAME_THING_SLACK = 2.0  # points two listings of one thing may differ by at each edge (frames are rounded, a wrapper pads)
+SAME_THING_COVER = 0.9  # ...or the share of the larger frame the smaller one covers, one inside the other
+
+
+def _same_place(a: Element, b: Element) -> bool:
+    """Are the two the same thing listed twice: frames alike within SAME_THING_SLACK points, or one inside the other
+    covering nearly all of it (a wrapper and its control)? An element without a size is never one."""
+    if a.width <= 0 or a.height <= 0 or b.width <= 0 or b.height <= 0:
+        return False
+    if _same_rect(a.rect, b.rect) or all(abs(p - q) <= SAME_THING_SLACK for p, q in zip(a.rect, b.rect)):
+        return True
+    small, big = sorted((a, b), key=lambda e: e.width * e.height)
+    return _inside(small, big) and small.width * small.height >= SAME_THING_COVER * big.width * big.height
+
+
+def one_thing(hits: list[Element]) -> Element | None:
+    """(2.0.3) When every match is one thing listed more than once (a React Native view and its own wrapper, both given
+    the same testID: `e3 other id=closeButton @16,81 40x40` and `e4 button id=closeButton @16,81 40x40`, phone
+    2026-11-26), the one to act on: the one that takes a touch, typing or a toggle; of several, a button's or a field's
+    role over a bare `other`, then the innermost (the last listed, drawn on top). None when any two are at different
+    places: those stay `ambiguous`. A touch on either lands on the same spot; this only spares the agent a needless
+    question. `index` still counts every match (resolve answers it before asking this)."""
+    if len(hits) < 2 or not all(_same_place(a, b) for i, a in enumerate(hits) for b in hits[i + 1:]):
+        return None
+    acting = [e for e in hits if _actionable(e)] or hits
+    named = [e for e in acting if e.role != "other"] or acting
+    return named[-1]
+
+
 def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
     """The element a target names on the agent's list, or its point (a touch at x, y hits whatever
     is there, so a point never becomes an element). Several matches without an `index` are
-    `ambiguous`, with candidates; none, or an `index` past the matches, are `not_found`."""
+    `ambiguous`, with candidates, unless they are one thing listed twice (one_thing); none, or an `index` past the
+    matches, are `not_found`."""
     if target.point is not None:
         return target.point
     if target.ref is not None:
@@ -1845,6 +1875,8 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
                                        f"{what}{where}")
         return hits[target.index]
 
+    if len(hits) > 1 and (one := one_thing(hits)) is not None:
+        return one
     if len(hits) > 1:
         shown = hits[:MAX_CANDIDATES]
         raise Refused("ambiguous", f"{len(hits)} elements match {what}.\nCandidates:\n"
@@ -1915,6 +1947,80 @@ def _says_back(name: str) -> bool:
     leading other words (`Back to top`)?"""
     words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)]
     return words[-1:] == ["back"] or words[-2:] == ["back", "button"]
+
+
+# (2.0.3) where a screen's own back control sits when there is no navigation bar's: wholly within this many points
+# across and down from the top-left corner, upright; in landscape the status bar is gone and the left safe area (the
+# camera's side, about 60 pt) comes first, so the corner is wider and shorter
+OWN_BACK_UPRIGHT = (120.0, 140.0)
+OWN_BACK_LANDSCAPE = (180.0, 100.0)
+
+
+# (review RF M1) a label in words is a back control only when "back" is its whole meaning: these, case-folded and trimmed.
+# The repo keeps no translations of the bar's back button; Arabic's two are the owner's apps'
+BACK_LABELS = frozenset({"back", "go back", "back button", "navigate back", "رجوع", "عودة"})
+# the generic parts at the end of an id or asset name, left out before its last part is looked at
+# ("arrow" too: `go_back_arrow`, a back arrow's asset, is a back control as `backButton` is)
+BACK_GENERIC = frozenset({"button", "btn", "icon", "ic", "image", "img", "view", "item", "control", "id", "arrow"})
+# a part before "back" that makes it something else: "callBack", "sendBack", "playBack", "cashBack", "cameraBack"...
+NOT_BEFORE_BACK = frozenset({"call", "send", "bring", "give", "pay", "cash", "get", "take", "write", "talk", "play",
+                             "feed", "roll", "cut", "push", "pull", "step", "fall", "hold", "set", "look", "flash", "kick",
+                             "turn", "come", "switch", "camera", "money"})
+
+
+def name_parts(text: str) -> list[str]:
+    """An id or asset name in its parts, lower case: split at case changes, digits, `_`, `-` and `.` (digits dropped)."""
+    return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+", text)]
+
+
+def _back_meaning(text: str, label: bool) -> bool | None:
+    """(review RF M1) Is "back" this id's or label's whole meaning? True: yes. False: it says "back" as part of something
+    else ("Call back", `callBackButton`, `backCamera`): the element is then never a back control. None: it says
+    nothing of back."""
+    plain = text.strip().casefold()
+    if not plain:
+        return None
+    if label and plain in BACK_LABELS:
+        return True
+    if label and (" " in plain or not plain.isascii()):  # human words: only the list above
+        return False if "back" in re.findall(r"[a-z]+", plain) or any(w in plain for w in ("رجوع", "عودة")) else None
+    parts = name_parts(text)
+    if "back" not in parts:
+        return None
+    while parts and parts[-1] in BACK_GENERIC:
+        parts.pop()
+    return bool(parts) and parts[-1] == "back" and (len(parts) == 1 or parts[-2] not in NOT_BEFORE_BACK)
+
+
+def names_back(text: str, label: bool = False) -> bool:
+    """(2.0.3, review RF M1) Does an id (or, `label`, a label) say back and nothing else? A label: exactly one of
+    BACK_LABELS ("Back", "Go back"); one without spaces is read as a name. An id or a name: its parts (name_parts) with
+    the generic ones at the end left out (BACK_GENERIC) end in `back`, not after a part that makes it something else
+    (NOT_BEFORE_BACK): `searchResultBackButton`, `icBrutalBack`, `nav_back`, `backButton` yes; `callBackButton`,
+    `backCamera`, `backupButton`, `playbackButton`, `feedback`, `backgroundPicker`, "Call back", "Back up" no."""
+    return _back_meaning(text, label) is True
+
+
+def _means_back(e: Element) -> bool:
+    """(review RF M1) Its id or its label says back and nothing else, and neither says back as part of something else."""
+    said = (_back_meaning(e.identifier, False), _back_meaning(e.label, True))
+    return True in said and False not in said
+
+
+def own_back(items: list[Element], screen: tuple[float, float]) -> Element | None:
+    """(2.0.3) The screen's own back control, for a screen with no navigation bar's back button (a shopping app's search
+    results: `button "icBrutalBack" id=searchResultBackButton @16,59 40x40`, phone 2026-11-26): the one element that
+    takes a tap (a button, or anything with the tap action), enabled, not in an alert nor in a view another process draws,
+    whose frame lies wholly in the top-left corner (OWN_BACK_UPRIGHT, OWN_BACK_LANDSCAPE), nothing drawn over it, and whose
+    id or label says back and nothing else (_means_back, review RF M1). One thing listed twice (one_thing) counts once.
+    None when none or several qualify: nothing is guessed."""
+    across, down = OWN_BACK_LANDSCAPE if screen[0] > screen[1] else OWN_BACK_UPRIGHT
+    found = [e for e in items
+             if (e.role == "button" or "tap" in e.actions) and e.enabled and not e.in_alert and not e.placed
+             and e.width > 0 and e.height > 0 and e.x >= -1 and e.y >= -1
+             and e.x + e.width <= across and e.y + e.height <= down and not e.covered_by
+             and _means_back(e)]
+    return found[0] if len(found) == 1 else one_thing(found)
 
 
 def _is_back(node: ET.Element) -> bool:
@@ -2046,6 +2152,28 @@ def sheet_box(front: Element | None, items: list[Element],
         return None
     x0, y0 = min(r[0] for r in rects), min(r[1] for r in rects)
     return x0, y0, max(r[0] + r[2] for r in rects) - x0, max(r[1] + r[3] for r in rects) - y0
+
+
+SHEET_TALL = 0.3  # (review RF M3) of the screen's height: a box this tall, or one that reaches the bottom, is a sheet
+SHEET_BOTTOM = 2.0  # points from the screen's bottom edge within which a box "reaches" it
+BESIDE_CLEAR = 8.0  # points the tap beside a sheet keeps from anything that takes a touch
+
+
+def sheet_like(box: tuple[float, float, float, float], screen: tuple[float, float]) -> bool:
+    """(review RF M3) Does the box look like a sheet: it reaches the screen's bottom edge, or covers at least SHEET_TALL
+    of its height? A strip along the top (a shopping app's 54 pt header, read as a layer, phone 2026-11-26) isn't one."""
+    _, y, _, h = box
+    return y + h >= screen[1] - SHEET_BOTTOM or h >= SHEET_TALL * screen[1]
+
+
+def clear_of_touches(point: tuple[float, float], box: tuple[float, float, float, float], items: list[Element]) -> bool:
+    """(review RF M3) Is the point inside no element of the read that takes a touch, and BESIDE_CLEAR from each? What
+    holds the whole sheet (its backdrop, a container) is left out: a touch on it beside the sheet is what closes it."""
+    def holds_box(e: Element) -> bool:
+        return (e.x <= box[0] + 1 and e.y <= box[1] + 1 and e.x + e.width >= box[0] + box[2] - 1
+                and e.y + e.height >= box[1] + box[3] - 1)
+    blocks = [e.rect for e in items if e.actions and e.role != "scroll" and not e.in_alert and not holds_box(e)]
+    return _clearance(point[0], point[1], blocks) >= BESIDE_CLEAR
 
 
 def beside_sheet(box: tuple[float, float, float, float], screen: tuple[float, float], top: float,

@@ -8,8 +8,8 @@ LATER = "2026-11-12T18:30:00Z"
 BUILD = "1.4.0 (212)"
 
 
-def el(ref="e1", role="button", label="", identifier="", value="", **kw) -> ui.Element:
-    return ui.Element(ref, role, label, identifier, value, (0, 0, 100, 40), **kw)
+def el(ref="e1", role="button", label="", identifier="", value="", rect=(0, 0, 100, 40), **kw) -> ui.Element:
+    return ui.Element(ref, role, label, identifier, value, rect, **kw)
 
 
 def move_of(tool, element, items=None, **args):
@@ -32,7 +32,8 @@ def test_a_tap_is_saved_by_id_else_label_else_text_never_by_ref():
 
 
 def test_an_element_that_several_share_is_saved_with_its_index():
-    first, second = el("e1", label="Edit"), el("e2", label="Edit")
+    # (at two places: one thing listed twice at one place resolves without an index, 2.0.3)
+    first, second = el("e1", label="Edit"), el("e2", label="Edit", rect=(0, 60, 100, 40))
     items = [first, second]
     assert move_of("tap", second, items, target={"ref": "e2"}) == {"tool": "tap", "target": {"label": "Edit", "index": 1}}
     assert move_of("tap", first, items, target={"ref": "e1"}) == {"tool": "tap", "target": {"label": "Edit", "index": 0}}
@@ -249,7 +250,7 @@ def test_a_road_that_is_not_there_is_repaired_as_a_new_one():
 
 # ---- CodeRabbit PR #9 ----
 def test_a_cell_is_never_saved_by_its_label_or_text_even_when_its_id_cannot_tell_it_apart():
-    rows = [el(f"e{n}", role="cell", label=f"Chat with Sara {n}", value="3 new", identifier="row") for n in range(roads.MAX_INDEX + 1)]
+    rows = [el(f"e{n}", role="cell", label=f"Chat with Sara {n}", value="3 new", identifier="row", rect=(0, 44 * n, 390, 44)) for n in range(roads.MAX_INDEX + 1)]
     last = rows[-1]  # the 21st that shares the id: no index reaches it
     made = move_of("tap", last, rows, target={"ref": last.ref})
     assert made == {"tool": "tap", "target": {"row": True}}

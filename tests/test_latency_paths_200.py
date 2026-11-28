@@ -207,7 +207,7 @@ def test_the_daemon_switches_on_the_first_swipe_of_the_feed_and_a_launch_uses_th
         d = make(s, log=logged.append)
         caps_asked, ends = [], [Settled(0.77, True, False, True), Settled(0.5, True, True), Settled(0.4, True, False, True)]
 
-        async def frames(after_seq, still=None, cap=2.0, since=None, early=None):
+        async def frames(after_seq, still=None, cap=2.0, since=None, early=None, expect=None):
             caps_asked.append(cap)
             return ends.pop(0)
         d._settle_frames = frames

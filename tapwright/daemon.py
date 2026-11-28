@@ -31,7 +31,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                diagnostics, dialog, driving, explorefloor, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, scriptrepair, scriptrepairrun, store, trace, trip, ui, uxcheck)
-from . import autoroute, tokentext
+from . import autoroute, loopdog, tokentext
 from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
 from . import auditlog, center_tool, grants as grantlib, otp as otplib, schedules as schedulelib
@@ -61,6 +61,9 @@ CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
 CLOSE_KILL_CAP = 5.0  # the longest close_app waits for iOS's process control to end the app
 HOME_STUCK_CAP = 10.0  # press_button home while the app in front is frozen: WebDriverAgent's home screen route
+# (2.0.3 round N) a given-up hold (session.RunnerHeld): after close_app, open_app or the home button, the clock is asked
+# about every HIT_FREE_EVERY for this long at most; iOS's launch of an app is waited for this long at most
+HELD_AFTER_WAIT, HELD_LAUNCH_CAP = 2.0, 10.0
 HOME_LOCK_CAP = 2.0  # ... and the lock question asked before it
 CLOSE_TERMINATE_CAP = 3.0  # ... and for WebDriverAgent's terminate afterwards, which has nothing left to wait for
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
@@ -95,6 +98,13 @@ NOTE_NO_OCR = "no OCR reading, so this look is the elements alone. " + ocr.INSTA
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
             "in its picture.")
 OCR_REF = re.compile(r"o[1-9][0-9]*")
+# (2.0.3 round N, N-F7) an o ref is touched only when its text is still within this many points of where the look read
+# it: the picture's text is read once more right before the touch (an o ref tapped 6 s after the look, on a list cut
+# short, went to another control: the screen had moved and nothing said so)
+O_REF_STILL = 12.0
+# (round O, review RN-M4) a check older than this when the touch's gate has run (a queue, a banner wait) is made again
+# there, right before the touch
+O_REF_FRESH = 1.0
 OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its centre):"
 OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
 # (2.0) the calls that need no read of the app: while one blocks even the runner's bounded routes (not-answering),
@@ -152,6 +162,15 @@ HANDS_FRESH = 1.5  # seconds after a hands touch ended within which a settle is 
 # highlight (0.11 s) read the tree mid-transition: right after a back, `tap {"label": "General"}` found the outgoing
 # page's title too ("2 elements match"). The stillness after a highlight is about 0.1-0.2 s; 0.35 s lets the push start.
 HANDS_SETTLE_MIN = 0.35
+# (2.0.3, phone 2026-11-26) how long after a touch aimed at an element that has an action (a tap, long press or toggle
+# on a button, a row, a switch, by ref, id, label or text) the screen may stay as it was before "No visible change." is
+# believed, counted from the touch. Since 2.0 a tap takes about 0.1 s (3 s in 1.10, which hid it), and a React Native
+# app started its navigation a few hundred ms after the settle had answered "nothing changed" (0.38 s): twice in one
+# sweep, and the note then said "try once more", so a second tap would land on the new screen. A change that starts
+# within the wait is settled as any other. Not for a point, an o ref or a picture text (often nothing there acts), nor
+# a scroll, swipe or drag, nor an app whose screen never stands still (its short cap: SettleCap).
+EXPECT_CHANGE_WAIT = 1.5
+EXPECT_TOOLS = ("tap", "long_press", "toggle")
 NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or video); "
                "positions may be mid-change.")
 
@@ -186,6 +205,15 @@ _PICTURE_AIM: contextvars.ContextVar["int | None"] = contextvars.ContextVar("tap
 # (2.0.1, review R201 M1) the touch under way is aimed by a {text} found in the picture (_by_picture_text): the agent
 # meant what shows the text, not a point of its own, so the touch waits out a notification banner as an element's does
 _PICTURE_TEXT: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_picture_text", default=False)
+# (round O, review RN-M4) an o ref's check for this call: (ref, its text, when it was made: hub.mono() before its read
+# (round P, RO-L4), the text's centre it found (round P, RO-M1)); None otherwise
+_O_REF_CHECK: contextvars.ContextVar["tuple[str, str, float, tuple[float, float]] | None"] = contextvars.ContextVar(
+    "tapwright_o_ref_check", default=None)
+# (2.0.3, the phone test of 137b583) how the settle of the action whose answer is being read ended, for that read only: True
+# on frames that stood still, False on its cap with frames still changing (a feed), None when no action's settle came
+# before the read (a look, wait_for's polls) or it said neither. Daemon._still_mark asks it before a slow app's planned
+# long read. A context variable, never a field of the session another client's call could overwrite (CodeRabbit, PR #29)
+_SETTLED: contextvars.ContextVar[bool | None] = contextvars.ContextVar("tapwright_settled", default=None)
 # A repaired script's check replay: the floor gates only the steps the repair made (they carry `repaired`); the script's own
 # unchanged steps run as a plain replay would, as the person wrote them (lead's ruling on review R180 M6).
 _FLOOR_REPAIRED_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_floor_repaired_only", default=False)
@@ -491,14 +519,50 @@ def alike_on_glass(a: Frame | None, b: Frame | None, screen: tuple[float, float]
         return False
 
 
+@dataclasses.dataclass(frozen=True)
+class StillMark:
+    """(2.0.3) What a read that could lead to a long one kept before it went out (Daemon._still_mark): the newest
+    frame, fresh then, which the frame after the read is compared with (kept here, so frames the video source sends
+    during the read can't push it out of the hub: CodeRabbit, PR #30). None: the picture before the read couldn't be
+    judged (comparing it failed), which counts as a video: no long read (review R203c L3)."""
+    frame: Frame | None
+
+
+def _unlike_box(x: "Image.Image", y: "Image.Image") -> tuple[int, int, int, int] | None:
+    """The box (left, top, right, bottom) of the thumb pixels where two thumbs differ by more than ALIKE_TOLERANCE;
+    None where they don't."""
+    return ImageChops.difference(x, y).point(lambda v: 255 if v > ALIKE_TOLERANCE else 0).getbbox()
+
+
 def _where_unlike(a: Frame | None, b: Frame | None) -> str:
     """(the timing trace only) Where two frames differ, as a box in the thumb's pixels (1/ALIKE_SCALE of the capture)."""
     try:
         x, y = a.thumb, b.thumb  # type: ignore[union-attr]
-        box = ImageChops.difference(x, y).point(lambda v: 255 if v > ALIKE_TOLERANCE else 0).getbbox()
-        return f" (thumb {x.size[0]}x{x.size[1]}, differs in {box})"
+        return f" (thumb {x.size[0]}x{x.size[1]}, differs in {_unlike_box(x, y)})"
     except Exception:  # noqa: BLE001 - only a trace note
         return ""
+
+
+def unlike_share(a: Frame, b: Frame, screen: tuple[float, float] | None,
+                 turn: int = 0) -> tuple[float, tuple[int, int, int, int] | None] | None:
+    """(2.0.3) (the share of the compared picture that the box where two frames differ covers, that box in thumb pixels)
+    or None when they can't be compared. Upright with the screen's size known, the strips alike_on_glass leaves out and
+    the status bar's (STATUS_BAR, as the picture's text leaves it out: the clock's minute) are left out of it."""
+    x, y = a.thumb, b.thumb
+    if x is None or y is None or x.size != y.size:
+        return None
+    w, h = x.size
+    crop = (0, 0, w, h)
+    if not turn and screen and screen[0] and screen[1] and screen[0] <= screen[1]:
+        side, bottom = math.ceil(EDGE_PT * w / screen[0]), math.ceil(HOME_STRIP_PT * h / screen[1])
+        top = math.ceil(STATUS_BAR * h / screen[1])
+        if w > 4 * side and h > top + 4 * bottom:
+            crop = (side, top, w - side, h - bottom)
+    box = _unlike_box(x.crop(crop), y.crop(crop))
+    area = (crop[2] - crop[0]) * (crop[3] - crop[1])
+    if box is None or area <= 0:
+        return 0.0, None
+    return (box[2] - box[0]) * (box[3] - box[1]) / area, box
 
 
 def _screen_sig(items: list[ui.Element]) -> tuple:
@@ -510,7 +574,42 @@ MAX_SCROLL_SWIPES = 15  # `scroll to start|end` gives up after this many swipes
 SCROLL_CAP = 12.0  # ... or after this many seconds (a spinner or a bounce can keep the screen moving)
 SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the directions each `to` can mean; the first is the default
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
-WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take
+# (2.0.3) the actions whose touches aren't checked against the app the agent last saw (Session._seen_check): they change the
+# app in front on purpose and their own answers show it (open_app, open_url, press_button: home and the app switcher), or
+# answer what iOS shows over any app (alert), or touch no screen (close_app, rotate)
+SEEN_EXEMPT = frozenset({"open_app", "open_url", "press_button", "alert", "close_app", "rotate"})
+WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take (2.0.3: unless a long read fits, below)
+STILL_AFTER_READ = 1.0  # (2.0.3) seconds a fresh frame is waited for after a cut read, to compare with the one before it
+PLAYS_NOW = 0.3  # (2.0.3, review R203d M1) seconds of the newest frames that must show a change for a screen to play now
+PLAYS_SPAN = 1.0  # (2.0.3, review R203c H1) seconds apart the two pictures are that say whether a slow app's screen plays
+FRAME_RECENT = 0.5  # (2.0.3, the phone) seconds within which the newest frame arrived on a stream that is delivering
+#                     (its frames come in bursts with one arrival time: a gap of 0 ms, so a "fresh" test by the gap
+#                     made a live feed wait 1.5 s before every read)
+STREAM_WAIT = 1.5  # (2.0.3, re-check R203b N2) seconds a read that could lead to a long one waits for a stream that is
+#                    open but has sent no fresh frame (it closes 30 s after the last call, and opens again with it)
+
+
+def _still_box_of(raw: str) -> float:
+    """TAPWRIGHT_STILL_BOX: a share from 0 to 1 (else the default, 0.6)."""
+    try:
+        value = float(raw) if raw.strip() else 0.6
+    except ValueError:
+        return 0.6
+    return value if math.isfinite(value) and 0.0 <= value <= 1.0 else 0.6
+
+
+# (2.0.3, the lead's decision after the phone test) the long try goes out after a cut normal read unless the picture
+# changed across the read inside a box of more than this share of the compared picture (unlike_share): a playing feed
+# changes all of it, while a heavy home screen's banner moved on over 36 % of it during a read (phone, 2026-11-26), and a
+# spinner of 21 x 5 thumb pixels changed before it. The same share between the newest frame and another picture at
+# least a second older, before a slow app's planned long read, gives that read 2.0.2's rules (_plays). 0: any change (above the stream's tolerance, outside the left-out
+# strips) stops the try; 1: nothing does. For measuring.
+STILL_BOX = _still_box_of(os.environ.get("TAPWRIGHT_STILL_BOX", ""))
+# (round G2) the share of the picture (by STILL_BOX's measure: the box of what differs) past which the screen is taken for
+# another one than the screen a long read failed on: that read's block doesn't hold there (ReadBudget.block_state)
+OTHER_SCREEN = 0.25
+OTHER_FRESH = 10.0  # seconds: the newest frame older than this says nothing of the screen now (a long read takes up to 8)
+WAIT_FOR_LONG_MARGIN = 0.5  # (2.0.3) seconds of `wait_for`'s deadline a long read leaves unused (its clock is not ours)
 WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up instead of reading again
 SKIP_TEXT_WAIT = 3.0  # (2.0) seconds a step's `if` may spend reading the picture's text on a cut-short screen
 WAIT_FOR_FIRST_READ = 3.0  # `wait_for`'s first read of the screen gets at least this long (twice the slowest look allowed)
@@ -579,9 +678,32 @@ HEALTH_TICK = 0.5  # seconds between the reads that see whether the Health sheet
 NOTE_DELIVERED = "the {touch} was delivered, and nothing on screen changed within {seconds:.1f} s. {hint}"
 HINT_FIELD = "It is a text field: type_text types into it."
 HINT_BARE_POINT = "No element is at that point."
-HINT_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
-                "report it as a finding.")
+# (2.0.3) never "try once more" first: an app that answers late shows its next screen after the note, and a second
+# touch then lands on that screen. A look or a wait_for comes first; only a screen still the same earns the touch again.
+HINT_LOADING = ("The app may still be on its way: look, or wait_for what you expect, next; only if the screen is still "
+                "the same, try the touch again, and if that changes nothing either, report it as a finding.")
 DELIVERED_TOOLS = ("tap", "long_press")
+
+
+BANNER_PROBE_Y = 80.0  # (round G) where the zone is asked whether a banner is over the app: below the status bar
+
+
+def _flick_up(a: dict) -> bool:
+    """(round G, H) Is this swipe a flick up off the top edge: it ends within FLICK_TOP of the top, at least FLICK_MIN
+    above its start, moving more up than sideways, in at most FLICK_SECONDS? On a banner it goes at once
+    (Session._front_rules): that is how a person sends one away."""
+    try:
+        x0, y0, x1, y1 = (float(a[k]) for k in ("x0", "y0", "x1", "y1"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    try:
+        seconds = float(a.get("seconds", 0.35))
+    except (TypeError, ValueError):
+        return False
+    # (round H, review RG H1) at least FLICK_MIN up, at most FLICK_SECONDS: shorter is a tap on the banner, slower a
+    # long press on it
+    return (y1 <= session_module.FLICK_TOP and y0 - y1 >= session_module.FLICK_MIN and y0 - y1 > abs(x1 - x0)
+            and seconds <= session_module.FLICK_SECONDS)
 
 
 def touch_name(tool: str) -> str:
@@ -1272,6 +1394,30 @@ CRASH_LOOKUP = 15.0  # seconds each step of the optional crash check (the apps' 
 LOG_VERIFY_FAILS = 2 # checks of whose process a log stream is reading that may fail in a row before the stream is left
 LOG_START_SLACK_MS = 1000  # an entry this much before a process's start time still counts as its own (clocks, rounding)
 LOG_CHECK, LOG_BACKOFF_MAX = 3.0, 60.0 # seconds between looks at whether the app's process is still the one read; the longest wait between tries to start a stream
+# (2.0.3, brief Q fix 4) the log watchers share one question of the phone's process list (0.35-0.9 s each over the tunnel;
+# one watcher per app ever opened each asked its own: 73 questions in 30 s with a dozen apps, the phone idle): at most one
+# every PROC_EVERY seconds while busy (a `logs` or `crash` call, or any call while a watched app is in front, within
+# PROC_BUSY_FOR), else one every PROC_QUIET; a `logs` call's own question goes at once
+PROC_EVERY, PROC_QUIET, PROC_BUSY_FOR = 1.0, 30.0, 60.0
+PROC_ASK_WAIT = 5.0  # seconds one shared question may take
+
+
+@dataclasses.dataclass
+class SharedProcs:
+    """(2.0.3) One answer of the phone's process list, for every log watcher and `logs` call that can use it: the running
+    processes of each app it was asked for (`of`), or the error that came instead. `marks`: each ring's `added` count as
+    the question went out, which is what the answer vouches for (lines read before the question)."""
+    n: int  # the question's number: a later question has a higher one (the clock is too coarse to order them on Windows)
+    sent: float  # time.monotonic() when the question went out
+    of: dict[str, list[Proc]]
+    marks: dict[str, int]
+    error: Exception | None = None
+
+    def of_or_raise(self, bundle: str) -> list[Proc]:
+        """The app's processes, or the error the question got (as a question of that app alone raised it)."""
+        if self.error is not None:
+            raise self.error
+        return list(self.of.get(bundle, []))
 # looks for a report once the app is gone, seconds between them, later calls that look again
 CRASH_POLLS, CRASH_POLL, CRASH_LATE_TRIES = 3, 1.0, 3
 CRASH_CUT_CODES = ("not_connected", "not_answering", "reconnecting", "timeout")  # errors a crash can end a call with
@@ -1316,6 +1462,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                  stream_linger: float = 30.0, stream_retry: float = 1.0, settle_still: float = STILL,
                  settle_first_frame: float = 1.0, settle_fallback: float = 0.6,
                  settle_quiet: float = MIN_QUIET, shot_wait: float = 1.0, shot_fresh: float = 1.0,
+                 settle_expect: float | None = None,
                  pace_tick: float | None = PACE_TICK, pace_quiet: tuple[float, float, float] = PACE_QUIET,
                  actions: ActionLog | None = None, audit: "auditlog.AuditLog | None" = None,
                  grant_clock: "Callable[[], datetime.datetime] | None" = None) -> None:
@@ -1346,6 +1493,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._log_life: dict[str, tuple[Proc, int]] = {}  # that process, and the ring's `added` count when it was last vouched for
         self.log_retry, self.log_idle, self.log_warmup = LOG_RETRY, LOG_IDLE, LOG_WARMUP
         self.log_check, self.log_drain = LOG_CHECK, LOG_DRAIN
+        # (2.0.3) the watchers' shared process-list question (_shared_procs): the newest answer, the newest question out,
+        # when it went out, every question still out (cancelled at shutdown), and when a client last called / asked for
+        # logs or a crash
+        self.proc_every, self.proc_quiet, self.proc_busy_for = PROC_EVERY, PROC_QUIET, PROC_BUSY_FOR
+        self._procs_last: SharedProcs | None = None
+        self._procs_flight: "asyncio.Task[SharedProcs] | None" = None
+        self._procs_sent, self._procs_n = -math.inf, 0
+        self._procs_tasks: set[asyncio.Task] = set()
+        self._called_at = self._diag_at = -math.inf
         self.crash_lookup = CRASH_LOOKUP
         self._log_dead: dict[str, str] = {}  # bundle id -> why its log stream can't be started (tries gave up)
         self.crash_polls, self.crash_poll = CRASH_POLLS, CRASH_POLL
@@ -1372,16 +1528,25 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self.unsettled = False  # the last action returned without a settle: the screen may still be moving, for every client
         # (2.0, worker I) that action's settle, owed: (the stream's (seq, frame) as its gesture went out, its cap, when it
         # returned (monotonic)); None when unknown (a timeout). See _settle_unsettled.
-        self.unsettled_from: tuple[tuple[int, Frame | None], float, float] | None = None
+        # (the mark as the gesture went out, the settle's cap, when the call returned, when a change stops being
+        # expected: EXPECT_CHANGE_WAIT, or None)
+        self.unsettled_from: tuple[tuple[int, Frame | None], float, float, float | None] | None = None
         # settle: how long a still screen is quiet, how long to wait for a first frame, and the
         # blind sleep used when the stream gives no frames at all
         self.settle_still, self.settle_first_frame, self.settle_fallback = settle_still, settle_first_frame, settle_fallback
         self.settle_quiet = settle_quiet
+        # EXPECT_CHANGE_WAIT; None: it, unless the quiet span was shortened (a test's daemon: as HANDS_QUIET)
+        self.settle_expect = ((EXPECT_CHANGE_WAIT if settle_quiet >= MIN_QUIET else 0.0) if settle_expect is None
+                              else settle_expect)
         self.control = control or Controller()
         self.hub = FrameHub()
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
+        self._stream_wait_failed: int | None = None  # (2.0.3) the newest frame's seq when a wait for the stream got nothing
         self.log = lambda message: log(self.scrub_everywhere(message))  # (what any sink gets holds no account's value)
+        # (2.0.3) the sink itself, for the loop watchdog's thread (loopdog.py): what it writes is file, line and function
+        # names, never a value, and the accounts' scrub belongs to the loop's thread
+        self._raw_log = log
         self._media_lock = asyncio.Lock()  # makes a media add's lookup, start and claim of the photo wait one step
         # the add that holds the phone, and until when: iOS's photo prompt, or a video's copy and import (1.7.9). The
         # runner answers nothing else meanwhile (Codex, PR #8); `_photo_wait_kind` says which (HOLD_WORDS)
@@ -1439,6 +1604,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             self.session.on_tree = self._watch_code_field  # (each read the daemon builds says whether one shows)
             self.session.screen_still = self._still_for_budget  # (2.0: a still screen's read gets the normal budget)
+            self.session.still_mark = self._still_mark  # (2.0.3: stillness across a read, for the long budget)
+            self.session.still_across = self._still_across
+            self.session.other_screen = self._other_screen  # (round G2: a long read's block holds on its screen only)
         except AttributeError:
             pass
         # the passcode unlock (§18.6, §11.5; unlock.py): its rules and counts, and the lock screen it types on
@@ -1552,7 +1720,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 "fps": self.hub.fps(), "driver": self.control.driver, "paused": self.control.paused,
                 "in_use": self.phone_in_use(),  # (the schedules' busy test, §22.3; `driver` is the queue's own)
                 "size": {"w": w, "h": h}, "quality": self.preset,
-                "accepts": [*ACCEPTS, "video"] if self.video is not None and self.video.live else ACCEPTS}
+                "accepts": [*ACCEPTS, "video"] if self.video is not None and self.video.live else ACCEPTS,
+                **self._runner_status()}
+
+    def _runner_status(self) -> dict:
+        """(2.0.3 round N) The phone's runner's route version once it answered."""
+        version = getattr(self.session, "tw_version", 0)
+        if not isinstance(version, int) or isinstance(version, bool) or version <= 0:
+            return {}
+        return {"runner": version}
 
     def subscribe(self) -> asyncio.Queue:
         self._asked_for()
@@ -1842,10 +2018,26 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # would stop the runner and the add with it. The add reports a real drop itself when it ends.
             self.log(f"no answer while a media add holds the runner ({self._photo_wait_kind}): {reason}")
             return
+        if isinstance(reason, session_module.RunnerHeld):
+            # (2.0.3 round N, N-F2) the app in front holds XCTest's accessibility past HIT_HELD while the runner answers:
+            # no reconnect, no new session, no request into it; agents are answered not_answering until the clock
+            # answers again (_held_call), or they get out with close_app, open_app or the home button
+            if not isinstance(self.stuck, session_module.RunnerHeld):
+                self.log(f"runner held: {reason}")
+            self.stuck = reason
+            self._set_state("not-answering", self._redact(str(reason))[:200])
+            for view in self.control.clients.values():
+                view.dropped = True  # (the screen may have changed under every agent's list meanwhile)
+            self._thin_place = None
+            return
+        held = isinstance(self.stuck, session_module.RunnerHeld)
+        if held:  # (round N) a real drop while a hold was given up: reconnect, as for any drop
+            self.stuck = None
+            self.session.runner_held = None
         stuck = reason if isinstance(reason, AppNotAnswering) else None
         if stuck is not None:
             self.stuck = stuck
-        if self.state in ("live", "locked"):
+        if self.state in ("live", "locked") or held:
             self.log(f"connection lost: {reason}")
             self._set_state("not-answering" if stuck is not None else "reconnecting", self._redact(str(reason))[:200])
         for view in self.control.clients.values():
@@ -1984,11 +2176,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             await self._supervise(stop)
         finally:
-            for helper in (pacer, watch, dog, *self._log_tasks.values()):
+            for helper in (pacer, watch, dog, *self._log_tasks.values(), *self._procs_tasks):
                 if helper is not None:
                     helper.cancel()
                     await asyncio.gather(helper, return_exceptions=True)
             self._log_tasks.clear()
+            self._procs_tasks.clear()
 
     # ---- the watchdog (§24.5) ----
     async def _watch_phone(self, stop: asyncio.Event) -> None:
@@ -2120,13 +2313,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         from outside like a phone that doesn't answer."""
         loop = asyncio.get_running_loop()
         worst, told = 0.0, loop.time()
-        while not stop.is_set():
-            before = loop.time()
-            await asyncio.sleep(LOOP_TICK)
-            worst = max(worst, loop.time() - before - LOOP_TICK)
-            if worst >= LOOP_HELD and loop.time() - told >= LOOP_SAY_EVERY:
-                self.log(f"the event loop was held for {worst:.2f} s; the tunnel's packets waited meanwhile")
-                worst, told = 0.0, loop.time()
+        # (2.0.3, brief Q fix 5) and, while it is held past loopdog.STALL, by what: a thread writes the loop thread's stack
+        dog = loopdog.LoopDog(self._raw_log).start()
+        try:
+            while not stop.is_set():
+                before = loop.time()
+                await asyncio.sleep(LOOP_TICK)
+                dog.beat()
+                worst = max(worst, loop.time() - before - LOOP_TICK)
+                if worst >= LOOP_HELD and loop.time() - told >= LOOP_SAY_EVERY:
+                    self.log(f"the event loop was held for {worst:.2f} s; the tunnel's packets waited meanwhile")
+                    worst, told = 0.0, loop.time()
+        finally:
+            dog.stop(wait=False)  # (a daemon thread: it ends at its next look, without holding the loop for it)
 
     # ---- the stream's pace ----
     def _preset_fps(self) -> int:
@@ -2186,7 +2385,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     async def _supervise(self, stop: asyncio.Event) -> None:
         attempt = failures = 0
         while not stop.is_set():
-            if self.state not in ("live", "locked"):
+            # (round N) a given-up hold keeps the line: nothing to reconnect (the heartbeat's check is refused meanwhile)
+            if self.state not in ("live", "locked") and not isinstance(self.stuck, session_module.RunnerHeld):
                 self._connecting = True
                 try:
                     try:
@@ -2237,6 +2437,17 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 continue
             if self._photo_wait_left() is not None:
                 continue  # a media add holds the runner (iOS's photo prompt, a video's import): no answer is expected, and none is a drop
+            if isinstance(self.stuck, session_module.RunnerHeld):
+                # (round O, review RN-M3) a given-up hold: one question at the clock a beat, nothing else; a real answer
+                # ends the state with no call (the agent stopped, or a person closed the app on the phone)
+                try:
+                    if await self.control.read(lambda: self.session.held_answers(session_module.HIT_FREE_WAIT)):
+                        self._end_held("the clock answered at a heartbeat")
+                except ConnectionLost as e:
+                    self.lost(e)
+                except Exception as e:  # noqa: BLE001 - the next beat asks again
+                    self.log(f"heartbeat while the runner was held: {e}")
+                continue
             try:
                 locked = await self.control.read(lambda: self._connected_only(self.session.locked))
             except ConnectionLost as e:
@@ -2268,6 +2479,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         A single scoped app can remain navigation metadata for scheduled routes.
         ux_rules, maps and accounts configure QA reports and stored workflow data.
         dialog supports platform moments that require a person's intervention."""
+        self._called_at = time.monotonic()  # (the log watchers ask the process list more often while agents call: _proc_gap)
         # Legacy app lists can identify a scheduled route's launch app; they never limit access.
         app_hint = app_hint or (scope.apps[0] if scope is not None and len(scope.apps) == 1 else None)
         floor_rules = policy  # (only explore's and a repair's skip floor reads it: _FLOOR_RULES)
@@ -2702,7 +2914,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         task = self._log_tasks.get(bundle)
         if (task is None or task.done()) and bundle not in self._log_dead:
             self._rings.setdefault(bundle, diagnostics.LogRing())
-            self._log_tasks[bundle] = asyncio.create_task(self._watch_logs(bundle), name=f"logs-{bundle}")
+            self._log_tasks[bundle] = asyncio.create_task(self._watch_logs(bundle, self._procs_n), name=f"logs-{bundle}")
 
     def restart_logs(self, bundle: str) -> None:
         """The app was started (open_app): read its new process at once and stop reading the old one. A stream asked
@@ -2714,6 +2926,67 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._log_pids.pop(bundle, None)
         self._log_dead.pop(bundle, None)  # a new start is a new try
         self.ensure_logs(bundle)
+
+    def _proc_gap(self) -> float:
+        """(2.0.3) Seconds between the watchers' shared process-list questions now: `proc_every` while busy (a `logs` or
+        `crash` call within `proc_busy_for`, or any call within it while the app in front is watched), else
+        `proc_quiet`. Never slower than a watcher's own pace while busy (log_check, log_retry), nor so slow when quiet that
+        a watcher whose app has gone asks fewer than twice before it gives up (log_idle)."""
+        now = time.monotonic()
+        busy = min(self.proc_every, self.log_check, self.log_retry)
+        if now - self._diag_at < self.proc_busy_for:
+            return busy
+        if now - self._called_at < self.proc_busy_for and self._bundle() in self._log_tasks:
+            return busy
+        return max(busy, min(self.proc_quiet, self.log_idle / 2))
+
+    async def _shared_procs(self, bundle: str, after: int, fresh: bool = False) -> SharedProcs:
+        """(2.0.3) An answer of the phone's process list that covers `bundle` and was asked after question number `after`
+        (`_procs_n` at the moment the caller needs it from): the newest one if it is, else one now out that is, else a new
+        question once `_proc_gap` has passed since the last one went out (one question serves every watcher; a watcher
+        never asks while one is out). `fresh` (a `logs` call, a stream that just ended, a watcher's first look): no gap is
+        waited, and an older question out isn't waited for either. Its error, if it got one, is in the answer
+        (SharedProcs.of_or_raise)."""
+        while True:
+            last = self._procs_last
+            if last is not None and last.n > after and bundle in last.marks:
+                return last
+            flight = self._procs_flight
+            if flight is not None and not flight.done() and (self._procs_n > after or not fresh):
+                answer = await asyncio.shield(flight)
+                if answer.n > after and bundle not in answer.marks:
+                    after = answer.n  # (asked before this app's ring was made: ask again)
+                continue
+            wait = 0.0 if fresh else self._procs_sent + self._proc_gap() - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(min(wait, self.proc_every))  # (the gap is asked again: a call may make it busy)
+                continue
+            self._procs_n += 1
+            self._procs_sent = time.monotonic()
+            self._procs_flight = task = asyncio.create_task(self._ask_procs(self._procs_n, self._procs_sent), name="procs")
+            self._procs_tasks.add(task)
+            task.add_done_callback(self._procs_tasks.discard)
+
+    async def _ask_procs(self, n: int, sent: float) -> SharedProcs:
+        """One question of the process list for every app whose log is kept, with each ring's count as it goes out
+        (SharedProcs.marks). The device's `processes_of` asks iOS once for all of them; a device without it is asked
+        app by app (test fakes)."""
+        marks = {b: ring.added for b, ring in self._rings.items()}
+        device = self.session.device
+        try:
+            every = getattr(device, "processes_of", None)
+            if every is not None:
+                of = await _wait_for(every(sorted(marks)), PROC_ASK_WAIT)
+            else:
+                of = {b: await _wait_for(device.app_processes(b), PROC_ASK_WAIT) for b in marks}
+            answer = SharedProcs(n, sent, {b: list(of.get(b, [])) for b in marks}, marks)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - whatever the phone said, every asker gets it as its own question's error
+            answer = SharedProcs(n, sent, {}, marks, e)
+        if self._procs_last is None or self._procs_last.n < n:
+            self._procs_last = answer  # (a `logs` call's question may overtake an older one: the newest stays)
+        return answer
 
     async def _read_log(self, bundle: str, proc: Proc, ring: "diagnostics.LogRing", after, got: list[int]) -> None:
         """One log stream of one process into the ring; `got[0]` counts the entries it gave. `after`: where an earlier
@@ -2736,7 +3009,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         are, since nothing vouches for them. Only the ring knows what is vouched for (a `logs` call vouches without the
         watcher looking, so the watcher's own mark can be behind): a vouched line is never taken back."""
         try:
-            now = await _wait_for(self.session.device.app_processes(bundle), 5)
+            now = (await self._shared_procs(bundle, self._procs_n, fresh=True)).of_or_raise(bundle)
             if any(p.same_life(proc) for p in now):
                 return
             holder = await _wait_for(self.session.device.process_holder(proc.pid), 5)
@@ -2752,30 +3025,36 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             ring.discard_unvouched()  # another process was seen holding the pid: its absence proves nothing
         # (else: gone, with nobody holding the pid, is an ordinary end: its last lines are its own)
 
-    async def _watch_logs(self, bundle: str) -> None:
+    async def _watch_logs(self, bundle: str, after: int = 0) -> None:
         """Keep the app's own process's log entries in its ring. An entry of any other pid is never kept (the stream is
         asked for the app's pid alone, and checked again here). While a stream is open, the app's process is looked
         for every `log_check` seconds: when it is another pid, or none, the stream is left (the app started again).
         When the process is gone, look for a new one until `log_idle` seconds have gone by; `ensure_logs` starts the
         task again when it is needed. A stream that can't be started `LOG_STREAM_FAILS` times in a row (no log service
         on this phone) is given up, with waits growing between the tries, and `logs` says so."""
-        ring, idle, told, fails = self._rings[bundle], 0.0, False, 0
+        ring, told, fails = self._rings[bundle], False, 0
+        # (2.0.3) the shared process list's answers (_shared_procs): each look takes one asked after the one before it, the
+        # first one asked after the watcher was made (`after`: an older one may show the app's process before a restart),
+        # at once; the app gone for `log_idle` seconds of them ends the watcher
+        seen, missing, first = after, None, True
         while True:
+            answer = await self._shared_procs(bundle, seen, fresh=first)
+            seen, first = answer.n, False
             try:
-                procs = await self.session.device.app_processes(bundle)
+                procs = answer.of_or_raise(bundle)
             except Exception as e:
                 if not told:
                     self.log(f"logs: couldn't find {bundle}'s process: {e}")
                     told = True
                 procs = []
             if not procs:
-                idle += self.log_retry
-                if idle > self.log_idle:
+                missing = answer.sent if missing is None else missing
+                if answer.sent - missing > self.log_idle:
                     self._log_pids.pop(bundle, None)
                     return
                 await asyncio.sleep(self.log_retry)
                 continue
-            idle, proc = 0.0, procs[0]
+            missing, proc = None, procs[0]
             self._log_pids[bundle] = proc.pid
             prior = self._log_life.get(bundle)
             if prior is not None and not prior[0].same_life(proc):
@@ -2796,9 +3075,26 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     await asyncio.wait({reader}, timeout=self.log_check)
                     if reader.done():
                         break
-                    asked = ring.added  # (what came before the question is what its answer vouches for)
+                    # the next shared answer, unless the stream ends first (a quiet phone's answer can be a while)
+                    ask = asyncio.ensure_future(self._shared_procs(bundle, seen))
                     try:
-                        now = await _wait_for(self.session.device.app_processes(bundle), 5)
+                        await asyncio.wait({reader, ask}, return_when=asyncio.FIRST_COMPLETED)
+                    except BaseException:
+                        # (CodeRabbit, PR #30) the watcher stopped here (restart_logs, the service stopping): its own
+                        # wait for the next answer goes with it (the shared question itself is shielded: others keep it)
+                        ask.cancel()
+                        await asyncio.gather(ask, return_exceptions=True)
+                        raise
+                    if not ask.done():
+                        ask.cancel()
+                        await asyncio.gather(ask, return_exceptions=True)
+                        break
+                    answer = ask.result()
+                    seen = answer.n
+                    # (what came before the question is what its answer vouches for: the ring's count as it went out)
+                    asked = max(mark, answer.marks.get(bundle, mark))
+                    try:
+                        now = answer.of_or_raise(bundle)
                     except Exception:
                         unchecked += 1
                         if unchecked >= LOG_VERIFY_FAILS:
@@ -2847,7 +3143,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self.ensure_logs(bundle)
         if bundle in self._log_tasks and self._connected.is_set():
             try:
-                procs = await _wait_for(self.session.device.app_processes(bundle), 5)
+                procs = (await self._shared_procs(bundle, self._procs_n, fresh=True)).of_or_raise(bundle)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 procs = []
             life = self._log_life.get(bundle)
@@ -2867,9 +3165,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return
         asked = ring.added
         try:
-            procs = await _wait_for(self.session.device.app_processes(bundle), 5)
+            answer = await self._shared_procs(bundle, self._procs_n, fresh=True)
+            procs = answer.of_or_raise(bundle)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             return
+        asked = answer.marks.get(bundle, asked)  # (asked after this call began: its count as it went out)
         if not any(p.same_life(life[0]) for p in procs):
             if procs:  # the app is another process now: restart_logs reads that one
                 return
@@ -2906,6 +3208,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     async def _diag_tool(self, name: str, args: dict, given: dict[str, str] | None) -> dict:
         """`logs` or `crash`. `given`: the apps of a personal-mode agent (None: a dedicated device)."""
         args = _checked_diag(name, args)
+        self._diag_at = time.monotonic()  # (the watchers keep the process list's word fresh for a while: _proc_gap)
         bundle, shown = self._diag_app(given)
         self._diag_count = None
         if name == "logs":
@@ -3714,13 +4017,20 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     over = performance.failures(self._performed[client_id], under)
                     missed = f"{'; '.join(over)}." if over else None
                 else:
+                    found: list[str | None] = []  # (CodeRabbit, PR #30) the app of the read that found the element
                     if (step["tool"] == "open_url" and "expect" in step and self._hints_wanted()
                             and self._link_expect(step["expect"])):
                         # (1.9.0 round 2) a link's expect says when it waited out the app's loading screen
                         missed = await self._expect_after_link(view, scope, step["expect"], seen_notes)
+                        found.append(self._read_app_now())
                     else:
-                        missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
-                                  if "expect" in step else None)
+                        missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded,
+                                                     found=found) if "expect" in step else None)
+                    if "expect" in step and missed is None and batch.positive_expect(step["expect"]):
+                        # (review RP M4, RP2 H2) its read found text, an id or a label it named: the screen it expected.
+                        # (CodeRabbit, PR #30) a link's expect too; and the app is that read's: a later picture check's
+                        # read of another app makes the record unknown, never that app's
+                        await self._record_front(view, found[0] if found else self._read_app_now())
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
                 if ran and step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
@@ -3916,7 +4226,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             await self.control.sleep(0.25)
 
     async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
-                      notes: list[str] | None = None, fold: bool = False) -> str | None:
+                      notes: list[str] | None = None, fold: bool = False,
+                      found: "list[str | None] | None" = None) -> str | None:
         """Does the step's expectation hold (§9.2)? None when it did, else why not. A text, id or label is waited
         for up to the timeout; `matches` is then checked once, on the screen as it is by then (§14.2). `notes`
         collects what a picture check has to say (an ignored element that isn't there). While this client records,
@@ -3925,6 +4236,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             missed = await self._expect_element(client_id, view, scope, expect)
             if missed is not None:
                 return missed
+            if found is not None:  # (CodeRabbit, PR #30: the app of the read that found it, before a picture check reads)
+                found.append(self._read_app_now())
         if expect.get("matches") is None:
             return None
         given = await self._given(scope) if scope is not None else None
@@ -3994,6 +4307,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         granted: list[bool] = []
         grant_token, scope_token = _GRANTED.set(granted), _SCOPE.set(scope)
         caller_token = _CALLER.set(client_id)
+        owner: list[str] = []  # (2.0.3) the reads of this call put their "took long" note here, for this answer only
+        owner_token = session_module.READ_OWNER.set(owner)
         said = _GRANT_CALL.get()  # (one made for this call's log line; a nested call's own otherwise)
         own_grants = said is None or said.taken
         if own_grants:
@@ -4007,6 +4322,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         shown_before = not self.unsettled and self.control.client(client_id).unlooked == 0
         pid_before = self._log_pids.get(before) if before else None
         try:
+            if isinstance(self.stuck, session_module.RunnerHeld):
+                await self._held_ask(name, args)  # (round N: the clock first, before anything waits for the line)
+            elif callable(carried := getattr(self.session, "hold_carried", None)) and carried():
+                await self._carried_wait(name, args)  # (round T: a hold an earlier call left, waited out first)
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
@@ -4019,10 +4338,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 except Refused as e:
                     # a call the crash cut short ends in an error too: it carries the note as well
                     note = await self._crash_note(client_id, scope, name, before, e, pid_before)
-                    if e.code != "dry_run" and (said.notes or note is not None):
+                    # (2.0.3) why the read this call made took long (a dry run's refusal leaves it for the next answer)
+                    slow = self._take_slow_note(owner) if e.code != "dry_run" else None
+                    if e.code != "dry_run" and (said.notes or note is not None or slow is not None):
                         notes = [*said.notes]  # why a matching grant didn't cover it (§19.3)
                         if note is not None:
                             notes.append(f"Note: {note}")
+                        if slow is not None:
+                            notes.append(f"Note: {slow}")
                         enriched = Refused(e.code, "\n".join([str(e), *notes]), draft=e.draft)
                         enriched.hit_check = e.hit_check
                         e = enriched
@@ -4034,6 +4357,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     answer = {**answer, "text": f"{answer['text']}\nNote: {note}"}
                 elif client_id not in self._crash_pending and name not in DIAG_TOOLS:
                     self._crash_since = self._wall()
+                if (slow := self._take_slow_note(owner)) is not None:
+                    # (2.0.3) the long try made a read's answer: said once, with the answer whose read it was
+                    answer = {**answer, "text": f"{answer['text']}\nNote: {slow}"}
                 if said.notes:  # a grant matched but didn't cover it: said before the person's OK (§19.3)
                     answer = {**answer, "text": "\n".join([answer["text"], *said.notes])}
                 if granted:  # a person's OK let a touch through: the answer ends with where it came from
@@ -4056,8 +4382,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             _GRANTED.reset(grant_token)
             _SCOPE.reset(scope_token)
             _CALLER.reset(caller_token)
+            session_module.READ_OWNER.reset(owner_token)
             if own_grants:
                 _GRANT_CALL.reset(grants_token)
+            self._carry_hold()
 
 
     # ---- personal mode: the agent stays in the apps it was given ----
@@ -4278,14 +4606,25 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
         if name in DIAG_TOOLS:  # a dedicated device; personal mode answers these in _within
             return await self._diag_tool(name, args, None)
+        target_in = args.get("target")
+        o_ref = target_in.get("ref") if isinstance(target_in, dict) else None
         args, read_at = self._ocr_target(client_id, args)
+        checked = None
+        if read_at is not None and isinstance(o_ref, str) and not args.get("force"):
+            asked = self.hub.mono()  # (round P, review RO-L4: the check's age counts from before its read)
+            # (CodeRabbit, PR #30) the text the check judges, taken before it waits: the late check judges the same one
+            text = self.control.client(client_id).ocr_text.get(o_ref)
+            args = await self._o_ref_still(client_id, name, o_ref, args)  # (round N, N-F7: `dry_run` checks too)
+            found = (float(args["target"]["x"]), float(args["target"]["y"]))
+            checked = (o_ref, text, asked, found) if text is not None else None
         if read_at is not None:
             # (CodeRabbit, PR #26) an o ref is a point of the screen as its text was read: the touch is refused `stale`
             # in its turn when another's action came since (a person, another agent), as a {text} by picture is (K-H2)
-            token = _PICTURE_AIM.set(read_at)
+            token, check_token = _PICTURE_AIM.set(read_at), _O_REF_CHECK.set(checked)
             try:
                 return await self._run_tool_core(client_id, name, args)
             finally:
+                _O_REF_CHECK.reset(check_token)
                 _PICTURE_AIM.reset(token)
         if "index" in args and isinstance(args.get("target"), dict) and "index" not in args["target"]:
             # `index` belongs inside `target`; a first-time agent put it beside it and got an ambiguous error back
@@ -4301,6 +4640,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view = self.control.client(client_id)
         # an agent that hasn't looked yet has no "last look": its first list is whole anyway
         notes = [NOTE_PERSON] if 0 <= view.seen < self.control.person_generation else []
+        if isinstance(self.stuck, session_module.RunnerHeld):
+            return await self._held_call(view, name, args, notes)
         if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
             return await self._close_stuck(self.stuck, args["app"], notes)
         if name == "press_button" and args.get("name") == "home" and isinstance(self.stuck, AppNotAnswering):
@@ -4463,10 +4804,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if box["note"] and spot is not None and not args.get("force"):
                 self._point_kept(view, spot, under_before)
             s.last_point = None
-            # the app the touch is meant for (see _taken_away): the newest read's, the reflex's or a target's own read
-            # included, before the touch goes out (CodeRabbit, PR #18 cycle 2); else the last snapshot's
-            read_app = getattr(s, "read_app", None)
-            box["app"], s.top_touch = (read_app if isinstance(read_app, tuple) else s.app), False
+            # the app the touch is meant for (see _taken_away, the next call's check, a keyboard tool's aim): this
+            # action's own read's (a target's, the reflex's: CodeRabbit, PR #18 cycle 2); else (2.0.3 round R) the one the
+            # agent's last answer showed, as rule B knows it (_meant_app), not an older read's
+            own = self._read_root[0] if self._read_root is not None else None
+            box["app"], s.top_touch = self._meant_app(view, own), False
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             trace.baseline(box["mark"][1])
             trace.mark("resolved")
@@ -4486,6 +4828,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
             if name in DELIVERED_TOOLS and not dry:
                 box["hint"] = self._delivered_hint(args)  # what the touch was aimed at, as the list had it
+            # (2.0.3) until when "nothing changed" isn't believed yet: a touch at an element that acts (EXPECT_CHANGE_WAIT)
+            box["expect"] = box["began"] + self.settle_expect if not dry and self._expects_change(name, args) else None
             if scoped is not None:
                 # the newest read is the one the touch is aimed from (a keyboard closed or a scroll on the way read
                 # again): it names a given app, or nothing is asked of a person and nothing is touched (Codex, PR #9
@@ -4562,12 +4906,30 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     self._touch_in_scope()  # (personal mode, a tap whose scope came from its read: before each touch)
                 await notify(ms)
             self.session.touch_hook = touching
-            # banners are visible UI, not a scope boundary: a point the agent chose itself is touched as it is. (2.0)
-            # A touch aimed at an element in the top of the screen waits a banner out (_guards_banners).
+            # (2.0.3) every touch in the top of the screen waits a banner out (_guards_banners), and no touch goes to an
+            # app the agent's last look or answer didn't show it (Session._seen_check)
             self.session.banner_guard = self._guards_banners(name, target)
+            self.session.touch_rules = self._touch_rules(view, name, target, args)
+            self.session.found_front = None
+            # (round O, review RN-M4) an o ref's text, read again after the gate (a queue, a banner wait) when its check
+            # is older than O_REF_FRESH
+            self.session.late_check = self._o_ref_late(*checked) if (checked := _O_REF_CHECK.get()) else None
             touched_token = _SCOPE_TOUCHED.set([])
             try:
-                return await act()
+                done = await act()
+                if name in ("open_app", "open_url") and not dry and self.control.holds_turn():
+                    # (CodeRabbit, PR #30 cycle 2) where it went, read in this action's own turn: a read in a turn of its
+                    # own, after, could find the app another agent's queued call brought forward meanwhile. A read that
+                    # fails is raised after the turn (_record_front); a turn given up between leaves no read (unknown)
+                    try:
+                        box["front"] = (await self._front_state_now(), None)  # (state None: no front route)
+                    except Exception as e:  # noqa: BLE001 (raised by _record_front, after the turn)
+                        box["front"] = (None, e)
+                if box.get("expect") is not None:
+                    # (CodeRabbit, PR #30) "nothing changed" isn't believed until EXPECT_CHANGE_WAIT after the touch
+                    # went out, not after the call began: a banner wait or a queue before it used up that time
+                    box["expect"] = time.monotonic() + self.settle_expect
+                return done
             finally:
                 _SCOPE_TOUCHED.reset(touched_token)
                 if self.control.holds_turn():  # (an action that let go of its turn and ended without it set nothing now)
@@ -4577,12 +4939,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     box["hands"] = (getattr(self.session, "hands_at", None),
                                     getattr(self.session, "hands_connection", None))
                     self.session.touch_hook, self.session.banner_guard = None, False
+                    found = getattr(self.session, "found_front", None)
+                    if isinstance(found, session_module.Front):  # (review RP2 M2: the system the agent saw has gone)
+                        view.seen_front = found
+                    self.session.touch_rules = self.session.found_front = None
+                    self.session.late_check = None
                     self.session.before_input = None
                     self.session.execution_guard = None
                     self.session.front_apps = None  # (a tap that checked the app in front cleared it already)
 
         try:
             result = await self.control.agent(act_as_agent)
+            if name in ("open_app", "open_url") and not dry:
+                # (round S2: until a read of this agent's answers again; round T, review RS-L1: set before the front is
+                # recorded, which may raise)
+                view.left_by_call = True
+                # (CodeRabbit, PR #30) after open_app, the app it opened must be the one in front as the record is
+                # made (another agent's queued call may have brought another forward since): else unknown
+                opened = view.aimed_app[1] if name == "open_app" and isinstance(view.aimed_app, tuple) else None
+                # (review RP M4: where it went, as the agent's, `look: false` too; CodeRabbit, PR #30 cycle 2: as read
+                # in the action's own turn, or unknown when no read was made there)
+                await self._record_front(view, opened, in_turn=True, taken=box.get("front"))
         except Unanswered as e:
             # the line is alive and the session stays; the screen may or may not have changed under the agent's list
             view.moved = True
@@ -4595,7 +4972,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self.lost(e)
             if isinstance(e, AppNotAnswering):  # the action went out, then the app stopped answering
                 self._announce("agent", name, ok=False, code="not_answering")
-                raise self._not_connected() from None
+                refusal = self._not_connected()
+                if isinstance(e, session_module.RunnerHeld) and box.get("input"):
+                    # (round N) a touch of this call was delivered: said first, as a delivered touch whose read fails
+                    point = self.session.last_point
+                    where = f" at ({round(point[0])}, {round(point[1])})" if point else ""
+                    refusal = Refused(refusal.code, f"The {touch_name(name)} was delivered{where}; then: {refusal}")
+                raise refusal from None
             self._announce("agent", name, ok=False, code="reconnecting")
             raise Refused("reconnecting", "the connection dropped during the action; look to check what "
                                           "happened") from None
@@ -4679,7 +5062,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if not reads_only:
             self.unsettled = not looks
             self.unsettled_from = (None if looks or "mark" not in box
-                                   else (box["mark"], settle or RESOLVE_SETTLE, time.monotonic()))
+                                   else (box["mark"], settle or RESOLVE_SETTLE, time.monotonic(), box.get("expect")))
         said_done = self._redact(str(result))  # (before element_name and the caption cut it, §18.6)
         self._announce("agent", name, label=element_name(said_done), caption=step_caption(name, said_done, args),
                        point=self._point(self.session.last_point))
@@ -4728,7 +5111,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         else:
             # (a launch settles with the launched app's cap: one known never to stand still waits SHORT_SETTLE)
             done = await self._settle(self._mark()[0], cap=settle, since=mark[1],
-                                      early=mark[0] if settle == CAP else None,
+                                      early=mark[0] if settle == CAP else None, expect=box.get("expect"),
                                       **({"bundle": self._opened} if name == "open_app" else {}))
         trace.settled()
         if session_module.TRACE:
@@ -4766,11 +5149,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # (a scroll to a target read the list after each of its drags, with the refs carried: its last read is no
         # move for the refs, though the content did move since the agent's last answer)
         moves = None if name in MAY_MOVE_CONTENT else name in MOVES_CONTENT and not to_target
-        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
-                                   drifted=to_target or bool(box.get("scrolled")),
-                                   snap=landed[0] if landed is not None else None,
-                                   hint="" if done.capped else box.get("hint", ""),  # (a screen still moving: no "nothing changed")
-                                   watched=time.monotonic() - box["began"], touch=touch_name(name))
+        settled = _SETTLED.set(True if done.still else False if done.capped else None)  # (for the answer's read only)
+        try:
+            answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
+                                       drifted=to_target or bool(box.get("scrolled")),
+                                       snap=landed[0] if landed is not None else None,
+                                       hint="" if done.capped else box.get("hint", ""),  # (a screen still moving: no "nothing changed")
+                                       watched=time.monotonic() - box["began"], touch=touch_name(name))
+        finally:
+            _SETTLED.reset(settled)
         if closed_first == NOTE_KEYBOARD and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
@@ -4825,6 +5212,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         nothing of the screen and leaves the check for the next call; open_app makes it moot."""
         if name == "apps" or (pending := self._recheck.pop(client_id, None)) is None or name == "open_app":
             return
+        if isinstance(self.stuck, session_module.RunnerHeld):
+            return  # (round N: only a way out gets here then; nothing of the screen can be read)
         before, when, persons = pending
         if time.monotonic() - when > RECHECK_WITHIN or self.control.person_generation != persons:
             return
@@ -5974,6 +6363,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise
         except DeviceError as e:
             raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
+        return self._after_open(view, a, bundle_id, shown, before, resume, back)
+
+    def _after_open(self, view, a: dict, bundle_id: str, shown: str, before, resume: bool, back: bool) -> str:
+        """What an app's launch leaves (open_app; round N: open_app while a hold was given up, _open_held): its launch
+        conditions, the agent's aim, the app's language, the crash watch; the answer's line."""
         conditions = launchlib.check(a)
         if conditions:
             self._launched_with[bundle_id] = conditions
@@ -5983,12 +6377,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if self._closed_on_purpose is not None and self._closed_on_purpose[0] == bundle_id:
             self._closed_on_purpose = None  # it runs again: its stopping would be news
         view.opened = True
+        view.left_by_call = True  # (round T, review RS-L1: open_app while the runner was held too, _open_held)
         view.auto = autoroute.Chain(bundle_id)  # (1.9.0, §30) the way from the app's start begins at what it shows now
         view.auto_begun.add(bundle_id)
         # (1.7.8, X item 4) nothing aimed at or typed into before belongs to the app that is opened: typing without a
         # target goes only to it, and no field of the app before is typed into again
         # (its name alone: `shown` already ends with the bundle id, and the stale-app refusal adds it once more)
         view.aimed_app, view.typed_field = (_bare_name(shown, bundle_id), bundle_id), None
+        self.session.opened_app = bundle_id  # (2.0.3, review RP2 M4: the app in front when the route can't name it)
         self.session.typed_into = self.session.typed_place = None
         if a.get("language"):  # the language its titles are kept under (§18.9); a start in the phone's own language clears it
             self._language[bundle_id] = str(a["language"])
@@ -6099,6 +6495,218 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         1.10.1's `_blind_tool` (`git show wip/1.10.1-speed:tapwright/daemon.py`) has the wording and the failure codes
         (a touch that went out and got no answer is `timeout`, never `internal`)."""
         return None
+
+    async def _held_ask(self, name: str, args: dict) -> None:
+        """(2.0.3 round N, N-F2) A call while a given-up hold stands (`self.stuck` a session.RunnerHeld, state
+        `not-answering`, the line kept), before anything of it waits for the line: the clock is asked once
+        (Session.held_answers, HELD_ASK_WAIT at most). A real answer ends the state and the call goes on as usual. Else
+        close_app, open_app and the home button go on, by the device channel (_held_call: how an agent gets out);
+        anything else is answered `not_answering` at once, nothing else asked."""
+        try:
+            answered = await self.control.read(self.session.held_answers)
+        except ConnectionLost as e:
+            self.lost(e)
+            raise self._not_connected() from None
+        if answered:
+            self._end_held("the clock answered")
+            return
+        if not isinstance(self.stuck, session_module.RunnerHeld):
+            return  # (the line dropped meanwhile: the call goes the usual way, and waits for it)
+        if name in ("close_app", "open_app") or (name == "press_button" and args.get("name") == "home"):
+            return
+        raise self._not_connected()
+
+    async def _held_call(self, view, name: str, args: dict, notes: list) -> dict:
+        """(round N) close_app, open_app and the home button while a given-up hold stands (_held_ask let them on): by
+        the device channel. Anything else (a call that came by another way): `not_answering`, nothing asked."""
+        stuck = self.stuck
+        if name == "close_app":
+            return await self._close_held(view, stuck, args["app"], notes)
+        if name == "open_app":
+            return await self._open_held(view, stuck, args, notes)
+        if name == "press_button" and args.get("name") == "home":
+            answer = await self._home_stuck(stuck, notes)
+            await self._held_freed("after the home button")
+            return answer
+        raise self._not_connected()
+
+    def _carry_hold(self) -> None:
+        """(2.0.3 round S, S-F2) At the end of every call: a hold that still stands (Session.hold_standing: a slow "no
+        element answered", and no real answer of the clock since) outlives the call that saw it. (The practice: a touch
+        refused slow at its banner wait's limit, 8.9 s, under HIT_HELD; the next look's front route went into the hold.)
+        (Round T, review RS-H2) It is carried as a hold, not as the given-up state: the state stays live, no agent's
+        list is dropped, and the next call waits out the rest of it (_carried_wait); `not_answering` comes only once
+        the hold is HIT_HELD old."""
+        standing = getattr(self.session, "hold_standing", None)
+        if (self.state == "live" and not isinstance(self.stuck, session_module.RunnerHeld) and callable(standing)
+                and standing()):
+            self.session.carry_hold()
+
+    async def _carried_wait(self, name: str, args: dict) -> None:
+        """(2.0.3 round T, review RS-H2, RS-H1) A call while a hold carried from an earlier call stands, before anything
+        of it waits for the line: the clock about every HIT_FREE_EVERY (HIT_FREE_MIN apart at least), each question
+        its own turn of the queue (control.read), so the heartbeat, close_app, open_app and other calls get theirs
+        between two; no front question, no tree. A real answer ends the hold and the call goes on as usual. Once the
+        hold is HIT_HELD old (from its first slow answer, not from this call; one question at least) it is given up:
+        the given-up state (RunnerHeld), then as _held_ask: close_app, open_app and the home button go on by the device
+        channel, anything else is answered `not_answering`."""
+        session = self.session
+        while session.hold_carried():
+            asked = time.monotonic()
+            try:
+                answered = await self.control.read(session._free_step)
+            except ConnectionLost as e:
+                self.lost(e)
+                raise self._not_connected() from None
+            if answered:
+                return
+            if isinstance(self.stuck, session_module.RunnerHeld) or not session.hold_carried():
+                break  # (another call gave it up, or it ended, meanwhile)
+            left = session.hold_left()
+            if left <= 0:
+                self.lost(await session.give_up_carried())
+                break
+            await asyncio.sleep(min(max(session_module.HIT_FREE_MIN,
+                                        session_module.HIT_FREE_EVERY - (time.monotonic() - asked)), left))
+        held = getattr(session, "runner_held", None)
+        if held is None:
+            return  # (the clock answered meanwhile, or the line changed: the call goes the usual way)
+        if not isinstance(self.stuck, session_module.RunnerHeld):
+            self.lost(held)  # (another call's read gave it up in the session: the daemon's state follows)
+        if name in ("close_app", "open_app") or (name == "press_button" and args.get("name") == "home"):
+            return
+        raise self._not_connected()
+
+    def _end_held(self, why: str) -> None:
+        """(round N) The clock answered: the given-up hold is over, the line live again (the heartbeat says locked)."""
+        if isinstance(self.stuck, session_module.RunnerHeld):
+            self.stuck = None
+            self.log(f"the runner answers again ({why})")
+            self._set_state("live")
+
+    async def _held_freed(self, why: str) -> bool:
+        """(round N) After a way out (close_app, open_app, the home button): the clock asked right away and about every
+        HIT_FREE_EVERY for HELD_AFTER_WAIT at most; True when it answered (the state ended)."""
+        until = time.monotonic() + HELD_AFTER_WAIT
+        while isinstance(self.stuck, session_module.RunnerHeld):
+            try:
+                # (round O, review RN-L3) a way out's question is given what entering the state gave one
+                answered = await self.control.read(lambda: self.session.held_answers(session_module.HIT_FREE_WAIT))
+            except ConnectionLost as e:
+                self.lost(e)
+                return False
+            if answered:
+                self._end_held(why)
+                return True
+            left = until - time.monotonic()
+            if left <= 0:
+                return False
+            await asyncio.sleep(min(session_module.HIT_FREE_EVERY, left))
+        return False
+
+    def _held_guard(self, device) -> "Callable[[], Awaitable[None]]":
+        """(round N) What a way out checks right before it sends: the pause, a person's input, the same line, the
+        state still standing."""
+        generation = self.control.person_generation
+
+        async def guard():
+            if self.control.paused:
+                raise Refused("paused", "the phone is paused; ask the user to resume it")
+            if self.control.person_generation != generation or self.control.person_active():
+                raise Refused("busy", "a person used the phone before delivery; look again before acting")
+            if not isinstance(self.stuck, session_module.RunnerHeld) or self.session.device is not device:
+                raise Refused("reconnecting", "the phone connection changed; look before acting")
+        return guard
+
+    def _held_note(self, stuck: AppNotAnswering) -> str:
+        return (f"the phone's runner hasn't answered since {stuck.name} held it, so nothing on the phone can be read "
+                f"yet; look in a moment (close_app {stuck.name} if it stays).")
+
+    async def _close_held(self, view, stuck: AppNotAnswering, query: str, notes: list) -> dict:
+        """(round N) close_app while a given-up hold stands: the app ended through iOS's process control (the runner's
+        own terminate would wait on accessibility), the line kept; the state ends when the clock answers (_held_freed;
+        else at the next call's question). The runner is told of the close once it answers."""
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        bundle_id, shown = await self._app(query, partial=False)
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        guard = self._held_guard(device)
+
+        async def close() -> int:
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                await guard()
+                return await asyncio.wait_for(device.kill_app(bundle_id), CLOSE_KILL_CAP)
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+
+        try:
+            found = await self.control.agent(close)
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - iOS's process control refused or was slow
+            raise Refused("not_answering", f"{stuck}, and iOS didn't close {shown} ({e or 'no answer in time'}). "
+                                           "Try close_app again, or press_button home.") from None
+        if bundle_id == stuck.bundle_id:
+            self.session._hit_quiet_until = 0.0  # (the app that kept a question is gone: the clock may be asked)
+        self._launched_with.pop(bundle_id, None)
+        self._closed_on_purpose = (bundle_id, view)
+        self.log(f"closed {bundle_id} through iOS process control while the runner was held ({found} processes)")
+        self._announce("agent", "close_app", label=_bare_name(shown, bundle_id))
+        freed = await self._held_freed(f"after close_app {bundle_id}")
+        if freed and found:
+            self._tell_runner_closed(bundle_id)
+        line = f"Closed {shown}." if found else f"{shown} wasn't running."
+        return _answer([line], notes if freed else [*notes, self._held_note(stuck)])
+
+    async def _open_held(self, view, stuck: AppNotAnswering, a: dict, notes: list) -> dict:
+        """(round N) open_app while a given-up hold stands: launched through iOS's process control (WebDriverAgent's
+        launch waits on accessibility). The app that holds the runner, an app with launch conditions, or one that runs
+        with conditions of an earlier launch, is ended first and started again (it can't be brought forward
+        answering); another is brought forward or started. Then the clock, as after close_app."""
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        bundle_id, shown = await self._app(a["app"])
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        extra = launchlib.arguments(a)
+        before = self._launched_with.get(bundle_id)
+        back = bool(before) and not extra
+        again = bundle_id == stuck.bundle_id or bool(extra) or back
+        guard = self._held_guard(device)
+
+        async def launch() -> None:
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                await guard()
+                if again:
+                    await asyncio.wait_for(device.kill_app(bundle_id), CLOSE_KILL_CAP)
+                    await guard()
+                await asyncio.wait_for(device.launch_app(bundle_id, extra or None), HELD_LAUNCH_CAP)
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+
+        try:
+            await self.control.agent(launch)
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - iOS's process control refused or was slow
+            raise Refused("not_answering", f"{stuck}, and iOS didn't open {shown} ({e or 'no answer in time'}). "
+                                           "close_app can still close it; then open_app it again.") from None
+        if bundle_id == stuck.bundle_id:
+            self.session._hit_quiet_until = 0.0
+        said = self._after_open(view, a, bundle_id, shown, before, False, back)
+        if bundle_id == stuck.bundle_id and said.endswith("."):
+            # (round O, review RN-L6) what the agent had in it is gone: say so
+            said = said[:-1] + " (it was ended first: it held the phone's runner, so it starts fresh)."
+        view.moved = True  # (nothing was read after it)
+        self.log(f"opened {bundle_id} through iOS process control while the runner was held")
+        self._announce("agent", "open_app", label=_bare_name(shown, bundle_id))
+        freed = await self._held_freed(f"after open_app {bundle_id}")
+        return _answer([said], [*notes, "look to see it."] if freed else [*notes, self._held_note(stuck)])
 
     async def _close_stuck(self, stuck: AppNotAnswering, query: str, notes: list) -> dict:
         """close_app while the app in front is frozen: end its processes through iOS (WebDriverAgent's own
@@ -6336,20 +6944,251 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                        "whose elements weren't read gets o refs with any look).")
         return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}, view.ocr_gen
 
+    async def _o_ref_still(self, client_id: str, name: str, ref: str, args: dict) -> dict:
+        """(2.0.3 round N, N-F7) Right before a touch aimed by an o ref: the picture's text read once more (as the look
+        read it: _screen_text, the runner's OCR, else this computer's), and the touch goes only when the ref's text
+        (casefolded, its spaces made one, as a touch by the picture's text matches) is found with its centre within
+        O_REF_STILL of where the look read it: at the centre read now. Not found, found only further away (said where:
+        never touched there) or the picture not readable now: `stale`. Where the look's list was whole, the picture
+        rule (_moved_under) is asked first (it is cheaper). This read is no look: the o refs, the list and the picture
+        rule's mark stay as they were."""
+        view = self.control.client(client_id)
+        text = view.ocr_text.get(ref)
+        point = (float(args["target"]["x"]), float(args["target"]["y"]))
+        if text is None:
+            return args  # (a ref made before its text was kept: as before)
+        if name in ("tap", "long_press") and self._moved_under(view, *point):
+            x, y = (round(c) for c in point)
+            raise Refused("stale", f"the screen around ({x}, {y}) changed since your last look; "
+                                   "look again, or pass force: true to touch there anyway.")
+        try:
+            seen, note = await self._screen_text("accurate", implicit=True)
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - the picture can't be read now: the touch isn't made
+            seen, note = [], f"{type(e).__name__}"
+        x, y = self._o_ref_verdict(ref, text, point, seen, note)
+        return {**args, "target": {**args["target"], "x": round(x, 1), "y": round(y, 1)}}
+
+    def _o_ref_late(self, ref: str, text: str, checked: float,
+                    found: "tuple[float, float]") -> "Callable[[tuple[float, float]], Awaitable[bool]]":
+        """(round O, review RN-M4) The touch's last step for an o ref (Session._gate, after the queue, the front check and
+        any banner wait): a check older than O_REF_FRESH is made again, reading the picture's text without the queue
+        (the touch holds its turn), and the touch goes only when the same text is still within O_REF_STILL of where the
+        first check found it (round P, review RO-M1: `found`, the text's centre then, not the touch's start, which for a
+        scroll is its drag's); else `stale` with the check's words, nothing touched. Its gesture is made by then: the
+        touch is never moved here. True when it read (the gate checks the front once more after it, RO-M2); False when
+        the check was fresh enough. Its age then counts from before this read."""
+        when = checked
+
+        async def late(at: tuple[float, float]) -> bool:
+            nonlocal when
+            if self.hub.mono() - when < O_REF_FRESH:
+                return False
+            asked = self.hub.mono()
+            try:
+                seen, note = await self._screen_text("accurate", implicit=True, queued=False)
+            except Refused:
+                raise
+            except Exception as e:  # noqa: BLE001 - the picture can't be read now: the touch isn't made
+                seen, note = [], f"{type(e).__name__}"
+            self._o_ref_verdict(ref, text, found, seen, note)
+            trace.note("o_ref_late", {"ref": ref, "age": round(asked - when, 2)})
+            when = asked
+            return True
+        return late
+
+    def _o_ref_verdict(self, ref: str, text: str, point: "tuple[float, float]", seen: "list[ocr.Seen]",
+                       note: str) -> "tuple[float, float]":
+        """(rounds N, O) Where an o ref's text is now: the centre of the same text within O_REF_STILL of `point`, else
+        `stale` (saying where it is when it moved further, or that the picture can't be read)."""
+        want = " ".join(text.casefold().split())
+        alike = sorted((s for s in seen if " ".join(s.text.casefold().split()) == want),
+                       key=lambda s: math.dist(s.center, point))
+        if alike and math.dist(alike[0].center, point) <= O_REF_STILL:
+            return alike[0].center
+        if alike:
+            where = f" (it is at ({round(alike[0].center[0])}, {round(alike[0].center[1])}) now)"
+        elif note or not seen:
+            where = " (the picture can't be read now)"
+        else:
+            where = ""
+        trace.note("o_ref_moved", {"ref": ref, "found": bool(alike)})
+        raise Refused("stale", f'{ref} "{ui.shown(text)}" is no longer where your last look read it{where}; nothing was '
+                               "touched. Look again.")
+
     def _guards_banners(self, name: str, target: "ui.Target | None") -> bool:
         """Does this action's touch wait out a notification banner over the top of the screen (Session.banner_guard,
-        _clear_of_banner: only touches in the top BANNER_ZONE are held)? A touch aimed at an element (by ref, id, label
-        or text, and `back`'s button): the agent meant the element, and a banner that slid over it takes the touch and
-        opens its own app (the phone, 2026-11-26: `back` opened X; before it Mail and another app). Not a point the
-        agent chose itself, and only when the runner says the app in front without reading it (route version 11:
-        a few ms; the question cost 70 ms and more before, which is why the wait was off since 1.7.5)."""
-        if getattr(self.session, "tw_version", 0) < session_module.FRONT_VERSION:
-            return False
-        return name == "back" or (target is not None and target.point is None) or _PICTURE_TEXT.get()
+        _clear_of_banner: only touches in the top BANNER_ZONE are held)? (2.0.3) Every touch of an agent's action,
+        whatever it is aimed by: an element, a point, an `o` ref or a text found in the picture, and every gesture. A
+        banner that slid over the spot takes the touch and opens its own app (the phone, 2026-11-26: `back` opened
+        another app; and two point taps on a screen whose elements weren't read went to a banner and then to the chat it
+        opened, and started a call). 2.0 left points out because "the agent chose the point itself"; the agent chose it
+        on a picture without the banner, so that reason doesn't hold. Only when the runner says the app in front without
+        reading it (route version 11: a few ms; the question cost 70 ms and more before, which is why the wait was off
+        since 1.7.5); when that route can't say, the touch goes out (Session._clear_of_banner)."""
+        return getattr(self.session, "tw_version", 0) >= session_module.FRONT_VERSION
+
+    def _touch_rules(self, view, name: str, target: "ui.Target | None",
+                     args: dict | None = None) -> "session_module.TouchRules | None":
+        """(2.0.3, safety, review RP) What an agent's touches in this action are checked against (Session._front_rules):
+        the front state its newest answer showed it (`view.seen_front`, recorded by _front_answer), and whether the
+        action aims at an element of its list by ref, id or label. None (no check) for the tools that change the app in
+        front on purpose or touch no screen (SEEN_EXEMPT)."""
+        if name in SEEN_EXEMPT:
+            return None
+        front = getattr(view, "seen_front", None)
+        element = (target is not None and target.kind in ("ref", "id", "label") and not _PICTURE_TEXT.get())
+        aimed = None
+        if element and target is not None:
+            try:  # (round H, review RG M1) the element's frame as the agent's list has it
+                found = ui.resolve(getattr(view, "items", None) or [], target)
+                aimed = None if isinstance(found, tuple) else found.rect
+            except Refused:
+                aimed = None
+        return session_module.TouchRules(front if isinstance(front, session_module.Front) else None, element,
+                                         name == "swipe" and _flick_up(args or {}), aimed)
+
+    def _meant_app(self, view, own: "tuple[str, str] | None" = None) -> "tuple[str, str] | None":
+        """(2.0.3 round R, phone R-F1) The app an agent's touch is meant for, (name, bundle id): the one its last answer
+        showed it, as rule B checks the touch against it (`view.seen_front`, recorded by every read's answer and by
+        `open_app` and `open_url`, `look: false` too); SpringBoard for the home screen. Before, the newest READ's app:
+        after `open_app` with `look: false` that was the app before, and a touch near the top that went rightly to the
+        opened app was taken for a theft and the app before opened again. (Round S2) The system over an app is
+        SpringBoard's. With nothing recorded (a runner older than route version 11) or an unknown state: the newest
+        read's app, unless open_app or open_url answered since it (then None, no comparison: missing a theft is safer
+        than reopening an app the agent left on purpose). `own`: what a read this action made before its touch names (a target looked up
+        live, the keyboard reflex): the newest knowledge, the touch aimed from it (CodeRabbit, PR #18 cycle 2)."""
+        s = self.session
+        if isinstance(own, tuple) and own[1]:
+            return own
+        front = getattr(view, "seen_front", None)
+        if isinstance(front, session_module.Front):
+            if front.kind == session_module.FRONT_APP and front.app:
+                return self._app_named(front.app), front.app
+            if front.kind in (session_module.FRONT_HOME, session_module.FRONT_OVER):
+                # (round S2, review RQ-H1) the system over the app (Control Center, Notification Center, a banner that
+                # stayed) is SpringBoard's, as the read of it named it before round R: a touch the agent aimed at it (a
+                # toggle, a banner's row that opens its app) is never taken for a theft from the app underneath
+                return self._app_named(SPRINGBOARD), SPRINGBOARD
+        if getattr(view, "left_by_call", False):
+            return None  # (round S2, review RQ-L1: only open_app / open_url since the read, not any look-free action)
+        read_app = getattr(s, "read_app", None)
+        return read_app if isinstance(read_app, tuple) else (s.app if isinstance(s.app, tuple) else None)
+
+    def _app_named(self, bundle: str) -> str:
+        """The name a note prints for an app: the installed apps' name for it, else a read's, else its bundle id."""
+        s = self.session
+        named = (getattr(s, "app_names", None) or {}).get(bundle)
+        if named:
+            return named
+        for known in (getattr(s, "read_app", None), getattr(s, "app", None)):
+            if isinstance(known, tuple) and known[1] == bundle and known[0]:
+                return known[0]
+        return "Home screen" if bundle == SPRINGBOARD else bundle
+
+    async def _front_state_now(self) -> "session_module.Front | None":
+        """Session.front_state, None without one (a fake, or a runner that answered a version below 11). (Not
+        journey_tool's _front_now, the bundle id in front, which the explorer uses.)"""
+        front_state = getattr(self.session, "front_state", None)
+        state = await front_state() if callable(front_state) else None
+        return state if isinstance(state, session_module.Front) else None
+
+    def _bannerish(self, source: str | None, cut: bool) -> bool:
+        """(review RP2 L4) May the read that shows the system over the app be a banner's (wait it out)? Its tree holds a
+        banner, or it was cut (it can't say). A whole tree without one (Control or Notification Center the agent
+        opened, an alert) is recorded at once, with no 8 s wait."""
+        return cut or session_module.BANNER_ID in (source or "")
+
+    @staticmethod
+    def _front_agreed(before: "session_module.Front | None", after: "session_module.Front | None",
+                      read_bundle: str | None, compare: bool = True) -> "session_module.Front | None":
+        """(review RP2 H2) What the agent saw: the state asked after the read, when the one asked before it agrees
+        (`compare`) and, for an app in front, the read's own root names that app (when it names one). Else unknown
+        (the next touch is refused, and the agent looks again)."""
+        if after is None:
+            return None
+        if compare and not after.same(before):
+            return session_module.Front(session_module.FRONT_UNKNOWN)
+        if compare and before is not None and before.guessed and not after.guessed:
+            after = before  # (review RF H1) one of the two only guessed: the record is the weaker
+        if after.kind == session_module.FRONT_APP and read_bundle and read_bundle != after.app:
+            return session_module.Front(session_module.FRONT_UNKNOWN)
+        return after
+
+    async def _front_answer(self, alert: bool, bannerish: bool = True) -> "tuple[session_module.Front | None, bool]":
+        """(2.0.3, review RP) What is in front as an answer shows the agent the screen (Session.front_state: the front
+        route, the process list when it names SpringBoard), inside the read's turn. While SpringBoard is over an app
+        and the tree is no alert's and may be a banner's (`bannerish`: also on a read cut short), it is waited out as
+        the banner wait does; (the state, whether it left: the caller reads again). None: no check."""
+        front_state = getattr(self.session, "front_state", None)
+        if not callable(front_state):
+            return None, False
+        state = await front_state()
+        waited, polled = 0.0, False
+        while (isinstance(state, session_module.Front) and state.kind == session_module.FRONT_OVER and not alert
+               and bannerish and waited < session_module.BANNER_WAIT):
+            await asyncio.sleep(session_module.BANNER_POLL)
+            waited += session_module.BANNER_POLL
+            state, polled = await front_state(), True
+        left = polled and isinstance(state, session_module.Front) and state.kind != session_module.FRONT_OVER
+        return (state if isinstance(state, session_module.Front) else None), left
+
+    @staticmethod
+    def _front_moved(before: "session_module.Front | None", after: "session_module.Front | None") -> str:
+        """(review RP2 H2, RF L2) What changed in front between the questions before and after a read: "" (nothing, or
+        one couldn't be asked), "banner" (SpringBoard came over the same app, or left it: a notification passing), or
+        "app" (another app, or the home screen)."""
+        if before is None or after is None or after.same(before):
+            return ""
+        kinds = {before.kind, after.kind}
+        if kinds <= {session_module.FRONT_APP, session_module.FRONT_OVER} and before.app == after.app:
+            return "banner"
+        return "app"
+
+    def _over_line(self, view) -> str | None:
+        """(2.0.3) The first line of an answer whose screen SpringBoard is over (a notification that stayed, Notification or
+        Control Center), the tree no alert's: what the agent saw is that state, never the home screen."""
+        front = getattr(view, "seen_front", None)
+        moved = getattr(view, "front_moved", "")
+        if moved == "banner":
+            return "Note: a notification passed over the app while this was read; look again."
+        if moved:
+            return "Note: another app came to the front while this was read; look again."
+        if (isinstance(front, session_module.Front) and front.kind == session_module.FRONT_OVER
+                and getattr(view, "alert", None) is None):
+            return ("Note: something of the system (a notification, Notification Center or Control Center) is over the "
+                    "app; a touch near the top waits for it to go.")
+        return None
+
+    async def _record_front(self, view, read_bundle: str | None = None, in_turn: bool = False,
+                            taken: "tuple[session_module.Front | None, Exception | None] | None" = None) -> None:
+        """(2.0.3, review RP M4) What is in front now, as the agent's: after `open_app` and `open_url` (where they went,
+        `look: false` too) and a run's step whose positive `expect` held (its read found what the agent expected; that
+        read's app, `read_bundle`, must be the one in front: review RP2 H2)."""
+        # (CodeRabbit, PR #30) the record before this call is no answer of the agent's once the read below may fail: with
+        # none, _meant_app reaches left_by_call (no comparison) and a touch is refused no_look, never judged by it
+        view.seen_front = None
+        if not in_turn:
+            state = await self._read(self._front_state_now)
+        elif taken is None:
+            # (CodeRabbit, PR #30 cycle 2) open_app and open_url read it inside the action's own turn (`taken`: the
+            # state, or the error that read raised); none was read there (the turn was given up between): what is in
+            # front now may be another agent's doing, so unknown
+            view.seen_front = session_module.Front(session_module.FRONT_UNKNOWN)
+            view.front_moved = ""
+            return
+        else:
+            state, failed = taken
+            if failed is not None:
+                raise failed
+        view.seen_front = self._front_agreed(None, state, read_bundle, compare=False)
+        view.front_moved = ""
 
     async def _banner_shown(self) -> bool:
         """Is a notification banner over the app now (the runner names SpringBoard in front while the newest read is of
-        an app: Session._clear_of_banner)? False when the runner can't say in a few ms (route version 11)."""
+        an app: Session._clear_of_banner; or, round G, the hit test at the zone's probe point finds SpringBoard there,
+        which a timer's banner on iOS 26.5 needs)? False when the runner can't say in a few ms (route version 11)."""
         s = self.session
         if getattr(s, "tw_version", 0) < session_module.FRONT_VERSION:
             return False
@@ -6357,7 +7196,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if isinstance(read_app, tuple) and read_app[1] == session_module.SPRINGBOARD:
             return False  # SpringBoard's own screen: nothing slid over an app
         front = await s.front_app()
-        return front is not None and front[0] == session_module.SPRINGBOARD
+        if front is not None and front[0] == session_module.SPRINGBOARD:
+            return True
+        banner_at = getattr(s, "banner_at", None)
+        if not callable(banner_at):
+            return False
+        app = read_app[1] if isinstance(read_app, tuple) else None
+        # (round K) only after a read that answered in time with elements: after a read cut short (or not asked) the app
+        # is busy, and a question to it would hold the runner for seconds (phone, 2026-11-27: a tap by text took 8.5 s)
+        tier = getattr(s, "last_tier", "full")
+        if tier == "root" or (tier != "full" and not session_module._has_elements(getattr(s, "last_source", None))):
+            return False
+        return await banner_at((s.screen[0] / 2, BANNER_PROBE_Y), app) == session_module.BANNER_OVER
 
     async def _locked_by_press(self) -> bool:
         """After the agent's own `press_button lock`: ask the phone whether it is locked now (it takes a moment), for
@@ -6487,8 +7337,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         width, height = self.session.screen
         top = STATUS_BAR if height > width else 0.0  # (the clock and the battery are the phone's, as in a look's o refs)
+        self.session.sheet_over = None
         if await self._banner_shown():
             top = max(top, session_module.BANNER_ZONE)  # (the banner's own words are no part of the app's screen)
+        sheet = getattr(self.session, "sheet_over", None)  # (round N, N-F5: the hit test found another app's sheet)
         lines = [(s, " ".join(s.text.casefold().split())) for s in seen if s.rect[1] >= top]
         if whole:
             known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
@@ -6500,6 +7352,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         said = ui.shown(str(target.text))
         if target.index is None and len(hits) > 1:
             view.ocr, view.ocr_gen = {f"o{n}": s.center for n, s in enumerate(hits, 1)}, aimed_at
+            view.ocr_text = {f"o{n}": s.text for n, s in enumerate(hits, 1)}
             listed = "\n".join(dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(hits, 1))
             raise Refused("ambiguous", f'{len(hits)} texts in the picture show "{said}" (this screen\'s elements weren\'t '
                                        f'read, so they are what there is). Touch one by its ref, or add "index" '
@@ -6522,7 +7375,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 f"the touch {'would go' if args.get('dry_run') else 'went'} to its centre.")
         lines_out = answer["text"].split("\n")
         at = next((i for i, line in enumerate(lines_out) if line.startswith("Hint: ")), len(lines_out))
-        return {**answer, "text": "\n".join([*lines_out[:at], note, *lines_out[at:]])}
+        sheet_note = [session_module.SHEET_NOTE.format(bundle=sheet)] if sheet else []
+        return {**answer, "text": "\n".join([*lines_out[:at], note, *sheet_note, *lines_out[at:]])}
 
     def _tier_now(self) -> str:
         """How much of the tree the newest read got (Session.last_tier, runner route version 9): "full", "shallow" or
@@ -6538,17 +7392,22 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         reads = getattr(self.session, "reads_text", None)
         return bool(reads()) if callable(reads) and RUNNER_OCR != "0" else False
 
-    async def _screen_text(self, level: str = "accurate", implicit: bool = False) -> "tuple[list[ocr.Seen], str]":
+    async def _screen_text(self, level: str = "accurate", implicit: bool = False,
+                           queued: bool = True) -> "tuple[list[ocr.Seen], str]":
         """(the text lines the screen shows now, a note for the answer or ""). The runner reads them on the phone
         (route version 9, Apple's Vision: faster than this computer's CPU); RapidOCR reads the picture here when the
         runner can't (an older runner, or its OCR failed: never a failed call). Neither: no lines, and the note says
         how to install the extra. `implicit`: a read the agent didn't ask for (a cut-short look, a wait's picture): a
-        broken install here is a note too, never a failed call (review R200v L5)."""
+        broken install here is a note too, never a failed call (review R200v L5). `queued` False (round O): read inside
+        the caller's own turn (an o ref's late check), not through the queue it holds."""
         failed = ""
+
+        async def through(fn):
+            return await (self._read(fn) if queued else fn())
         if self._runner_reads_text():
             asked = self.hub.mono()
             try:
-                seen = await self._read(lambda: self.session.read_text(level))
+                seen = await through(lambda: self.session.read_text(level))
             except Refused:
                 raise
             except Exception as e:  # noqa: BLE001 - the picture is read here instead
@@ -6573,7 +7432,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         else:
             picture = None
         if picture is None:
-            picture = await self._phone_picture()  # (full size: this computer's OCR reads it)
+            picture = await self._phone_picture(queued=queued)  # (full size: this computer's OCR reads it)
             if self.unlocked_since(asked):
                 raise Refused("busy", UNLOCK_BUSY)
         try:
@@ -6625,6 +7484,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         top = STATUS_BAR if height > width else 0.0  # the clock and the battery are the phone's, not the app's
         new = [s for s in seen if s.rect[1] >= top and not _said(s.text, known)]
         view.ocr, view.ocr_gen = {f"o{n}": s.center for n, s in enumerate(new, 1)}, gen
+        view.ocr_text = {f"o{n}": s.text for n, s in enumerate(new, 1)}
         lines = answer["text"].split("\n")
         cut = next((i for i, line in enumerate(lines) if line.startswith("Note: ")), len(lines))
         refs = [dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(new, 1)]
@@ -7385,8 +8245,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # was on it (the same day: a 5 s wait said a text didn't appear which had been there all along).
             grace = left if seen else max(left, WAIT_FOR_FIRST_READ)
             try:
-                tree = await asyncio.wait_for(
-                    self._read(lambda: self.session.refresh(timeout=WAIT_FOR_READ_MAX)), grace)
+                # (2.0.3, review R203 M4) the read's time is decided once the turn is taken (inside _read), from this
+                # wait's own deadline: a long read is planned only when it ends before that, so the deadline never
+                # cancels one in flight (the runner would go on reading with the turn given away)
+                deadline = began + (timeout if seen else max(timeout, WAIT_FOR_FIRST_READ))
+                tree = await asyncio.wait_for(self._read(lambda: self.session.refresh(
+                    timeout=self._wait_for_read_cap(deadline - clock()))), grace)
             except asyncio.TimeoutError:
                 if not seen:
                     raise Refused("timeout", f"The phone didn't answer within {max(timeout, WAIT_FOR_FIRST_READ):g} s, so it "
@@ -7415,12 +8279,39 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return await self._add_shot(await self._after(view, result, notes, full, snap=snap), view,
                                     self._cut_shot(args, shot, getattr(tree, "tier", "full")))
 
+    def _wait_for_read_cap(self, left: float) -> float:
+        """(2.0.3) The longest one of `wait_for`'s reads may take, with `left` seconds to the wait's deadline as its
+        turn is taken: WAIT_FOR_READ_MAX, or, with the long budget on and room before the deadline for a long read and
+        its grace (WAIT_FOR_LONG_MARGIN kept back), that room, up to a normal read and a long one. The session plans a
+        long read only when its time covers it, so with the default 10 s timeout none is (review R203 M4, L3)."""
+        budgets = getattr(self.session, "budgets", None)
+        if not isinstance(budgets, session_module.ReadBudget) or not budgets.long_on:
+            return WAIT_FOR_READ_MAX
+        room = left - WAIT_FOR_LONG_MARGIN
+        if room < session_module.read_wait(budgets.long_ms, long=True):
+            return WAIT_FOR_READ_MAX
+        return min(room, session_module.read_wait(budgets.normal_ms) +
+                   session_module.read_wait(budgets.long_ms, long=True))
+
+    def _take_slow_note(self, owner: list[str]) -> str | None:
+        """(2.0.3) Session.take_slow_note: once, the note that a read of this call (`owner`, READ_OWNER) took the long
+        budget to answer whole."""
+        take = getattr(self.session, "take_slow_note", None)
+        note = take(owner) if callable(take) else None
+        return note if isinstance(note, str) and note else None
+
     async def _type_text(self, view, a: dict) -> Typed:
         """Type into the target, or into the only input on screen (the fast tree has no focus attribute).
         The target is tapped first by the session, which waits for the keyboard and for focus to arrive."""
         target = a.get("target")
         if target is None:
-            await self._silent_read(view)  # which inputs there are must be read now
+            # which inputs there are must be read now; (2.0.3 round S, S-F1) with the normal budget only: a long try
+            # here held the keys 8 s on a busy app, and a field that doesn't show in 3 s is typed into as focused
+            token = session_module.NO_LONG.set(True)
+            try:
+                await self._silent_read(view)
+            finally:
+                session_module.NO_LONG.reset(token)
             # the app this very read names (the session's own `app` is the last snapshot's, from before a switch:
             # CodeRabbit, PR #18); a read whose root names none falls back to it
             read_app = (self._read_root or (None, False))[0]
@@ -8484,13 +9375,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             await wait()
             return
         kept = (s.touch_hook, s.banner_guard, s.front_apps, getattr(s, "before_input", None),
-                getattr(s, "execution_guard", None))
+                getattr(s, "execution_guard", None), getattr(s, "touch_rules", None))
         s.touch_hook, s.banner_guard, s.front_apps, s.before_input, s.execution_guard = None, False, None, None, None
+        s.touch_rules = None
         try:
             await self.control.aside(wait)
         finally:
             if self.control.holds_turn():  # (when the turn wasn't taken back, another action may hold it now)
-                s.touch_hook, s.banner_guard, s.front_apps, s.before_input, s.execution_guard = kept
+                s.touch_hook, s.banner_guard, s.front_apps, s.before_input, s.execution_guard, s.touch_rules = kept
 
 
     def dialog_channel(self, client_id: str) -> dialog.Channel:
@@ -8665,6 +9557,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     def _app_bundle(self) -> str | None:
         """The bundle id of the app the last read found in front, for the per-app policy."""
         return (self.session.app or (None, None))[1]
+
+    def _read_app_now(self) -> str | None:
+        """The app the newest read's root names (`Session.read_app`), or None: a run step's expect records the front by it.
+        """
+        read = getattr(self.session, "read_app", None)
+        return read[1] if isinstance(read, tuple) else None
 
     def _read_bundle(self) -> str | None:
         """The app the newest read names (`Session.read_app`: a live read's root, which `session.app` doesn't follow), else
@@ -9087,6 +9985,26 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._dry(a, "Would close the sheet.")
             await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
             return "Closed the sheet."
+        # (review RF M2) from `back`'s own read only, and only a whole one: the agent's older list may be another screen,
+        # and on a cut read "exactly one" can't be proven
+        own_items = getattr(s, "front_items", None) or []
+        whole = bool(own_items) and getattr(s, "last_tier", "full") == "full"
+        own = None if back.point is not None or back.hosted or not whole else ui.own_back(own_items, s.screen)
+        if own is not None and (word := self._needs_person(own)) is not None:
+            # (review RF M1) a control a touch on which would need a person's OK is never `back`'s to tap
+            raise Refused("not_actionable", f"no_action: the control in the corner, {self._own_back_line(view, own)}, "
+                                            f"says \"{word}\": back doesn't tap it. Nothing was touched; tap it yourself "
+                                            "if that is what you mean.")
+        if own is not None:
+            # (2.0.3) no bar's back button, and the screen shows its own in the top-left corner (ui.own_back): a person
+            # taps that, never the edge swipe or the sheet's ways out (a shopping app's search results: a header strip
+            # read as a layer in front sent `back` there, 15.7 s and four reads, and nothing went back). Shown, so it
+            # is in front: the touch passes the same checks and the same banner wait as the bar's button.
+            said = self._own_back_line(view, own)
+            self._dry(a, f"Would tap the screen's back button: {said}.")
+            await self._back_before(view, a, listed is not None)
+            await s.tap(ui.Target(x=own.center[0], y=own.center[1]))
+            return f"Tapped the screen's back button: {said}."
         behind = getattr(s, "behind", [])
         # A sheet in front with no region of its own to tap. A back button it hides belongs to the screen behind
         # (it can't be reached, and where the backdrop lets a touch through it would leave that screen with the
@@ -9111,7 +10029,28 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._dry(a, "Would swipe from the left edge.")
         await self._back_before(view, a, listed is not None)
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
+        if not whole:  # (review RF M2) a screen's own back control couldn't be looked for
+            return ("Swiped from the left edge. This screen's elements weren't read, so no back control of its own was "
+                    "looked for: if nothing went back, look, then aim at the back control yourself.")
         return "Swiped from the left edge."
+
+    @staticmethod
+    def _needs_person(own: ui.Element) -> str | None:
+        """(review RF M1) The word that would make a touch on this control need a person's OK (policy.DEFAULT_CONFIRM, and
+        the skip floor's own words while explore or a repair runs), in its label or as parts of its id; None if none."""
+        floor = _FLOOR_RULES.get()
+        words = (*safety.DEFAULT_CONFIRM, *(floor.confirm if floor is not None else ()),
+                 *(floor.block if floor is not None else ()))
+        id_words = " ".join(ui.name_parts(own.identifier))
+        return next((w for w in words if safety._matches(w, own.label) or safety._matches(w, id_words)), None)
+
+    @staticmethod
+    def _own_back_line(view, own: ui.Element) -> str:
+        """The screen's own back control as the answer names it: by the agent's ref when its list has that very element
+        (the read `back` made numbers its own elements), else without a ref."""
+        mine = next((e for e in view.items if e.identifier == own.identifier and e.label == own.label
+                     and ui._same_rect(e.rect, own.rect)), None)
+        return (mine or own).line(ref=mine is not None, actions=False, place=False)
 
     async def _back_from_list(self, view) -> ui.Back | None:
         """(2.0, worker H) What `back` would touch, from the agent's own list when nothing can have changed since it was
@@ -9215,10 +10154,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             front = behind[0][1] if behind else None
             box = ui.sheet_box(front, getattr(s, "front_items", None) or [], s.screen) if behind else None
             return back.dismiss, back.point, box
+        before = self.hub.latest
         back = await s.back_point()
         seen = where(back)
         if back.dismiss is None and not getattr(s, "behind", []):
             return back  # nothing is open on top: a bar's back button doesn't slide
+        across = await self._still_across_read(before)
+        if across == "alike":
+            return back  # (2.0.3) the picture didn't move across the read: one read does (each costs seconds on a heavy page)
+        if across == "late" and getattr(s, "last_tier", "full") == "full":
+            # (round G, phone 2026-11-27) no fresh frame after a whole read (the runner sends none for a while after a
+            # long one): read again and a bottom sheet of a slow app cost two long reads, 5.0 and 6.7 s, the second
+            # shallow (a 60 s block). A frame that came and differs still reads again (a sheet sliding in)
+            return back
         for _ in range(BACK_STILL_TRIES):
             await asyncio.sleep(BACK_STILL_PAUSE)
             back = await s.back_point()
@@ -9227,6 +10175,37 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return back
             seen = now
         raise Refused("not_actionable", "no_action: what is open on top is still moving; call back again in a moment")
+
+    async def _still_across_read(self, before: "Frame | None") -> str:
+        """(2.0.3) Did nothing move across `back`'s read: the first frame that comes after it (waited for up to
+        BACK_STILL_PAUSE, the pause a second read would have waited anyway) is like the newest one before it? The runner
+        sends no frames while it reads, so a sheet that slid during the read shows only as a different picture after it.
+        "alike": yes. "moved": a fresh frame differs. "late" (round G): no frame in time (the runner sends none for a
+        while after a long read): the caller reads again unless its read was whole. "none": no stream, the AirPlay video
+        (a stalled mirror repeats its picture), or no comparison: read again, as before."""
+        if before is None or self._fed_by_video():
+            return "none"
+        try:
+            now = self.hub.latest
+            if now is not None and now.seq > before.seq and not self._alike(before, now):
+                return "moved"  # (CodeRabbit, PR #30) a frame that came during the read already shows the sheet moved
+            after = await self.hub.next_after(max(before.seq, now.seq if now is not None else 0),
+                                              timeout=BACK_STILL_PAUSE)
+            if after is None:
+                return "late"
+            return "alike" if self._alike(before, after) else "moved"
+        except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: read again as before
+            return "none"
+
+    async def _sheet_unmoved(self, before: "Frame | None") -> bool:
+        """(2.0.3) After a touch meant to close the sheet: did the stream show no change at all once it settled (the
+        frames' word, as `back` with `look: false` takes it)? Then the sheet is still there and no read is spent to say
+        so. False with no stream or on the AirPlay video: read, as before."""
+        if before is None or self._fed_by_video():
+            return False
+        done = await self._settle(self._mark()[0], cap=RESOLVE_SETTLE, since=before)
+        self.unsettled = False
+        return not done.changed
 
     async def _close_sheet(self, view) -> str:
         """Close the sheet in front the two ways a person tries from outside it: a touch beside it, on what it
@@ -9240,21 +10219,35 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return None
             return behind[0][1].line(ref=False, actions=False) if behind[0][1] is not None else ""
         was = front()
-        box = ui.sheet_box(getattr(s, "behind")[0][1], getattr(s, "front_items", None) or view.items, s.screen)
+        items = getattr(s, "front_items", None) or view.items
+        box = ui.sheet_box(getattr(s, "behind")[0][1], items, s.screen)
+        if box is not None and not ui.sheet_like(box, s.screen):
+            # (review RF M3) a strip along the top read as a layer is no sheet: "beside" it would be the middle of the
+            # content (a result row), and its "top edge" no grip. Nothing is touched
+            raise Refused("not_actionable", "no_action: no back button, and what is in front is no sheet to close, so "
+                                            "nothing was touched; look, then aim at the way back yourself"
+                                            + self._still_open())
         if box is not None:
             top, bottom = s.last_insets
             beside = ui.beside_sheet(box, s.screen, SCROLL_TOP_INSET if top is None else top,
                                      s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
+            fresh = getattr(s, "front_items", None) or []
+            if beside is not None and (not fresh or not ui.clear_of_touches(beside, box, fresh)):
+                beside = None  # (review RF M3) something there takes a touch, or no read says: `back` doesn't tap it
             if beside is not None:
+                mark = self.hub.latest
                 await s.tap(ui.Target(x=beside[0], y=beside[1]))
-                await self._silent_read(view)
-                if front() != was:
-                    return "Closed the sheet."
+                if not await self._sheet_unmoved(mark):
+                    await self._silent_read(view)
+                    if front() != was:
+                        return "Closed the sheet."
             if (pull := ui.sheet_pull(box, s.screen)) is not None:
+                mark = self.hub.latest
                 await s.swipe(*pull, 300)
-                await self._silent_read(view)
-                if front() != was:
-                    return "Closed the sheet."
+                if not await self._sheet_unmoved(mark):
+                    await self._silent_read(view)
+                    if front() != was:
+                        return "Closed the sheet."
         raise Refused("not_actionable", "no_action: nothing changed after back" + self._still_open())
 
     async def _settle_pending(self) -> None:
@@ -9275,11 +10268,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             if owed is None or owed[0][1] is None:  # (a timeout, or no stream as the gesture went out: as before)
                 return await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
-            (seq, before), cap, returned = owed
+            (seq, before), cap, returned, expect = owed
             ago = time.monotonic() - returned
-            if ago >= HANDS_QUIET and self._proven_still(noted=False):
+            if (ago >= HANDS_QUIET and (expect is None or time.monotonic() >= expect)
+                    and self._proven_still(noted=False)):
                 return Settled(0.0, False, False, True)
-            return await self._settle(self._mark()[0], cap=max(RESOLVE_SETTLE, cap - ago), since=before, early=seq)
+            # (2.0.3) a `look: false` tap on a button: the next call doesn't act on the old screen before
+            # EXPECT_CHANGE_WAIT has passed with nothing changed (a navigation that starts late)
+            return await self._settle(self._mark()[0], cap=max(RESOLVE_SETTLE, cap - ago), since=before, early=seq,
+                                      expect=expect)
         finally:
             self.unsettled = False
 
@@ -9352,6 +10349,20 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 f"the time given{picture}, so whether it did isn't known. Look (the text in the picture comes as o "
                 "refs), then wait for a text, or touch an o ref or a point.")
 
+    def _expects_change(self, name: str, a: dict) -> bool:
+        """(2.0.3) Is this a touch the app is expected to answer, so "nothing changed" waits EXPECT_CHANGE_WAIT? A tap,
+        long press or toggle aimed at an element of the agent's list that has an action. Not a point, an o ref (a point
+        by then) or a picture text (not in the list), nor an element that does nothing (a static text)."""
+        target = a.get("target")
+        if (name not in EXPECT_TOOLS or self.settle_expect <= 0 or not isinstance(target, ui.Target)
+                or target.point is not None or _PICTURE_TEXT.get() or _PICTURE_AIM.get() is not None):
+            return False
+        try:
+            found = ui.resolve(self.session.items, target)
+        except Refused:
+            return False
+        return not isinstance(found, tuple) and bool(found.actions)
+
     async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                      since: Frame | None = None, early: int | None = None) -> tuple[float, bool]:
         """(seconds waited, changed): see _settle."""
@@ -9359,19 +10370,23 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return done.seconds, done.changed
 
     async def _settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
-                      since: Frame | None = None, early: int | None = None, bundle: str | None = None) -> Settled:
+                      since: Frame | None = None, early: int | None = None, bundle: str | None = None,
+                      expect: float | None = None) -> Settled:
         """_settle_frames, with the cap of a screen that never stands still (Session.settles, SettleCap): shorter while
         the app in front is known for it, and learned from how this settle ends. `bundle`: the app whose screen this is
         when the newest read isn't of it (open_app's launch settle: the app launched, known for it from an earlier
-        visit); a settle is learned from only when the newest read is of that app (its tier says whether it reads)."""
+        visit); a settle is learned from only when the newest read is of that app (its tier says whether it reads).
+        `expect`: (time.monotonic) until when unchanged frames don't yet mean "nothing changed" (EXPECT_CHANGE_WAIT);
+        dropped on the short cap of a screen that never stands still, which keeps its times."""
         caps = getattr(self.session, "settles", None)
         if caps is None:
-            return await self._settle_frames(after_seq, still, cap, since, early)
+            return await self._settle_frames(after_seq, still, cap, since, early, expect)
         read = self._read_bundle()
         launch, bundle = bundle is not None, bundle or read
         # (the newest tree says whether the app's screen reads; one of another app says nothing: cut, the short cap)
         reads = bundle == read and self._tier_now() == "full"
-        done = await self._settle_frames(after_seq, still, caps.cap(bundle, cap, cut=not reads, launch=launch), since, early)
+        capped = caps.cap(bundle, cap, cut=not reads, launch=launch)
+        done = await self._settle_frames(after_seq, still, capped, since, early, expect if capped >= cap else None)
         if (done.still or done.capped) and bundle == read:
             cut = self._tier_now() != "full"
             if caps.settled(bundle, done.capped, cut, done.seconds, unread=self._tier_now() == "root"):
@@ -9380,7 +10395,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return done
 
     async def _settle_frames(self, after_seq: int, still: float | None = None, cap: float = CAP,
-                             since: Frame | None = None, early: int | None = None) -> Settled:
+                             since: Frame | None = None, early: int | None = None,
+                             expect: float | None = None) -> Settled:
         """Wait for the screen to be still, as the stream shows it. `after_seq` is the newest frame when the
         phone call returned: the settle ends only on a later frame, since earlier ones may predate the effect.
         WebDriverAgent streams continuously even when nothing changes, so a silence is a stall, not stillness.
@@ -9395,7 +10411,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         start of the action (`since`, from _mark; None means there was no frame, so any frame counts).
         After a touch the hands sent (Session.hands_at), "changed, then still" ends it no sooner than HANDS_SETTLE_MIN
         from the touch's end: a row's highlight and the stillness after it come before the page's push.
-        `changed` is False only when the answer is certain: 3 frames, all like `since`, and `quiet` seconds.
+        `changed` is False only when the answer is certain: 3 frames, all like `since`, and `quiet` seconds, and no sooner
+        than `expect` (time.monotonic, EXPECT_CHANGE_WAIT after a touch the app should answer; ignored past the cap).
         A stall, no frames at all (it sleeps `settle_fallback` in total, first-frame wait included), too
         few frames, or the cap all report changed=True, so the tree gets read."""
         same = self._alike  # (the edge strips left out: alike_on_glass)
@@ -9415,6 +10432,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # a highlight followed by a moment of stillness is not the touch's end (HANDS_SETTLE_MIN)
             floor = began + max(0.0, HANDS_SETTLE_MIN - since_touch)
         deadline = began + cap
+        # (loop time) the earliest "unchanged" may end the settle: a late navigation still gets its chance to show
+        unchanged_from = began if expect is None else began + max(0.0, expect - time.monotonic())
+        if unchanged_from >= deadline:  # (a cap shorter than the wait: as before, never a capped "changed")
+            unchanged_from = began
         seq, differs, run, run_start, first_of_run = after_seq, False, 0, began, None
         if early is not None:
             last = None
@@ -9452,7 +10473,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             else:
                 run, run_start, first_of_run = 1, now, frame
             if run >= 2 and now - run_start >= still:
-                if (now >= floor) if differs else (seq - after_seq >= 3 and now - began >= quiet):
+                if (now >= floor) if differs else (seq - after_seq >= 3 and now - began >= quiet
+                                                   and now >= unchanged_from):
                     return Settled(now - began, differs, False, True)
         return Settled(loop.time() - began, True, differs)
 
@@ -9464,6 +10486,183 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return self._proven_still(noted=False)
         except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: the short budget stays
             return False
+
+    def _frame_fresh(self) -> bool:
+        """Is the newest frame fresh (within 1.5 frame gaps, and shot_fresh), as _proven_still asks first?"""
+        gap, age = self.hub.gap(), self.hub.age()
+        return bool(gap) and age is not None and age <= min(1.5 * gap, self.shot_fresh)  # type: ignore[operator]
+
+    def _frame_recent(self) -> bool:
+        """Did the newest frame arrive within FRAME_RECENT (the stream is delivering)?"""
+        age = self.hub.age()
+        return age is not None and age <= FRAME_RECENT
+
+    async def _stream_ready(self) -> str:
+        """(2.0.3, re-check R203b N2) Before a read that could lead to a long one: when the stream is open (an agent's
+        call or a viewer holds it, or the video feeds the hub) but has delivered no frame within FRAME_RECENT (it closes
+        30 s after the last call and is opening again), wait up to STREAM_WAIT for one. Never while frames arrive (the
+        phone, 2026-11-26: a feed's looks took 1.6-8.2 s). "" when a frame is there; else what was found, for the trace.
+        A wait that got nothing isn't made again until a frame comes (a stream that can't open costs it once)."""
+        if self._frame_recent():
+            return ""
+        latest = self.hub.latest
+        feeding = getattr(getattr(self, "_feeder", None), "feeding", False)
+        if getattr(self.pump, "viewers", 0) <= 0 and not feeding:
+            return "no stream is open"
+        seq = latest.seq if latest is not None else 0  # (CodeRabbit, PR #30: 0 before the first frame, as recorded)
+        if seq == self._stream_wait_failed:
+            return "the stream has sent nothing since the last wait for it"
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        frame = await self.hub.next_after(seq, STREAM_WAIT)
+        if frame is None:
+            self._stream_wait_failed = seq
+            return f"waited {round((loop.time() - began) * 1000)} ms for the stream: no frame"
+        return ""
+
+    def _change(self, a: Frame, b: Frame) -> tuple[float, str]:
+        """(the share of the compared picture inside the box where two frames differ, how the trace says it): 0 when
+        alike; 1 (all of it) when they can't be compared (another size: the phone turned, or no picture)."""
+        if self._alike(a, b):
+            return 0.0, "alike"
+        share = unlike_share(a, b, getattr(self.session, "screen", None), getattr(self.session, "turn", 0) or 0)
+        if share is None:
+            return 1.0, "can't be compared (counted as all of it)"
+        return share[0], f"differs in {share[1]} = {share[0] * 100:.0f} % of the picture"
+
+    async def _still_mark(self, check: bool = False) -> "tuple[StillMark | None, bool]":
+        """(2.0.3) Session.still_mark, before a read that could lead to a long one: (the newest frame, when fresh, kept to
+        be compared with the frame after the read (_still_across), else None; whether the screen plays: `check` (a slow
+        app's planned long read) and _plays says so). A picture that can't be judged: (StillMark(None), True), a
+        video. No stillness is asked of the screen before the read any more (the lead, after the phone
+        test: a 21 x 5 thumb-pixel spinner stopped the try on the screen it was made for)."""
+        try:
+            waited = await self._stream_ready()
+            latest = self.hub.latest
+            if latest is None or not self._frame_recent():
+                if session_module.TRACE:
+                    self.log(f"trace no frame kept before the read (no recent frame{'; ' + waited if waited else ''})"
+                             f"{self._why_not_still()}")
+                return None, False
+            return StillMark(latest), self._plays_now() if check else False
+        except Exception as e:  # noqa: BLE001 - (review R203c L3) a picture that can't be judged counts as a video
+            if session_module.TRACE:
+                self.log(f"trace no long read: the picture before the read couldn't be judged ({type(e).__name__})")
+            return StillMark(None), True
+
+    def _other_screen(self, kept: object) -> bool | None:
+        """(round G2) Does the screen now look like another one than `kept` (the mark a long read that wasn't whole was
+        made on): the newest frame, recent, differs from it inside a box of more than OTHER_SCREEN of the picture (the
+        measure STILL_BOX uses)? None when it can't tell (no picture kept, no frame since the kept one: review RG L4,
+        none recent, or no comparison): blocked."""
+        if not isinstance(kept, StillMark) or kept.frame is None:
+            return None
+        try:
+            latest, age = self.hub.latest, self.hub.age()
+            # (the runner sends no frames while it reads: right after a read the newest frame is the screen it was made
+            # on, seconds old; one older than OTHER_FRESH may be of a stream gone quiet: can't tell)
+            if latest is None or age is None or age > OTHER_FRESH:
+                return None
+            if latest.seq <= kept.frame.seq:
+                if session_module.TRACE:
+                    self.log("trace no picture since the one a long read failed on: blocked")
+                return None
+            x, y = kept.frame.thumb, latest.thumb
+            if x is not None and y is not None and x.size != y.size and not self._alike(kept.frame, latest):
+                # (CodeRabbit, PR #30) two pictures of other sizes (the phone turned) can't be compared: that is no
+                # evidence of another screen, and the block holds (_change counts them as all of it, for the stillness)
+                if session_module.TRACE:
+                    self.log("trace the picture can't be compared with the one a long read failed on: blocked")
+                return None
+            share, said = self._change(kept.frame, latest)
+        except Exception:  # noqa: BLE001 - can't tell: the block holds
+            return None
+        other = share > OTHER_SCREEN
+        if other and session_module.TRACE:
+            self.log(f"trace another screen than the one a long read failed on: {said}, more than "
+                     f"{OTHER_SCREEN * 100:.0f} %")
+        return other
+
+    def _plays_now(self) -> bool:
+        """(2.0.3, the phone test of 137b583) Does a slow app's screen play, before its planned long read? The read that
+        follows an agent's action asks that action's settle (_SETTLED), which ended 0.1-0.2 s before the read: on
+        frames that stood still, it doesn't (the picture a second ago was the screen before the action, and _plays
+        took it for a video: 3 s cut, then 8 s, 9.8 s on the phone where one 8 s read took 5); on its cap with frames
+        still changing (a feed), it does. A read with no settle before it (a look, wait_for's polls) asks _plays."""
+        verdict = _SETTLED.get()
+        if verdict is None:
+            return self._plays()
+        if session_module.TRACE:
+            self.log("trace long budget planned: the action's settle ended on frames that stood still" if verdict else
+                     "trace no long budget planned: the action's settle ended on its cap, the picture still changing")
+        return not verdict
+
+    def _plays(self) -> bool:
+        """(2.0.3) Does a slow app's screen play, before its planned long read? Both: the newest frame against the newest
+        one at least PLAYS_SPAN older that is another picture (the video feeder publishes one picture again when the
+        source has no new one: review R203c H1, 20 % of ticks at 24 fps) changed inside a box of more than STILL_BOX
+        (two neighbouring frames of a video differ far less than frames a second apart); and the picture is still
+        changing now: the newest frame isn't alike the oldest of the last PLAYS_NOW seconds (review R203d M1: a screen
+        an action changed a second ago and that stands now, as the action's settle saw, is no video). The frames of
+        that window are picked by their arrival on the hub's clock and ordered by their sequence numbers, so a burst
+        of frames with one arrival time (MJPEG) counts as that many frames, in order. Fewer than two frames in it, or
+        no such older frame: it doesn't play (the long budget; the growing block bounds a mistake)."""
+        frames = self.hub.recent()
+        if not frames:
+            return False
+        at, newest = frames[-1]
+        now = [f for t, f in frames if t >= at - PLAYS_NOW]  # (in sequence order: the hub keeps them so)
+        if len(now) < 2 or self._alike(now[0], newest):
+            return False
+        picture = getattr(newest, "picture", None)
+        older = next((f for t, f in reversed(frames) if at - PLAYS_SPAN - 2.0 <= t <= at - PLAYS_SPAN and
+                      (picture is None or getattr(f, "picture", None) is not picture)), None)  # (not from a stream gone
+        #                                                                                       quiet: a stale picture)
+        if older is None:
+            return False
+        share, said = self._change(older, newest)
+        plays = share > STILL_BOX
+        if plays and session_module.TRACE:
+            self.log(f"trace no long budget planned: the picture changed in the {PLAYS_SPAN:g} s before the read: "
+                     f"{said}, allowed {STILL_BOX * 100:.0f} %")
+        return plays
+
+    async def _still_across(self, mark: object) -> bool:
+        """(2.0.3) Session.still_across, after a cut normal read: may the long try go out? Yes unless the picture changed
+        across the read inside a box of more than STILL_BOX: the runner sends no frames while it reads, so one fresh
+        frame is waited for (STILL_AFTER_READ at most) and compared with the frame kept before the read (`mark`). No
+        frame kept, or none fresh in time: yes (the lead, after the phone test: the try is the default; a feed that
+        slips past costs one 8 s read and a block that grows each time: ReadBudget).
+        (Re-check R203b L-a, left as decided: the first fresh frame is trusted.)"""
+        if not isinstance(mark, StillMark):
+            if session_module.TRACE:
+                self.log("trace long try: yes (no frame kept before the read)")
+            return True
+        if mark.frame is None:
+            if session_module.TRACE:
+                self.log("trace no long try: the picture before the read couldn't be judged (counted as a video)")
+            return False
+        loop = asyncio.get_running_loop()
+        called = loop.time()
+        try:
+            latest = self.hub.latest
+            fresh = await self.hub.next_after(latest.seq if latest is not None else mark.frame.seq, STILL_AFTER_READ)
+            if fresh is None:
+                age = self.hub.age()
+                go, detail = True, (f"no fresh frame within {round(STILL_AFTER_READ * 1000)} ms; the newest is "
+                                    f"{age and round(age * 1000)} ms old")
+            else:
+                share, said = self._change(fresh, mark.frame)
+                go = share <= STILL_BOX
+                detail = (f"fresh frame after {round((loop.time() - called) * 1000)} ms, {said}, "
+                          f"allowed {STILL_BOX * 100:.0f} %")
+        except Exception as e:  # noqa: BLE001 - (review R203c L3) a picture that can't be judged counts as a video
+            go, detail = False, f"the pictures couldn't be compared ({type(e).__name__}), counted as a video"
+        if session_module.TRACE:
+            self.log(f"trace long try: yes ({detail})" if go else
+                     f"trace no long try: {detail}" if detail.startswith("the pictures") else
+                     f"trace no long try: the picture changed across the read ({detail})")
+        return go
 
     def _proven_still(self, noted: bool = True) -> bool:
         """Do the stream's recent frames already show what _settle waits for, so a read needn't wait? A read for
@@ -9483,20 +10682,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             trace.note("frame_age_ms", None if age is None else round(age * 1000, 1))
         if not gap or age is None or age > min(1.5 * gap, self.shot_fresh):
             return False
+        return self._still_window(self.hub.recent(), gap)
+
+    def _still_window(self, frames: "list[tuple[float, Frame]]", gap: float) -> bool:
+        """Are the frames of the last `still` seconds up to the last of `frames` alike the one that began that window
+        (at least 2 of them, and the history reaching back over it)?"""
         still = max(self.settle_still, 2.5 * gap)
-        frames = self.hub.recent()
-        start = frames[-1][0] - still  # the window ends at the newest frame, which is fresh
+        start = frames[-1][0] - still  # the window ends at the last frame given
         anchor = next((f for t, f in reversed(frames) if t <= start), None)
         if anchor is None:
             return False  # the history doesn't reach back over the window
         within = [f for t, f in frames if t > start]
         return len(within) >= 2 and all(self._alike(f, anchor) for f in reversed(within))
 
-    def _why_not_still(self) -> str:
-        """(the timing trace only) Why _proven_still said no: the stream's gap and age, and where a frame differs."""
+    def _why_not_still(self, upto: int | None = None) -> str:
+        """(the timing trace only) Why _proven_still said no (with `upto`: for the frames up to that seq): the stream's
+        gap and age, and where a frame differs."""
         try:
             gap, age = self.hub.gap(), self.hub.age()
-            frames = self.hub.recent()
+            frames = [(t, f) for t, f in self.hub.recent() if upto is None or f.seq <= upto]
+            if not frames:
+                return " (no frame yet)"
             still = max(self.settle_still, 2.5 * gap) if gap else 0.0
             start = frames[-1][0] - still if frames else 0.0
             anchor = next((f for t, f in reversed(frames) if t <= start), None)
@@ -9579,13 +10785,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         answer["image"], answer["image_size"] = base64.b64encode(jpeg).decode(), [size[0], size[1]]
         return answer
 
-    async def _phone_picture(self, width: int | None = None) -> bytes:
-        """The screen as the phone takes it, through the queue: the runner's JPEG shot (route version 11, about 50 ms;
-        `width` pixels wide, None: full size), else /screenshot's PNG (250-640 ms). The caller checks the unlock rule."""
+    async def _phone_picture(self, width: int | None = None, queued: bool = True) -> bytes:
+        """The screen as the phone takes it, through the queue (`queued` False: inside the caller's own turn): the
+        runner's JPEG shot (route version 11, about 50 ms; `width` pixels wide, None: full size), else /screenshot's PNG
+        (250-640 ms). The caller checks the unlock rule."""
         picture = getattr(self.session, "screen_picture", None)
         if callable(picture):
-            return await self._read(lambda: picture(width))
-        return await self._read(self.session.screenshot_png)
+            return await (self._read(lambda: picture(width)) if queued else picture(width))
+        return await (self._read(self.session.screenshot_png) if queued else self.session.screenshot_png())
 
     def _pairs_text(self, view, shot: "tuple[int, bool] | None") -> bool:
         """(2.0, worker H) Does a look's picture come with its text in ONE request (the OCR read's `image=1`, route version
@@ -9602,7 +10809,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         read with its picture in one request (_pairs_text) leaves the picture to _with_ocr."""
         async def read():
             self._mark_read(view)
+            before = await self._front_state_now()  # (review RP2 H2: what is in front as the read begins)
             text, image = await self.session.look(screenshot=False)
+            front, left = await self._front_answer(
+                self.session.last_alert is not None,
+                self._bannerish(getattr(self.session, "last_source", None), self._tier_now() != "full"))
+            if left:  # a banner was over the app as it was read: read again, now that it has gone (review RP H1)
+                before = front
+                text, image = await self.session.look(screenshot=False)
+                front = await self._front_state_now()
+            app = getattr(self.session, "app", None)
+            view.seen_front = self._front_agreed(before, front, app[1] if isinstance(app, tuple) else None)
+            view.front_moved = self._front_moved(before, front)
             view.items = view.shown = self.session.items
             view.shown_off = self._off_screen_now()
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
@@ -9611,6 +10829,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             view.alert_now = view.alert
             view.read_at, view.moved, view.dropped = self.control.clock(), False, False
             view.unlooked = 0
+            view.left_by_call = False  # (round S2)
             view.tree = getattr(self.session, "last_tree", None)  # (the place is worked out from it, below)
             view.opened = False  # the agent's own look is later than the launch's
             return text, image
@@ -9621,8 +10840,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 raise
             view.moved = True  # no list came back: the screen has probably changed
             view.place = None
-            return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
+            return _answer(lines, [*notes, f"couldn't look afterwards: {str(e).rstrip('.')}."])
         text, mapped = self._mapped_look(view, text)
+        if (over := self._over_line(view)) is not None:
+            text = f"{over}\n{text}"
         if paired and self._pairs_text(view, shot):
             return _answer([*lines, text], [*notes, *mapped], image)  # (its picture comes with its text: _with_ocr)
         return await self._add_shot(_answer([*lines, text], [*notes, *mapped], image), view, shot)
@@ -9643,7 +10864,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
         async def read():
             self._mark_read(view)
+            before = await self._front_state_now() if snap is None else None  # (review RP2 H2)
             read_now = snap or await s.snapshot()  # `snap`: a read the caller already made (wait_for's last poll)
+            front, left = await self._front_answer(
+                read_now.tree.alert is not None,
+                self._bannerish(getattr(s, "last_source", None), _cut_short(read_now.tree)))
+            if left and snap is None:  # a banner was over the app as it was read: read again (review RP H1)
+                before = front
+                read_now = await s.snapshot()
+                front = await self._front_state_now()
+            bundle = read_now.app[1] if isinstance(read_now.app, tuple) else None
+            view.seen_front = self._front_agreed(before, front, bundle, compare=snap is None)
+            view.front_moved = self._front_moved(before, front) if snap is None else ""
             s.items = read_now.tree.items
             app_changed = read_now.app is not None and view.app is not None and read_now.app != view.app
             head = _furniture(view, read_now.tree.alert, read_now.tree.keyboard)
@@ -9657,8 +10889,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             snap, up = await self._read(read)
         except Exception as e:
             view.moved = True  # no list came back: the screen has probably changed
-            return _answer([result, *tail], [*notes, f"couldn't look afterwards: {e}."])
+            return _answer([result, *tail], [*notes, f"couldn't look afterwards: {str(e).rstrip('.')}."])
         cut = _cut_short(snap.tree)
+        over = [o] if (o := self._over_line(view)) is not None else []  # (2.0.3: SpringBoard over the app, said first)
         covered = not snap.tree.items and bool(view.shown) and not cut  # the agent saw elements; now there are none
         view.tree, view.place = snap.tree, None  # where the app is now is worked out by _learn, after this answer
         s.items = view.items = view.shown = up.items
@@ -9680,6 +10913,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if off and not up.full:
             up.lines = [line for line in up.lines if line != changes.NO_CHANGE] + off
         earlier, view.unlooked = view.unlooked, 0
+        view.left_by_call = False  # (round S2: a read answered)
         if earlier and not up.full:
             # the block is measured from the agent's last list, so it holds those actions' changes too: a
             # first-time agent closed a sheet it had opened with look: false and read "No visible change."
@@ -9699,7 +10933,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if cut:
                 view.ocr = {}  # (the last reading's o refs are of the screen before the action)
                 beyond = [*beyond, AFTER_CUT]
-            return _answer([result, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
+            return _answer([result, *over, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
         if changes.NO_CHANGE in up.lines and _health_sheet(snap.tree.items):
             # iOS's own Health access sheet takes touches and changes nothing. With a host dialog, a person is asked to
             # choose, and this waits for the sheet to go (§11.5); the agent's list is then from before
@@ -9711,7 +10945,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         elif changes.NO_CHANGE in up.lines and hint and seconds is not None:
             notes = [*notes, NOTE_DELIVERED.format(touch=touch, seconds=seconds if watched is None else watched, hint=hint)]
         # (a Place: line goes here, after the first line, when places exist: AGENT-TOOLS §18.1, §13.4)
-        return _answer([result, *(briefing.cut(up.lines) if shorter else up.lines), *tail], notes)
+        return _answer([result, *over, *(briefing.cut(up.lines) if shorter else up.lines), *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:
         """What the session's last read found off screen, without what an open sheet hides (as in the header's

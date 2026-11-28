@@ -49,7 +49,7 @@ def _owed_settle(after: float, owed: bool = True) -> dict:
         # (the loop's clock is virtual, time.monotonic isn't: the touch and the return are dated `after` s back)
         d.session.hands_at = time.monotonic() - after
         d.unsettled = True
-        d.unsettled_from = (mark, daemon_module.CAP, time.monotonic() - after) if owed else None
+        d.unsettled_from = (mark, daemon_module.CAP, time.monotonic() - after, None) if owed else None
         done = await d._settle_unsettled()
         out["at"], out["done"], out["frame"] = loop.time() - began, done, d.hub.latest.jpeg
         out["unsettled"], out["from"] = d.unsettled, d.unsettled_from
@@ -88,7 +88,7 @@ def test_a_look_false_action_leaves_its_mark_and_the_next_read_settles_against_i
         await d.run_tool("a", "look", {"screenshot": False})
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert d.unsettled and d.unsettled_from is not None
-        (seq, frame), cap, returned = d.unsettled_from
+        (seq, frame), cap, returned, _expect = d.unsettled_from
         assert frame is not None and cap == daemon_module.CAP and returned <= time.monotonic()
         owed = []
         real = d._settle_unsettled
@@ -116,7 +116,7 @@ def test_a_silent_read_with_a_settle_owed_doesnt_skip_it_on_a_still_picture():
         await asyncio.sleep(0.3)
         d.session.hands_at = time.monotonic() - 0.3  # the stream has shown the old page still for a while: _proven_still holds
         assert d._proven_still(noted=False)
-        d.unsettled, d.unsettled_from = True, (mark, daemon_module.CAP, time.monotonic() - 0.3)
+        d.unsettled, d.unsettled_from = True, (mark, daemon_module.CAP, time.monotonic() - 0.3, None)
         view = d.control.client("a")
         await d._silent_read(view)
         assert loop.time() - began >= 1.0 and d.hub.latest.jpeg == b"General"

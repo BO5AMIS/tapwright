@@ -708,6 +708,17 @@ class Device:
                 await control.kill(pid)
         return len(pids)
 
+    @_traced
+    async def launch_app(self, bundle_id: str, arguments: list[str] | None = None) -> int:
+        """(2.0.3 round N) Start the app, or bring it forward when it runs, through iOS's process control: what
+        open_app uses while the runner is held by an app that isn't answering (WebDriverAgent's launch waits on
+        accessibility). Its pid."""
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
+        async with DvtProvider(self.rsd) as dvt, ProcessControl(dvt) as control:
+            await check_before_send()
+            return await control.launch(bundle_id, arguments=arguments or None, kill_existing=False)
+
     # ---- diagnostics (AGENT-TOOLS §15) ----
     @_traced
     async def processes(self) -> list["Proc"]:
@@ -723,6 +734,15 @@ class Device:
     async def app_processes(self, bundle_id: str) -> list["Proc"]:
         """That app's running processes, each with its start time (empty: it isn't running)."""
         return [p for p in await self.processes() if p.bundle == bundle_id]
+
+    async def processes_of(self, bundle_ids: list[str]) -> dict[str, list["Proc"]]:
+        """(2.0.3) The running processes of each of those apps, from one read of iOS's process list: the daemon's log
+        watchers share it (one question for all of them, where each asked the whole list for its own app)."""
+        out: dict[str, list[Proc]] = {b: [] for b in bundle_ids}
+        for p in await self.processes():
+            if p.bundle in out:
+                out[p.bundle].append(p)
+        return out
 
     @_traced
     async def phone_time_ms(self) -> int | None:
@@ -1190,7 +1210,14 @@ class Device:
         """Apps you installed (App Store, TestFlight, development builds)."""
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
         async with InstallationProxyService(lockdown=self.rsd) as proxy:
-            apps = await proxy.get_apps(application_type="User")
+            # (2.0.3, brief Q fix 5) only what is used here: every attribute of every app (entitlements, paths, tags...)
+            # is megabytes of plist, parsed in one piece on the event loop while the tunnel waits (a 2.1 s call, after a
+            # look the loop was held 15.6 s on, phone 2026-11-26). An older pymobiledevice3 without `lookup` asks for all
+            lookup = getattr(proxy, "lookup", None)
+            apps = (await lookup({"ApplicationType": "User", "ReturnAttributes": list(APP_ATTRIBUTES)}) if lookup
+                    else await proxy.get_apps(application_type="User"))
+        if apps is None:  # (CodeRabbit, PR #30) no LookupResult in the answer: a failed lookup, never "no apps"
+            raise DeviceError("the phone's app list came back without its result; try again")
         return sorted(({"bundle_id": bid, "name": info.get("CFBundleDisplayName") or info.get("CFBundleName", ""),
                         "version": info.get("CFBundleShortVersionString", ""),
                         "build": info.get("CFBundleVersion", ""),
@@ -1218,6 +1245,9 @@ class Device:
 
 
 START_SLACK = 1.0  # seconds two readings of one process's start time may differ
+# what user_apps reads of each app (the installation proxy's ReturnAttributes)
+APP_ATTRIBUTES = ("CFBundleIdentifier", "CFBundleDisplayName", "CFBundleName", "CFBundleShortVersionString",
+                  "CFBundleVersion", "CFBundleExecutable")
 
 
 def own_line(image: object, executable: object) -> bool:

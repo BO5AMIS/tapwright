@@ -1,5 +1,312 @@
 # Changelog
 
+## 2.0.3
+
+- An app that doesn't answer the hit test's question at its point holds the phone's accessibility. The question stays
+  with it until the app answers (2.4 to 4.6 s measured on a shopping app's first seconds after it opened, more than
+  80 s once on a video app's feed), and every accessibility question after it waits behind it. The service waits a
+  known hold out (below), never repeats the question, and a hold that outlasts 12 s is answered `not_answering` with
+  the connection kept (the next entry). A fix in the runner was tried and isn't shipped (runner 16: on iOS 26.5 Apple's
+  own client lookup raises on every call, and the accessibility timeout doesn't bound the request); it is planned
+  another way for 2.0.4. 2.0.3 stays on runner 15 (`tw-16.15.3.15`).
+  Measured on a phone (iPhone 14 Pro Max, iOS 26.5, runner 15, 2026-11-28): a shopping app 1.5 s after a fresh open held for about 4 s, waited out, then tapped, the connection kept; a video app's feed, eight touches at its top over 20 s after a fresh open: the first 3.9 s, then 0.5 to 1.2 s, its list read whole after them in 0.6 s; a timer's banner over a system app, the home screen and the shopping app: refused `covered` after about 8 s, a flick sent it away; on runner 16 one point question held the shopping app's channel 3.4 to 4.6 s whatever the accessibility timeout (0.3 s or 3 s).
+- A runner held by an app no longer costs the connection. On a video feed opened a second time, the runner stayed held
+  after a touch for more than 80 s; the wait for it gave up after 12 s, its next question went into the held runner,
+  was taken for a lost connection, and a reconnect and a new session followed: the tool call took 82 s. Now, when the
+  hold outlasts 12 s, nothing more that needs the app's accessibility is asked of the runner and the line is kept: the
+  call answers `not_answering` ("<app> is in front and isn't answering, so nothing on the phone can be read.
+  close_app can still close it; then open_app it again.", the app named by iOS's process list), and a touch that went
+  out says so first ("Tapped (x, y). ... couldn't look afterwards: ..."). Every later call first asks the status bar's
+  clock once (under 0.5 s): when it answers, the call goes on as usual; when it doesn't, the call answers
+  `not_answering` at once. `close_app` and `open_app` (another app, or the same one, which is started again, and its
+  answer says so) go through iOS's process control, and `press_button home` as before, and the clock is asked right
+  after them. The service's status says `not-answering` meanwhile, and the service asks the clock once every few seconds
+  by itself, so the state ends when the app answers again with no call (a person who closed the app on the phone can
+  use the live view again). A hold a call saw and didn't see end (a touch near the top refused slow at its 8 s limit,
+  under the 12 s, every clock question meanwhile "no element answered") is carried to the next call as a hold: that
+  call first waits out the rest of it, asking only the clock (about every 0.7 s, never two questions closer than
+  0.25 s, the phone's turn let go between two so other calls, `close_app` and the service's own check get theirs),
+  never the front question into the held runner, and goes on as usual as soon as the app answers. Only when the hold
+  is 12 s old, counted from its first slow answer and not from the call, is it `not_answering` as above: a shopping
+  app's hold of about 4 s is waited out, as before. And a front question that gets no answer while the runner answers
+  the clock a slow "no element answered" is that state too, not a lost connection (the next look had been taken for
+  one: a reconnect and a new session, 48 s); a fast one (the status bar being redrawn) says nothing of a hold, and a
+  restarted runner ("invalid session") is never taken for one. Any wait for a held runner ends at the hold's 12 s,
+  whatever another call does meanwhile.
+- A system sheet over the app is named. A rating prompt's sheet (another process's whole screen over a system app) was
+  refused at the top with "can't tell whether a notification is over the top of the screen": the runner had answered.
+  Now: `covered: another app's sheet (<bundle id>) is over the screen; look again.`, and a touch by the picture's text
+  that found it notes it.
+- An `o` ref is touched only where its text still is. On a shopping app's home whose list was cut short, an `o` ref
+  tapped 6 s after the look went to another control: the screen had moved (its search field's placeholder also changes
+  every few seconds), and the picture check is off on such screens by design. Now a touch aimed by an `o` ref reads the
+  picture's text once more right before it goes (the runner's text reading, 0.15-0.55 s, or this computer's when the
+  look used it), and goes at the text's centre as read now only when the same text is within 12 pt of where the look
+  read it. Gone, moved further, or the picture not readable now: `stale` (`o1 "..." is no longer where your last look
+  read it (it is at (x, y) now); nothing was touched. Look again.`): it is never touched where it moved to. When more
+  than 1 s passes between the start of that read and the touch (another call's read held the phone, a notification was
+  waited out), the text is read once more right before the touch, which goes only when the text is still within 12 pt
+  of where that first read found it; the check of what is in front and of a notification at the top then runs again
+  after it, so it is the last thing before the touch. Once a touch: a scroll's later drags don't read again.
+  `force` skips the check; `dry_run` runs it. The check's read is no look: the `o` refs stay.
+- A touch near the top right after `open_app` with `look: false` no longer sends the phone back to the app before.
+- A look's picture was refused "the phone is being unlocked" half an hour after the only unlock, twice, both right after
+  a long read: the read's frame had dropped out of the stream's short history, and any unlock still remembered (an
+  hour) made such a frame private. Now its own time stamp says when it came.
+- A touch can no longer land in an app the agent hasn't seen. On a person's phone, an agent aimed two taps at points
+  of a screen whose elements weren't read. A notification banner was over the top of the screen: the first tap opened
+  the banner's app on a conversation, and the second landed on that conversation's call button and started a call.
+  Nothing stopped either tap: the wait for a banner held only touches aimed at an element, and another app in front
+  stopped only typing. Now, with a runner that answered route version 11 or later:
+  - every answer that shows the agent the screen (a look, an action's answer, `open_app`, `open_url`, a `run` step
+    whose `expect` found text, an id or a label) records what was in front then, from the runner and iOS's process
+    list, asked as the read begins and again after it: an app, the home screen, or something of the system over an
+    app (a notification, an alert, Notification or Control Center). When the two disagree, or the read shows another
+    app, the record is "unknown" and the answer says so. A look taken while a notification may be down waits it out
+    first, and if it stays the answer says so in its first line;
+  - right before each touch goes out, the same question is asked again, and then whether a pause, a lock or a person's
+    touch came meanwhile. The touch goes only when it finds what the agent was shown: the same app, or the home screen
+    it saw (a point in its top 200 pt is refused there unless the hit test finds nothing of SpringBoard's at it, below:
+    a notification over the home screen looks like the home screen), or the system over the app it saw, for a touch
+    aimed at an element of that answer. A point on the system over an app is refused `covered`; in the top 200 pt a
+    notification is waited out (up to 8 s) first. Another app is refused `stale` ("Nothing was touched; look again.");
+  - when Tapwright can't tell what is in front (asked twice), the touch is refused `unknown_front`, nothing touched;
+    on a screen where the runner can't name the app, `open_app` names it. A runner whose version question failed is
+    refused the same way, never treated as an old one. No look yet: `no_look`;
+  - `open_app`, `open_url`, `press_button` and `alert` change what is in front on purpose and aren't checked; a
+    person's touches from the live view aren't checked; a `run` stops at a step that would touch an app no answer
+    showed (a step that only taps doesn't look).
+  What it costs: one question to the runner (usually a few ms) per touch and two per answer; iOS's process list only
+  when the system is in front; a cut read of Control Center, Notification Center or an alert waits up to 8 s per
+  answer. What it doesn't cover: a runner that answered a version below 11; the time between the last question and
+  the finger (on the hands, the question's own answer, about 0.1-0.5 s with the system in front, then nothing until
+  the touch); a notification over the home screen below its top 200 pt, and its action buttons.
+- After an action that changed a slow app's screen, the read of its answer is planned with 8 s at once when the
+  action's settle ended on a picture that stood still (the phone: 9.8 s, a cut 3 s read then the 8 s one, where one
+  8 s read takes about 5). When the settle ended with the picture still changing (a feed), that read follows 2.0.2's
+  rules. A read with no action before it (a look) still compares the picture with one a second older.
+- A screen that is slow to read but does read lists its elements again. A shopping app's home screen (900 to 1,000
+  elements) reads whole every time when given about 4 to 5 s, and never within the 3 s a read is given (measured on
+  the phone, straight from the runner: with 1.5 s cut 5 of 5, with 3 s cut 5 of 5 after 2.7 s, with 8 s whole 4 of 4 in
+  4.1-4.2 s, and by XCTest's snapshot whole 3 of 3 in 3.5-7.3 s; a second read at once 0.4-0.7 s). Each cut read put the
+  app on the 1.5 s budget, so every look answered "0 elements: the screen's elements weren't read within the time
+  given" for as long as the agent stayed there, and the agent worked from the picture's text alone. Now:
+  - when the 3 s read is cut, the same read asks once more with 8 s (`TAPWRIGHT_TREE_LONG_BUDGET`, in ms; `0` turns it
+    off), unless the stream's picture changed across the read inside a box of more than 60 % of the picture
+    (`TAPWRIGHT_STILL_BOX`; the status bar and the screen's edge strips are left out): a playing feed changes all of
+    it, while on the phone the heavy home screen's banner moved on over 36 % of it during a read, and a spinner changed
+    before it. Nothing is asked of the screen before the read. When no fresh picture comes within 1 s of the answer,
+    or none was kept before the read (a stalled stream, or one that is opening again), the 8 s read goes out; when the
+    pictures can't be compared, it doesn't (counted as a video). Nor for an app the read can't name (no block could
+    count it). Whole, it is the answer, with one note that the screen took long to read;
+  - that app's next reads are given 8 s, never 1.5 s and never left unasked, unless its newest picture differs by more
+    than that box from another picture at least 1 s older (something plays there: then 2.0.2's rules, and the app keeps
+    its 8 s for its next screen). A warm read still takes what it takes (0.4-0.7 s);
+  - an 8 s read that is cut, or gets no answer, is never asked again (one the runner gave up within its first quarter,
+    with nothing to answer yet, is asked again within what is left of the 8 s, as any read is), and blocks that app's
+    next 8 s read on the screen it failed on (another screen of the app still gets its 8 s; every screen of it only
+    after three in a row that weren't whole, below), for longer each time in a row: for an app that never read whole
+    with 8 s, 5 minutes, then 10, 20, 40 and so on; for an app that has, 1 minute, then 2, 4, 8 and so on (so one screen
+    of it doesn't leave its readable ones unread for long); up to 6 hours either way. A whole 8 s read ends it. The
+    2.0.2 rules apply meanwhile. The block holds across a reconnect to the phone (a service restart starts afresh);
+  - a screen whose picture changes by more than the box across the read gets the same reads as in 2.0.2, plus a wait
+    of up to 1 s (about 0.3 s on the phone) for one fresh picture after each cut 3 s read;
+  - a read that could lead to an 8 s one, made while the picture stream has sent nothing for half a second (it closes
+    30 s after the last call and is opening again), waits up to 1.5 s for a picture to compare; never while pictures
+    arrive, and no read that can't lead to an 8 s one (a 1.5 s read, a read left unasked, a blocked app) waits for or
+    looks at the stream at all, except in an app that has read whole with 8 s, whose reads first compare two of the
+    stream's pictures (a few ms);
+  - an 8 s read answered by another app's screen (a notification banner over the app) counts for neither app: the
+    app it was for is read again as if it hadn't happened;
+  - `TAPWRIGHT_TREE_LONG_PATH=direct` sends the 8 s read the direct way instead of XCTest's (for measuring).
+  What it costs: the first look at such an app takes 3 s (cut), about 0.3 s for one fresh picture, then the 8 s read
+  (4 to 5 s on the measured screens, 3.5 to 7.3 s cold by XCTest's snapshot), instead of 3 s that read nothing. After
+  that, each screen change in it costs one 8 s read (4 to 5 s on those screens), instead of a 3 s read that is cut,
+  unless the picture is still changing in the 0.3 s before the read (a video, or a read that follows the end of an
+  animation that closely: then the 3 s read, the wait and the 8 s read, as on the first look). After every cut 3 s read
+  of an app that isn't blocked, the answer waits for one fresh picture (about 0.3 s on the phone, at most 1 s). A feed
+  can now cost 8 s reads too, when its picture happens to change little across a read (a paused video, a photo post,
+  a moment between two videos) or no fresh picture comes (a stalled stream). Each costs 8 s, up to 13 s when it gets
+  no answer. At worst, on a screen that never answers: in an app that never read whole with 8 s, 4 in the first hour
+  (at 0, 5, 15 and 35 minutes), then about one an hour, then fewer, down to one every 6 hours; in an app that has, 6
+  in the first hour (at 0, 1, 3, 7, 15 and 31 minutes), then about one an hour, then fewer, down to one every 6
+  hours. Each app pays this on its own. The block holds only on the screens the 8 s reads failed on (the last four
+  are kept, each blocked for its own time: going back and forth between two screens that both fail pays no 8 s read at
+  each switch), until three in a row weren't whole: a screen whose picture differs from those by more than a quarter
+  gets its 8 s read at once (a
+  product page that never read, the app's own timeouts, blocked the whole app for 60, 120, 240 s: its readable pages,
+  the home screen after a relaunch too, answered "0 elements", and the moment the block ran out the home screen read
+  whole in 2.5 to 5.3 s); from the third in a row on, the block is the app's, as above, but only for an app none of
+  whose 8 s reads has ever come back whole since the service started: one whole one proves some of its screens read,
+  and from then on only the screens that failed are blocked (on a shopping app the path home, search, results tripped
+  the app's block before results, which reads, was ever tried, and a whole session got 0 elements). A long read cut
+  while the app was busy redrawing (XCTest lost its application element mid-read: "is not present in the current view
+  anymore") isn't counted in the row; its screen is blocked as any, for a time that doubles as for any. `type_text`
+  without a target reads its field with the normal budget only, never 8 s more before the keys, and that read, cut on
+  an app that reads whole with 8 s, doesn't give the app the 1.5 s budget for later reads. A long read that comes back
+  partly read (an element with a label, a name or a value, or more than five; not all of them) is no miss: it starts no
+  block and counts nothing; on a still screen that only ever answers in part, each look then takes up to 8 s and
+  returns that part. A page that never reads costs one 8 s read on each visit when the app's readable screens read
+  whole in between (a whole read ends the block and its count) (a home screen's planned
+  long read gave 46 of its 140 elements, blocked the app for 60 s, and the agent's tap by an id that read had listed
+  answered "this screen's elements weren't read"). And a read is planned by the app the runner names in front right
+  before it, not by the app of the newest read: an `open_app` from a slow app planned its answer's read with the long
+  budget of the app that was left (10 s) and counted a miss against it. While a long read runs, the
+  phone's runner answers
+  nothing else: the live view's picture stands still for up to its time (the stream may reopen), and a person's touch
+  waits for it. `wait_for` uses 8 s only when its own time left covers the read and 5 s more, so not with its default
+  10 s timeout.
+- `back` on a screen with no navigation bar taps the screen's own back control. A shopping app's search results have
+  only `button "icBrutalBack" id=searchResultBackButton` in the top-left corner; `back` took 15.7 s there (a header
+  strip read as a layer sent it the sheet's way: four reads, a tap into the middle of the results under the strip, a
+  pull) and answered `no_action`. Now, when `back`'s own read is whole and exactly one control in the top-left corner
+  (120 by 140 pt; 180 by 100 in landscape) takes a tap, has nothing drawn over it and means back and nothing else,
+  it is tapped and named: `Tapped the screen's back button: ...`. "Back and nothing else": a label that is exactly
+  "Back", "Go back", "Back button" or "Navigate back" (or Arabic "رجوع", "عودة"), or an id whose parts, without a
+  generic ending such as `button` or `icon`, end in `back`, not after a word like call, send, play, cash or camera.
+  "Call back", "Back camera", "Back up", `callBackButton` and `playbackButton` are never tapped (the final review
+  found the first version took them: a "Call back" in the corner would have started a call). A control with a word
+  that needs a person's OK (Buy, Send, Delete...) is refused `no_action`, naming it. A cut or empty read looks for no
+  corner control (it used to fall back to the agent's older list, possibly of another screen): `back` swipes and says
+  the screen's elements weren't read. A layer that is no sheet (a strip along the top) gets no touch: `no_action` in
+  about the time of one read; a real sheet is tapped beside only on a point clear of anything that takes a touch.
+  And when nothing qualifies, `back` gives up faster: one read when the picture didn't move across it (or, when that
+  read was whole, when no fresh frame came after it: a bottom sheet of a slow app was read twice, 5.0 and 6.7 s, the
+  second cut, which blocked its long reads for a minute), and no read after a way out that changed nothing on the
+  stream. Cost: none on screens with a navigation bar.
+- An `id` or `label` that an element and its own wrapper share is no longer `ambiguous`. `tap {"target": {"id":
+  "closeButton"}}` in a shopping app answered `ambiguous` with `e3 other id=closeButton @16,81 40x40` and `e4 button
+  id=closeButton @16,81 40x40`. Now matches that are one thing listed twice (frames alike within 2 pt, or one covering
+  at least 90 % of the other) resolve to the one that takes the touch. Matches at different places stay `ambiguous`,
+  and `index` still counts every match (so a recording of such a tap keeps `index: 1`). Cost: none.
+- The note "this screen took about N s to read, longer than the usual time given" is said once per app: on the answer
+  whose own read needed the long try after a cut normal read, with the time that read really took (to a tenth of a
+  second), and again only after a long read of that app was cut and a later one read whole. It came on answer after
+  answer, also for fast reads.
+- The log watchers ask iOS's process list once for all of them. One watcher per app an agent ever opened each asked
+  for the whole list (0.35 to 0.9 s a question over the tunnel), also with the phone idle: 73 questions in 30 s with
+  about a dozen apps opened. Now one question serves every watcher, `logs` and `crash`: at most one a second while a
+  watched app is in front and a client called in the last minute (or `logs` or `crash` were asked for), one every 30 s
+  otherwise; a watcher of an app gone for a minute ends. What `logs` and `crash` promise is unchanged: each answer
+  vouches only for the lines its question saw, and the same-life rule for pids holds. Cost: a `logs` call on a quiet
+  phone asks at once; the window in which a reused pid could be mistaken grows from 3 s to 30 s while quiet.
+- When the daemon's event loop is held for more than a second, the log now says by what: a watchdog thread writes the
+  loop thread's Python stack once per stall (up to 15 lines of file, line and function names; no value, no source
+  line, and these lines skip the accounts' scrub, which belongs to the loop's thread). The log had "the event loop was
+  held for 15.63 s" during a look of a simple screen and nothing about the cause. `user_apps` (2.1 s seen just after
+  it) now asks iOS for the six attributes it reads instead of every attribute of every app. Cost: one thread that
+  looks four times a second.
+- A touch near the top no longer goes onto a timer's banner. On a phone with iOS 26.5, a 23 s timer was started, a
+  shopping app opened and looked at, and after the timer's banner came down, `tap {x: 200, y: 85}` went onto the
+  banner and the timer's app came to the front. The banner check rests on the runner naming SpringBoard in front while
+  a banner shows; asked every 0.5 s before and during this banner, the front route and activeAppInfo named the app the
+  whole time. The runner's hit test does see it: SpringBoard's element framed `[11, 11, 408, 490]` at (200, 85), the
+  app at (200, 150) and below, 13 to 32 ms a question; the status bar is SpringBoard's at all times (frames that end
+  above 64 pt). Now, when the runner names the app the agent saw and a touch starts in the top 200 pt, the hit test is
+  asked at that point:
+  - a banner (SpringBoard's element there, not an icon and not its whole screen, reaching below the status bar; or a
+    call's banner, `com.apple.InCallService`, whatever its frame) is waited out up to 8 s (asked again every 0.5 s),
+    then `covered`;
+  - the app itself, a web page's content (`com.apple.WebKit.*`: all of a page's top in a browser) and the keyboard are
+    clear; any other process there (a game's overlay) can't be told: a point, an `o` ref or a picture text is refused,
+    a touch aimed at an element goes;
+  - a quick swipe from the banner up off the top edge (the `swipe` tool only, at least 40 pt long, at most 0.5 s: a
+    shorter one is a tap on the banner, a slower one a long press) goes at once: that sent the timer's banner away
+    without opening anything, and `covered`'s words now say so (a timer, an alarm or a call stays until answered);
+  - in landscape the hit test is asked at the point mapped to portrait; while which side is up isn't known, a point in
+    the zone is refused;
+  - on the home screen the same question lets a point in the top 200 pt go when nothing of SpringBoard's is there (a
+    pull from the top edge for Control Center, a widget), where every such point was refused; a point on SpringBoard's
+    element there is refused as before; a touch aimed at an element of the agent's look goes when the hit finds that
+    element (a Control Center module, a Notification Center row) and waits out anything else over it;
+  - the picture-text aim's banner check asks the hit test too, at (the screen's middle, 80).
+  The limit, measured: on an app that is slow to answer (a video feed whose reads time out) the hit test said "no
+  element answered" at every point for about 3.5 s, and a pile of questions held the runner until it was restarted.
+  So "no element answered" is an answer only at the screen's top edge (the portrait panel's, in landscape too); below
+  it the question is asked once (no longer three times: see the banner check's entry below), and "no element answered"
+  with nothing to tell the app from SpringBoard, or no answer within about 1.2 s, refuses a touch that starts in the
+  top 200 pt, a point or an element alike, with its own words
+  ("can't be told right now, because the app in front is slow to answer ...; try again in a moment, or aim lower"):
+  the phone showed the hit test silent at a banner's own points over such an app. Such a silence never counts as a
+  dropped line (no reconnect); never more than one hit question is out, the hit test that proves a touch's element
+  included, and after one that got no answer none is asked for 5 s. Once a banner was seen at a touch's start, only an
+  answer that nothing is over the point ends its wait: a silence keeps it waiting, then `covered`; that wait is 8 s for
+  the touch in all, through the computer's touches too, and a pause, a lock or a person's touch ends it within a poll.
+  The flick up goes on such an app too (on a banner it sends it away; with none it is the agent's own swipe of the
+  app's top), and the slow words say so. A touch near the
+  top of such an app can be refused though nothing is over it. Not asked
+  (as before): a runner below route version 6 or without the route, `TAPWRIGHT_HIT_CHECK=0`. Cost: one hit question
+  (about 20 ms) for each touch, points and elements alike, that starts in the top 200 pt of an app or the home screen
+  the agent saw; none lower down.
+- A touch aimed by a point, an `o` ref or a picture text in the top 200 pt is refused `covered` while the only word
+  on the app in front is iOS's process list (the runner couldn't name it, and `open_app` had named that app). That
+  list never has SpringBoard, so a notification over the app looks the same as the app alone: the touch that started
+  the incident above could go out again on exactly the screens where the runner can't say (final review). A touch
+  aimed at an element of the agent's last answer, or lower down, still goes.
+- An answer whose read saw a notification come or go over the same app now says `Note: a notification passed over the
+  app while this was read; look again.`, not that another app came to the front.
+- The banner check asks the status bar first, then the touch's point once, and waits for a runner that is held. On an
+  app whose accessibility is busy, every touch in the top 200 pt was refused "slow" (a promotion's close X at
+  (383, 168) couldn't be tapped: the agent was stuck on the app's first screen), and on a hung video feed the check's
+  own three questions at the app's point cost the connection. Measured: an ordinary notification banner sits below the
+  status bar, which keeps answering as if nothing were there; and one question the app doesn't answer leaves the
+  phone's runner waiting for it, 2.5 to 9.8 s, during which every hit question and the front route get nothing. Now,
+  over an app held upright, the clock (66, 22) is asked first: a banner there (a timer's, a call's, or SpringBoard's
+  whole screen while one comes or goes) holds every touch in the zone; "no element answered" there, slow (the runner
+  held); SpringBoard's status bar there, then the touch's point, once: a real answer decides as before. A "no element
+  answered" there is the app not answering only when the clock answered promptly (under 0.15 s: a link slow already
+  can't vouch for anything; a late clock and a "nothing" at the point is slow) and the "nothing" took at least 0.2 s
+  longer than the clock (the link's time is in both); the clock is then asked once more: when it says nothing too, as
+  slowly, the runner is held, the app didn't answer where SpringBoard would have, and a touch by the computer's hands
+  goes; when it answers, the point's "nothing" was SpringBoard's (a banner in motion): the touch waits a poll. A touch
+  that would go through the phone's runner (no hands) is refused slow there instead: the runner is held, and its touch
+  would land seconds late. A fast "no element answered" anywhere but the screen's top edge is a banner in motion: the
+  touch waits a poll. SpringBoard's whole screen at the point over an app is a banner. In one check the app's point is
+  asked once and the clock at most twice. Any "no element answered" that took 0.25 s or more marks the runner held,
+  whatever the verdict (a hold missed costs the connection, one set by mistake one question). Known limit: while a
+  banner comes or goes the clock too says a fast "nothing", so two answers delayed 0.2 s on the link after a prompt
+  one, in that half second, could read as clear; it needs a fast "nothing" at a point below the status bar, not seen
+  on the phone. After a question the app didn't answer (the
+  banner check's, or the one that proves a touch on a view another process draws), the runner is known to be held:
+  hit questions stop, the front route and tree reads wait (asking the clock every 0.7 s, 12 s at most) instead of
+  stalling into a lost connection, so the answer after a touch on a hung app can take up to about 10 s; a touch by
+  the hands waits for it with the hands let go, within its own 8 s, then is refused with the slow words. A banner wait
+  stays within its 8 s for the touch (and one poll), asking the clock once a poll while the runner is held. The read's
+  banner note asks nothing after a read that was cut short (its question to a busy app held the runner: a tap by text
+  took 8.5 s). Landscape, the
+  home screen and a point inside the status bar ask the touch's point once. A home-button phone has no status bar at
+  the clock: the app answers there (or, busy, says nothing and the touch is refused slow), and the point is asked once.
+  The window between the check and the touch is wider on a busy app: about 0.65 s between the point's answer and the
+  touch (the point's 0.3 s wait and the confirm's), up to about 1.65 s after a banner wait (the wait's clear is taken
+  for 1 s): made small, not closed.
+- A tap that worked is no longer answered "No visible change." because the app was slow to show it. In a read-only
+  sweep of a React Native app, two taps on buttons were answered "No visible change." after 0.38 s, and the look right
+  after showed the next screen: the app had started its navigation a few hundred ms later. Since 2.0 a tap takes about
+  0.1 s (3 s in 1.10, which hid this), and the settle believed an unchanged screen after about 0.3 s (0.8 s after a
+  touch from the computer). The note then said "try once more", so the next tap would have landed on the new screen.
+  Now a tap, long press or toggle aimed at an element that has an action (by ref, id, label or text) is answered
+  "No visible change." only once 1.5 s have passed since the touch with nothing changed; a change that starts within
+  them settles as before, and the answer shows the new screen. The same holds for the settle a `look: false` touch
+  leaves to the next call. The note now says what was waited and that a look or a `wait_for` comes next: "nothing on
+  screen changed within 1.5 s. The app may still be on its way: look, or wait_for what you expect, next; only if the
+  screen is still the same, try the touch again, ...". A point, an `o` ref, a picture text, an element with no action,
+  a scroll, a swipe or a drag keep their times, and so does an app whose screen never stands still (its 0.5 s cap).
+  What it costs: a touch on a button that does nothing now answers in about 1.5 s instead of 0.3 s (0.9 s with a touch
+  from the computer); a touch whose screen changes costs nothing more.
+- Touches and the front record, tightened (CodeRabbit's second review of 2.0.3): a touch aimed at an element of the
+  agent's list in the top 200 pt is refused `covered` when the hit test finds another app's sheet over the whole screen
+  there, as a point is; an element of a list read with the system over the app (an alert's button, a Control Center
+  tile) is refused `stale` once the app is alone in front again (its place is the app's now); a fast touch the runner
+  refuses before playing it is checked again before it is played another way. `open_app` and `open_url` read what is in
+  front inside their own action, right after the open, so another agent's call can't come in before the record;
+  `open_app` records it only when it is the app it opened, else the next touch is refused `unknown_front`; a front record whose read fails leaves none (`no_look`), never the app before. A `run` step's
+  `expect` credits the app whose read found its text, id or label (a picture check read in another app makes it
+  unknown), and an `open_url` step's link `expect` records its app as other steps' do (its next touch was refused
+  `stale`). `type_text` without a target reads its field with a real normal-budget read (it could get the short budget,
+  or no read at all, and type into whatever had focus). `back` reads again when a picture that came during its read
+  shows the sheet moved. The 1.5 s in which "No visible change." isn't believed after an element touch counts from the
+  touch, not from the call's start (a banner wait before the touch used it up).
+
 ## 2.0.2
 
 - A touch connection that is acknowledged and reaches nothing is caught in more cases. A start of the service can

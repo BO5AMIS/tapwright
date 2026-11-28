@@ -19,7 +19,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-from . import otp as otplib, policy, store, trace, uxcheck
+from . import loopdog, otp as otplib, policy, store, trace, uxcheck
 from .ceiling import Ceiling
 from .control import STILL_WANTED, Refused
 from .daemon import BUNDLE_ID, SYSTEM_APPS
@@ -631,6 +631,10 @@ class RedactAccounts(logging.Filter):
         self.scrub = scrub
 
     def filter(self, record: logging.LogRecord) -> bool:
+        if record.threadName == loopdog.THREAD:
+            # (review RF L1) the loop watchdog's lines hold file, line and function names only, never a value; the scrub
+            # would restat and maybe reload the accounts from the dog's thread while the loop's may be doing the same
+            return True
         try:
             record.msg, record.args = self.scrub(record.getMessage()), None
             if record.exc_info and not record.exc_text:

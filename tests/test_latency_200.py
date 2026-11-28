@@ -460,15 +460,21 @@ def test_a_lock_press_the_phone_doesnt_confirm_answers_as_before(monkeypatch):
 # ---- an answer that never comes ----
 
 def test_a_budgeted_read_is_waited_for_its_budget_and_a_grace_not_ten_seconds():
+    """A normal or short read is never waited for past READ_CUT (10 s). (2.0.3, changed on purpose by the lead's brief
+    O2) A long read is waited for its budget and BUDGET_GRACE (5 s), past READ_CUT: the XCTest way ran up to 2.4 s past
+    its budget, and a long read that got no answer is never asked again."""
     assert session_module.read_wait(None) == session_module.READ_CUT
     assert session_module.read_wait(3000) == 8.0 and session_module.read_wait(1500) == 6.5
     assert session_module.read_wait(20000) == session_module.READ_CUT  # (never longer than a read without one)
+    assert session_module.read_wait(8000, long=True) == 8.0 + session_module.BUDGET_GRACE == 13.0
 
 
 # ---- a banner over the element a touch is aimed at ----
 
 def test_a_touch_aimed_at_an_element_waits_a_banner_out_and_a_point_does_not():
-    """Seen on the phone: `back` tapped its button as a banner of another app slid over it, and that app opened."""
+    """Seen on the phone: `back` tapped its button as a banner of another app slid over it, and that app opened. (2.0.3,
+    changed on purpose) A point waits a banner out too: two point taps on a screen whose elements weren't read went to
+    a banner and then to the chat it opened (tests/test_touch_other_app_203.py)."""
     from fakes import button
 
     async def go():
@@ -486,12 +492,12 @@ def test_a_touch_aimed_at_an_element_waits_a_banner_out_and_a_point_does_not():
         d.session.tw_version = 11
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         await d.run_tool("a", "tap", {"target": {"label": "OK"}, "look": False})
-        await d.run_tool("a", "tap", {"target": {"x": 20, "y": 20}, "look": False})  # the agent's own point: as it is
+        await d.run_tool("a", "tap", {"target": {"x": 20, "y": 20}, "look": False})  # (2.0.3) a point: held too
         d.session.tw_version = 10  # an older runner: asking for the app in front costs a read, so no wait (as since 1.7.5)
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
-        assert seen == [True, True, False, False]
+        assert seen == [True, True, True, False]
         assert d._guards_banners("back", None) is False
         d.session.tw_version = 11
-        assert d._guards_banners("back", None) is True and d._guards_banners("swipe", None) is False
+        assert d._guards_banners("back", None) is True and d._guards_banners("swipe", None) is True
         await finish(stop, task)
     run(go)

@@ -174,6 +174,7 @@ class FakeDevice:
         self.holders: dict[int, tuple[str, float | None]] = {}  # pid -> (bundle id, start) of whatever holds it now, if
         #                                                         that is not what `pids` says (a pid taken by another app)
         self.proc_error: Exception | None = None  # the process list can't be read
+        self.proc_list_asks = 0  # questions of the whole list for several apps (processes_of)
 
     async def app_pids(self, bundle_id: str) -> list[int]:
         self.app_pids_calls += 1
@@ -185,6 +186,15 @@ class FakeDevice:
         if self.proc_error is not None:
             raise self.proc_error
         return [Proc(pid, self.starts.get(pid), bundle_id) for pid in self.pids.get(bundle_id, [1])]
+
+    async def processes_of(self, bundle_ids):
+        """One question of the whole process list for several apps (Device.processes_of): counted once."""
+        self.proc_list_asks += 1
+        self.app_pids_calls += 1
+        if self.proc_error is not None:
+            raise self.proc_error
+        from tapwright.device import Proc
+        return {b: [Proc(pid, self.starts.get(pid), b) for pid in self.pids.get(b, [1])] for b in bundle_ids}
 
     async def phone_time_ms(self) -> int | None:
         return self.phone_ms
@@ -539,6 +549,12 @@ class FakeSession:
         return self.foreground
 
     async def back_point(self):
+        # (as Session.back_point: its read's own items, for `back`'s checks, read anew each time (CodeRabbit, PR #30);
+        # a test that sets them keeps its own)
+        current = getattr(self, "front_items", None)
+        if current is None or current is getattr(self, "_front_items_made", None):
+            self.front_items = self._front_items_made = list(self.tree)
+        self.last_tier = self.tier
         if self.dismiss_at is not None:
             return ui.Back(False, None, self.dismiss_at)
         return ui.Back(self.has_nav_bar or self.back_at is not None, self.back_at)
@@ -726,6 +742,7 @@ class DescribingSession(FakeSession):
         self._record("look")
         self.items = list(self.tree)
         self.last_tier = self.tier
+        self.read_app = self.app  # (as the real Session's look: its read names the app, review RP)
         text = ui.describe(self.items, self.screen, 3.0, self.app, self.last_alert, self.last_keyboard, 0,
                            (self.above, self.below), tier=self.tier)
         return text, (b"JPEG" if screenshot else None)

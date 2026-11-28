@@ -258,6 +258,8 @@ def test_a_banners_own_words_are_never_a_match_and_the_touch_waits_a_banner_out(
         r = await d.run_tool("a", "tap", {"target": {"text": "Reply"}, "screenshot": False})
         assert r["text"].startswith("Tapped (") and s.calls.count("tap") == 1
         assert guarded and guarded[-1] is True  # the point is the text's, not the agent's own: held for a banner
-        assert original("tap", ui.Target(x=160.0, y=99.0)) is False  # (a point the agent chose itself is not)
+        # (2.0.3, changed on purpose) a point the agent chose itself is held too: two point taps on a screen whose
+        # elements weren't read went to a banner and then to the chat it opened (tests/test_touch_other_app_203.py)
+        assert original("tap", ui.Target(x=160.0, y=99.0)) is True
         await finish(stop, task)
     run(go)

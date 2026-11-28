@@ -736,7 +736,7 @@ def test_the_daemons_settle_shortens_on_a_feed_and_comes_back_when_it_stands_sti
         caps_asked, ends = [], [Settled(2.0, True, True), Settled(0.5, True, True), Settled(0.3, True, False, True),
                                 Settled(0.3, True, False, True), Settled(2.0, True, True)]
 
-        async def frames(after_seq, still=None, cap=2.0, since=None, early=None):
+        async def frames(after_seq, still=None, cap=2.0, since=None, early=None, expect=None):
             caps_asked.append(cap)
             return ends.pop(0)
         d._settle_frames = frames
