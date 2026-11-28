@@ -4311,6 +4311,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             if isinstance(self.stuck, session_module.RunnerHeld):
                 await self._held_ask(name, args)  # (round N: the clock first, before anything waits for the line)
+            elif callable(carried := getattr(self.session, "hold_carried", None)) and carried():
+                await self._carried_wait(name, args)  # (round T: a hold an earlier call left, waited out first)
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
@@ -6495,14 +6497,50 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
     def _carry_hold(self) -> None:
         """(2.0.3 round S, S-F2) At the end of every call: a hold that still stands (Session.hold_standing: a slow "no
-        element answered", and no real answer of the clock since) outlives the call that saw it as the given-up state.
-        The next call then asks the clock once first (_held_ask): a real answer goes on as usual, else `not_answering`
-        at once, with no front question into the held runner and no reconnect. (The practice: a touch refused slow at
-        its banner wait's limit, 8.9 s, under HIT_HELD; the next look's front route went into the hold.)"""
+        element answered", and no real answer of the clock since) outlives the call that saw it. (The practice: a touch
+        refused slow at its banner wait's limit, 8.9 s, under HIT_HELD; the next look's front route went into the hold.)
+        (Round T, review RS-H2) It is carried as a hold, not as the given-up state: the state stays live, no agent's
+        list is dropped, and the next call waits out the rest of it (_carried_wait); `not_answering` comes only once
+        the hold is HIT_HELD old."""
         standing = getattr(self.session, "hold_standing", None)
         if (self.state == "live" and not isinstance(self.stuck, session_module.RunnerHeld) and callable(standing)
                 and standing()):
-            self.lost(self.session.carry_hold())
+            self.session.carry_hold()
+
+    async def _carried_wait(self, name: str, args: dict) -> None:
+        """(2.0.3 round T, review RS-H2, RS-H1) A call while a hold carried from an earlier call stands, before anything
+        of it waits for the line: the clock about every HIT_FREE_EVERY (HIT_FREE_MIN apart at least), each question
+        its own turn of the queue (control.read), so the heartbeat, close_app, open_app and other calls get theirs
+        between two; no front question, no tree. A real answer ends the hold and the call goes on as usual. Once the
+        hold is HIT_HELD old (from its first slow answer, not from this call; one question at least) it is given up:
+        the given-up state (RunnerHeld), then as _held_ask: close_app, open_app and the home button go on by the device
+        channel, anything else is answered `not_answering`."""
+        session = self.session
+        while session.hold_carried():
+            asked = time.monotonic()
+            try:
+                answered = await self.control.read(session._free_step)
+            except ConnectionLost as e:
+                self.lost(e)
+                raise self._not_connected() from None
+            if answered:
+                return
+            if isinstance(self.stuck, session_module.RunnerHeld) or not session.hold_carried():
+                break  # (another call gave it up, or it ended, meanwhile)
+            left = session.hold_left()
+            if left <= 0:
+                self.lost(await session.give_up_carried())
+                break
+            await asyncio.sleep(min(max(session_module.HIT_FREE_MIN,
+                                        session_module.HIT_FREE_EVERY - (time.monotonic() - asked)), left))
+        held = getattr(session, "runner_held", None)
+        if held is None:
+            return  # (the clock answered meanwhile, or the line changed: the call goes the usual way)
+        if not isinstance(self.stuck, session_module.RunnerHeld):
+            self.lost(held)  # (another call's read gave it up in the session: the daemon's state follows)
+        if name in ("close_app", "open_app") or (name == "press_button" and args.get("name") == "home"):
+            return
+        raise self._not_connected()
 
     def _end_held(self, why: str) -> None:
         """(round N) The clock answered: the given-up hold is over, the line live again (the heartbeat says locked)."""

@@ -2,8 +2,10 @@
 (its banner wait's limit, under HIT_HELD), every clock question meanwhile "no element answered"; the hold wasn't
 carried, the next look's front route went into the held runner, was taken for a lost line, and a reconnect and a new
 session followed (47.9 s, 0 elements). Now a hold still standing at the end of a call (no real answer of the clock
-since it was set) is carried as the given-up state, and a front route that gets no answer while the runner answers
-the clock "no element answered" is that state too, never a lost line."""
+since it was set) is carried to the next call, and a front route that gets no answer while the runner answers the clock
+a slow "no element answered" is the given-up state, never a lost line. (Round T, review RS-H2) The carried hold is still
+a hold: the next call waits out the rest of it (the clock only), and answers not_answering only once it is HIT_HELD
+old."""
 import asyncio
 import time
 
@@ -32,6 +34,9 @@ class PracticeSession(PointSession):
     held_answers = _real("held_answers")
     hold_standing = _real("hold_standing")
     carry_hold = _real("carry_hold")
+    hold_carried = _real("hold_carried")
+    hold_left = _real("hold_left")
+    give_up_carried = _real("give_up_carried")
 
     def __init__(self, hold_for: float) -> None:
         super().__init__(SHOP)
@@ -60,7 +65,7 @@ class PracticeSession(PointSession):
         return await super().front_app()
 
 
-def test_s_f2_a_touch_refused_slow_with_the_hold_standing_carries_it_and_the_next_look_asks_the_clock_once(
+def test_s_f2_a_touch_refused_slow_with_the_hold_standing_carries_it_and_the_next_look_waits_out_its_rest(
         scaled, monkeypatch):
     monkeypatch.setattr(session_module, "BANNER_WAIT", 0.89)  # (8.9 s on the phone, at a tenth: under HIT_HELD)
     monkeypatch.setattr(session_module, "BANNER_POLL", 0.05)
@@ -72,16 +77,30 @@ def test_s_f2_a_touch_refused_slow_with_the_hold_standing_carries_it_and_the_nex
         attempts, sid = d._attempts, s.sid
         e = await refused(d, "tap", {"target": {"x": TAB[0], "y": TAB[1]}, "look": False})
         assert e.code == "not_actionable" and str(e).startswith("covered:") and s.sent == []
-        assert isinstance(d.stuck, session_module.RunnerHeld) and d.state == "not-answering"  # (carried)
-        # the next look: one clock question, not_answering at once, no front question into the hold, no reconnect
-        s.nothing_takes = 0.3
+        # (carried as a hold, round T: the state stays live, no agent's list dropped)
+        assert s.hold_carried() and d.stuck is None and d.state == "live" and getattr(s, "runner_held", None) is None
+        assert not any(v.dropped for v in d.control.clients.values())
+        # the next look: the clock only, until the hold is HIT_HELD old (from its first slow answer, not from the
+        # look); then not_answering, with no front question into the hold and no reconnect
         s.hit_questions.clear()
         fronts = len(s.fronts)
+        left = s.hold_left()
+        assert 0.1 < left < session_module.HIT_HELD
         began = time.monotonic()
         e = await refused(d, "look", {"screenshot": False})
+        took = time.monotonic() - began
         assert e.code == "not_answering" and str(e) == HELD_WORDS
-        assert time.monotonic() - began < 0.5 and s.hit_questions == [WITNESS] and len(s.fronts) == fronts
+        assert left - 0.02 <= took < left + 0.25, (took, left)  # (the limit, plus one step and one question at most)
+        assert set(s.hit_questions) == {WITNESS} and 1 <= len(s.hit_questions) <= left / 0.05 + 2
+        assert len(s.fronts) == fronts
+        assert isinstance(d.stuck, session_module.RunnerHeld) and d.state == "not-answering"
         assert d._attempts == attempts and s.sid == sid and not d._lost.is_set()
+        # given up: every later call asks the clock once, not_answering at once (round N)
+        s.nothing_takes = 0.3
+        s.hit_questions.clear()
+        began = time.monotonic()
+        e = await refused(d, "look", {"screenshot": False})
+        assert e.code == "not_answering" and time.monotonic() - began < 0.5 and s.hit_questions == [WITNESS]
         # once the app answers, the next call works and reads
         s.held_until, s.nothing_takes = 0.0, 0.03
         r = await d.run_tool("a", "look", {"screenshot": False})
@@ -116,6 +135,9 @@ def test_hold_standing_is_a_hold_with_no_real_clock_answer_after_it():
     s._hold("point", TAB)
     assert Session_standing(s)
     s.runner_held = session_module.RunnerHeld(SHOP[1], SHOP[0])
+    assert not Session_standing(s)  # (given up)
+    s.runner_held = None
+    session_module.Session.carry_hold(s)
     assert not Session_standing(s)  # (already carried)
 
 

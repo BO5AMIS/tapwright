@@ -1213,6 +1213,7 @@ class Session:
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
         self.runner_held = None  # (round N: a new runner holds nothing)
+        self._hold_carried = False  # (round T: nor a hold carried from the old one)
         self.scale = self.app = self.read_app = None
         self.scale_read = False
         self.items, self.offscreen, self.behind = [], [], []
@@ -2435,7 +2436,8 @@ class Session:
         """Is the runner known to be held: a hit question got a slow "no element answered" within HIT_HELD, and no real
         answer has come since (channel_free)? (Round N) Or a hold was given up (RunnerHeld) and the clock hasn't
         answered since."""
-        return getattr(self, "runner_held", None) is not None or getattr(self, "_held_until", 0.0) > time.monotonic()
+        return (getattr(self, "runner_held", None) is not None or getattr(self, "_held_until", 0.0) > time.monotonic()
+                or getattr(self, "_hold_carried", False))
 
     def _hold(self, why: str, at: tuple[float, float]) -> None:
         """A slow "no element answered": XCTest's daemon keeps the app's unanswered request, and every hit question and
@@ -2524,22 +2526,36 @@ class Session:
         element answered" set it (_hold) and the clock, asked since, said nothing real (or wasn't asked)? Then the
         daemon carries it past the call that saw it (carry_hold): a touch refused slow at its banner wait's limit, under
         HIT_HELD, left it standing, and the next call's front route went into the held runner and was taken for a lost
-        line. False in the given-up state (RunnerHeld: already carried)."""
-        if getattr(self, "runner_held", None) is not None:
+        line. False in the given-up state (RunnerHeld) and once carried."""
+        if getattr(self, "runner_held", None) is not None or getattr(self, "_hold_carried", False):
             return False
         if getattr(self, "_held_until", 0.0) <= time.monotonic():
             return False
         return getattr(self, "_clock_real_at", 0.0) < getattr(self, "_hold_at", 0.0)
 
-    def carry_hold(self) -> "RunnerHeld":
-        """(round S, S-F2) The standing hold as the given-up state (RunnerHeld), named with what is known (no device
-        question: the call is answering): the next call asks the clock once first (Daemon._held_ask)."""
-        known = getattr(self, "app", None)
-        bundle = known[1] if isinstance(known, tuple) else getattr(self, "opened_app", None) or ""
-        names = getattr(self, "app_names", None) or {}
-        name = names.get(bundle) or (known[0] if isinstance(known, tuple) and known[1] == bundle else "") or bundle
-        held = self.runner_held = RunnerHeld(bundle, name)
-        trace.note("runner_held_carried", {"b": bundle})
+    def carry_hold(self) -> None:
+        """(round S, S-F2; round T, review RS-H2) The standing hold outlives the call that saw it, as it is: still a
+        hold (_held stays true past its HIT_HELD, until the clock answers for real), not the given-up state. The next
+        call waits out the rest of it first (Daemon._carried_wait: the clock about every HIT_FREE_EVERY, nothing else
+        asked), and only once the hold is HIT_HELD old with no real answer is it given up (RunnerHeld, not_answering).
+        A hold of a few seconds (a shopping app's first seconds: about 4 s) is waited out as before round S."""
+        self._hold_carried = True
+        trace.note("runner_held_carried", {"age": round(time.monotonic() - getattr(self, "_hold_at", 0.0), 1)})
+
+    def hold_carried(self) -> bool:
+        """(round T) Is a hold carried past the call that saw it, and not given up nor answered since?"""
+        return getattr(self, "_hold_carried", False) and getattr(self, "runner_held", None) is None
+
+    def hold_left(self) -> float:
+        """(round T) Seconds until the carried hold is HIT_HELD old, from its first slow answer (_hold): <= 0 once it
+        is."""
+        return getattr(self, "_hold_at", 0.0) + HIT_HELD - time.monotonic()
+
+    async def give_up_carried(self) -> RunnerHeld:
+        """(round T) The carried hold reached HIT_HELD with no real answer: the given-up state, named by iOS's process
+        list as channel_free's (_given_up)."""
+        held = self.runner_held = await self._given_up()
+        self._hold_carried = False
         return held
 
     async def _runner_answers_held(self) -> bool:
@@ -2593,6 +2609,7 @@ class Session:
                                               sets_quiet=quiet)
         if kind in ("answer", "unasked"):
             self._held_until = 0.0
+            self._hold_carried = False  # (round T: a carried hold ends as any)
             if getattr(self, "runner_held", None) is not None:
                 self.runner_held = None
                 trace.note("runner_free", "answered")
