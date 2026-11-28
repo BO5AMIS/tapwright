@@ -414,3 +414,39 @@ def test_the_late_o_ref_check_gets_the_text_of_the_first_check(monkeypatch):
         assert judged == ["Search"]
         await finish(stop, task)
     run(go)
+
+
+# ---- review body, daemon.py:3080: a log watcher stopped while it waits takes its process question with it ----
+
+def test_a_log_watcher_stopped_at_its_wait_cancels_its_own_process_question():
+    from test_203q_shared_procs import K, scaled
+    from test_daemon import make, started
+
+    async def go():
+        d = scaled(make())
+        stop, task = await started(d)
+        device = d.session.device
+        bundle = "com.example.app0"
+        device.pids[bundle] = [100]
+        real = d._shared_procs
+        asks: list[asyncio.Task] = []
+
+        async def shared(b, after, fresh=False):
+            if fresh:
+                return await real(b, after, fresh=True)
+            asks.append(asyncio.current_task())
+            await asyncio.sleep(3600)  # (the next shared answer, a while off)
+        d._shared_procs = shared
+        d.ensure_logs(bundle)
+        for _ in range(500):
+            if asks:
+                break
+            await asyncio.sleep(0.005)
+        assert asks, "the watcher never waited for its next answer"
+        watcher = d._log_tasks[bundle]
+        watcher.cancel()  # (restart_logs, or the service stopping)
+        await asyncio.gather(watcher, return_exceptions=True)
+        await asyncio.sleep(2 * K)
+        assert asks[0].done()  # (its own question doesn't outlive it)
+        await finish(stop, task)
+    run(go)

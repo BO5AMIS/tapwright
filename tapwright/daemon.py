@@ -3077,7 +3077,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                         break
                     # the next shared answer, unless the stream ends first (a quiet phone's answer can be a while)
                     ask = asyncio.ensure_future(self._shared_procs(bundle, seen))
-                    await asyncio.wait({reader, ask}, return_when=asyncio.FIRST_COMPLETED)
+                    try:
+                        await asyncio.wait({reader, ask}, return_when=asyncio.FIRST_COMPLETED)
+                    except BaseException:
+                        # (CodeRabbit, PR #30) the watcher stopped here (restart_logs, the service stopping): its own
+                        # wait for the next answer goes with it (the shared question itself is shielded: others keep it)
+                        ask.cancel()
+                        await asyncio.gather(ask, return_exceptions=True)
+                        raise
                     if not ask.done():
                         ask.cancel()
                         await asyncio.gather(ask, return_exceptions=True)
