@@ -4010,17 +4010,20 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     over = performance.failures(self._performed[client_id], under)
                     missed = f"{'; '.join(over)}." if over else None
                 else:
+                    found: list[str | None] = []  # (CodeRabbit, PR #30) the app of the read that found the element
                     if (step["tool"] == "open_url" and "expect" in step and self._hints_wanted()
                             and self._link_expect(step["expect"])):
                         # (1.9.0 round 2) a link's expect says when it waited out the app's loading screen
                         missed = await self._expect_after_link(view, scope, step["expect"], seen_notes)
+                        found.append(self._read_app_now())
                     else:
-                        missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
-                                  if "expect" in step else None)
-                        if "expect" in step and missed is None and batch.positive_expect(step["expect"]):
-                            # (review RP M4, RP2 H2) its read found text, an id or a label it named: the screen it expected
-                            read_app = getattr(self.session, "read_app", None)
-                            await self._record_front(view, read_app[1] if isinstance(read_app, tuple) else None)
+                        missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded,
+                                                     found=found) if "expect" in step else None)
+                    if "expect" in step and missed is None and batch.positive_expect(step["expect"]):
+                        # (review RP M4, RP2 H2) its read found text, an id or a label it named: the screen it expected.
+                        # (CodeRabbit, PR #30) a link's expect too; and the app is that read's: a later picture check's
+                        # read of another app makes the record unknown, never that app's
+                        await self._record_front(view, found[0] if found else self._read_app_now())
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
                 if ran and step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
@@ -4216,7 +4219,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             await self.control.sleep(0.25)
 
     async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
-                      notes: list[str] | None = None, fold: bool = False) -> str | None:
+                      notes: list[str] | None = None, fold: bool = False,
+                      found: "list[str | None] | None" = None) -> str | None:
         """Does the step's expectation hold (§9.2)? None when it did, else why not. A text, id or label is waited
         for up to the timeout; `matches` is then checked once, on the screen as it is by then (§14.2). `notes`
         collects what a picture check has to say (an ignored element that isn't there). While this client records,
@@ -4225,6 +4229,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             missed = await self._expect_element(client_id, view, scope, expect)
             if missed is not None:
                 return missed
+            if found is not None:  # (CodeRabbit, PR #30: the app of the read that found it, before a picture check reads)
+                found.append(self._read_app_now())
         if expect.get("matches") is None:
             return None
         given = await self._given(scope) if scope is not None else None
@@ -9509,6 +9515,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     def _app_bundle(self) -> str | None:
         """The bundle id of the app the last read found in front, for the per-app policy."""
         return (self.session.app or (None, None))[1]
+
+    def _read_app_now(self) -> str | None:
+        """The app the newest read's root names (`Session.read_app`), or None: a run step's expect records the front by it.
+        """
+        read = getattr(self.session, "read_app", None)
+        return read[1] if isinstance(read, tuple) else None
 
     def _read_bundle(self) -> str | None:
         """The app the newest read names (`Session.read_app`: a live read's root, which `session.app` doesn't follow), else

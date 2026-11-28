@@ -239,3 +239,62 @@ def test_a_short_read_that_names_another_app_gives_that_app_its_long_try(state):
         assert runner.budgets()[2:] == [1500, 3000, 8000]  # (Other's own long try, though Shop is blocked)
         assert tree.tier == "full"
     run(go)
+
+
+# ---- 4727955275: an open_url step's expect that held records the app it found ----
+
+def test_an_open_url_steps_expect_records_the_app_its_link_brought_forward():
+    from test_daemon import make, started
+    from test_touch_other_app_203 import CHAT
+
+    async def go():
+        s = unread()
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+
+        async def open_url(url):  # (the link's app comes to the front a moment later, during the expect's reads)
+            return "opened " + url
+        s.open_url = open_url
+        real = s.refresh
+
+        async def refresh(timeout=None):
+            s.app, s.front, s.in_front = CHAT, (CHAT[1], 9), [CHAT[1]]
+            s.tree, s.tier = [button("e9", "Message", "message-field", rect=(20, 700, 360, 40))], "full"
+            return await real(timeout)
+        s.refresh = refresh
+        await d.run_tool("a", "run", {"steps": [
+            {"tool": "open_url", "url": "chat://thread/1", "expect": {"id": "message-field"}},
+            {"tool": "tap", "target": {"x": 200, "y": 400}}]})
+        assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_APP, CHAT[1])
+        assert s.sent == [("tap", (200, 400))]
+        await finish(stop, task)
+    run(go)
+
+
+# ---- 4727955277: the app credited by an expect is the one whose read found the element ----
+
+def test_an_expects_picture_check_of_another_app_credits_no_app():
+    from types import SimpleNamespace
+
+    from test_daemon import make, started
+    from test_touch_other_app_203 import CHAT, SHOP
+
+    async def go():
+        s = unread()
+        s.tree, s.tier, s.tree_app = [button("e9", "Message", "message-field", rect=(20, 700, 360, 40))], "full", SHOP
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+
+        async def compare(view, name, **kw):  # (its read: another app came forward meanwhile, and the picture matches)
+            s.app, s.front, s.in_front, s.read_app = CHAT, (CHAT[1], 9), [CHAT[1]], CHAT
+            return SimpleNamespace(reason=None, notes=[], named=False, lines=[""], folder=None, picture=None)
+        d._compare = compare
+        e = await refused(d, "run", {"steps": [
+            {"tool": "tap", "target": {"x": 200, "y": 300}, "expect": {"id": "message-field", "matches": "thread"}},
+            {"tool": "tap", "target": {"x": 200, "y": 400}}]})
+        assert "stopped at step 2" in str(e) and str(e).count(session_module.UNSEEN_FRONT.split(";")[0]) == 1
+        assert s.sent == [("tap", (200, 300))]
+        await finish(stop, task)
+    run(go)
