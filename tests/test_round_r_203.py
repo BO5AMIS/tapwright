@@ -67,9 +67,9 @@ def test_with_nothing_recorded_and_an_open_since_the_read_nothing_is_compared():
         view = d.control.client("a")
         view.seen_front = None
         assert d._meant_app(view) == SHOP
-        view.opened = True
+        view.left_by_call = True  # (open_app or open_url since the read)
         assert d._meant_app(view) is None
-        view.opened, view.unlooked = False, 1
-        assert d._meant_app(view) is None
+        view.left_by_call, view.unlooked = False, 1  # (round S2, review RQ-L1: an action without a look still compares)
+        assert d._meant_app(view) == SHOP
         await finish(stop, task)
     run(go)

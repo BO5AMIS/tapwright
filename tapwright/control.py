@@ -66,6 +66,7 @@ class ClientView:
     ocr_gen: int = -1  # the generation as that text was read: another's action since moves the screen under the refs
     ocr_text: dict[str, str] = field(default_factory=dict)  # (2.0.3 round N) ref -> its text as that reading read it
     unlooked: int = 0  # how many answers since the last list or change block carried none (`look: false`)
+    left_by_call: bool = False  # (2.0.3 round S2) open_app or open_url answered last, and no read since
     shown_off: list = field(default_factory=list)  # what lay off screen at the agent's last answer (for `~` lines)
     dropped: bool = False  # the connection dropped since `items` was read
     opened: bool = False  # open_app made the last list: a screen still drawing its last parts (a floating search field)

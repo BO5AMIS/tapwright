@@ -4923,6 +4923,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             result = await self.control.agent(act_as_agent)
             if name in ("open_app", "open_url") and not dry:
                 await self._record_front(view)  # (review RP M4: where it went, as the agent's, `look: false` too)
+                view.left_by_call = True  # (round S2: until a read of this agent's answers again)
         except Unanswered as e:
             # the line is alive and the session stays; the screen may or may not have changed under the agent's list
             view.moved = True
@@ -6980,22 +6981,25 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         showed it, as rule B checks the touch against it (`view.seen_front`, recorded by every read's answer and by
         `open_app` and `open_url`, `look: false` too); SpringBoard for the home screen. Before, the newest READ's app:
         after `open_app` with `look: false` that was the app before, and a touch near the top that went rightly to the
-        opened app was taken for a theft and the app before opened again. With nothing recorded (a runner older than
-        route version 11) or an unknown state: the newest read's app only when the agent's last answer was that read (no
-        action without a look since, no open_app); else None, no comparison: missing a theft is safer than reopening an
-        app the agent left on purpose. `own`: what a read this action made before its touch names (a target looked up
+        opened app was taken for a theft and the app before opened again. (Round S2) The system over an app is
+        SpringBoard's. With nothing recorded (a runner older than route version 11) or an unknown state: the newest
+        read's app, unless open_app or open_url answered since it (then None, no comparison: missing a theft is safer
+        than reopening an app the agent left on purpose). `own`: what a read this action made before its touch names (a target looked up
         live, the keyboard reflex): the newest knowledge, the touch aimed from it (CodeRabbit, PR #18 cycle 2)."""
         s = self.session
         if isinstance(own, tuple) and own[1]:
             return own
         front = getattr(view, "seen_front", None)
         if isinstance(front, session_module.Front):
-            if front.kind in (session_module.FRONT_APP, session_module.FRONT_OVER) and front.app:
+            if front.kind == session_module.FRONT_APP and front.app:
                 return self._app_named(front.app), front.app
-            if front.kind == session_module.FRONT_HOME:
+            if front.kind in (session_module.FRONT_HOME, session_module.FRONT_OVER):
+                # (round S2, review RQ-H1) the system over the app (Control Center, Notification Center, a banner that
+                # stayed) is SpringBoard's, as the read of it named it before round R: a touch the agent aimed at it (a
+                # toggle, a banner's row that opens its app) is never taken for a theft from the app underneath
                 return self._app_named(SPRINGBOARD), SPRINGBOARD
-        if getattr(view, "opened", False) or getattr(view, "unlooked", 0):
-            return None
+        if getattr(view, "left_by_call", False):
+            return None  # (round S2, review RQ-L1: only open_app / open_url since the read, not any look-free action)
         read_app = getattr(s, "read_app", None)
         return read_app if isinstance(read_app, tuple) else (s.app if isinstance(s.app, tuple) else None)
 
@@ -10721,6 +10725,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             view.alert_now = view.alert
             view.read_at, view.moved, view.dropped = self.control.clock(), False, False
             view.unlooked = 0
+            view.left_by_call = False  # (round S2)
             view.tree = getattr(self.session, "last_tree", None)  # (the place is worked out from it, below)
             view.opened = False  # the agent's own look is later than the launch's
             return text, image
@@ -10804,6 +10809,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if off and not up.full:
             up.lines = [line for line in up.lines if line != changes.NO_CHANGE] + off
         earlier, view.unlooked = view.unlooked, 0
+        view.left_by_call = False  # (round S2: a read answered)
         if earlier and not up.full:
             # the block is measured from the agent's last list, so it holds those actions' changes too: a
             # first-time agent closed a sheet it had opened with look: false and read "No visible change."
