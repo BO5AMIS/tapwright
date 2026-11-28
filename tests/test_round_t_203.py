@@ -351,7 +351,7 @@ def test_rs_l1_open_app_whose_front_record_fails_still_counts_as_leaving():
         d, stop, task = await _looked(s)
         view = d.control.client("a")
 
-        async def fails(view, read_bundle=None):
+        async def fails(view, read_bundle=None, **kw):
             raise RuntimeError("the front couldn't be recorded")
         d._record_front = fails
         with pytest.raises(Exception) as e:

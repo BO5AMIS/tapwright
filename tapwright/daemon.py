@@ -4917,6 +4917,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             touched_token = _SCOPE_TOUCHED.set([])
             try:
                 done = await act()
+                if name in ("open_app", "open_url") and not dry and self.control.holds_turn():
+                    # (CodeRabbit, PR #30 cycle 2) where it went, read in this action's own turn: a read in a turn of its
+                    # own, after, could find the app another agent's queued call brought forward meanwhile. A read that
+                    # fails is raised after the turn (_record_front); a turn given up between leaves no read (unknown)
+                    try:
+                        box["front"] = (await self._front_state_now(), None)  # (state None: no front route)
+                    except Exception as e:  # noqa: BLE001 (raised by _record_front, after the turn)
+                        box["front"] = (None, e)
                 if box.get("expect") is not None:
                     # (CodeRabbit, PR #30) "nothing changed" isn't believed until EXPECT_CHANGE_WAIT after the touch
                     # went out, not after the call began: a banner wait or a queue before it used up that time
@@ -4949,7 +4957,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 # (CodeRabbit, PR #30) after open_app, the app it opened must be the one in front as the record is
                 # made (another agent's queued call may have brought another forward since): else unknown
                 opened = view.aimed_app[1] if name == "open_app" and isinstance(view.aimed_app, tuple) else None
-                await self._record_front(view, opened)  # (review RP M4: where it went, as the agent's, `look: false` too)
+                # (review RP M4: where it went, as the agent's, `look: false` too; CodeRabbit, PR #30 cycle 2: as read
+                # in the action's own turn, or unknown when no read was made there)
+                await self._record_front(view, opened, in_turn=True, taken=box.get("front"))
         except Unanswered as e:
             # the line is alive and the session stays; the screen may or may not have changed under the agent's list
             view.moved = True
@@ -7151,14 +7161,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     "app; a touch near the top waits for it to go.")
         return None
 
-    async def _record_front(self, view, read_bundle: str | None = None) -> None:
+    async def _record_front(self, view, read_bundle: str | None = None, in_turn: bool = False,
+                            taken: "tuple[session_module.Front | None, Exception | None] | None" = None) -> None:
         """(2.0.3, review RP M4) What is in front now, as the agent's: after `open_app` and `open_url` (where they went,
         `look: false` too) and a run's step whose positive `expect` held (its read found what the agent expected; that
         read's app, `read_bundle`, must be the one in front: review RP2 H2)."""
         # (CodeRabbit, PR #30) the record before this call is no answer of the agent's once the read below may fail: with
         # none, _meant_app reaches left_by_call (no comparison) and a touch is refused no_look, never judged by it
         view.seen_front = None
-        state = await self._read(self._front_state_now)
+        if not in_turn:
+            state = await self._read(self._front_state_now)
+        elif taken is None:
+            # (CodeRabbit, PR #30 cycle 2) open_app and open_url read it inside the action's own turn (`taken`: the
+            # state, or the error that read raised); none was read there (the turn was given up between): what is in
+            # front now may be another agent's doing, so unknown
+            view.seen_front = session_module.Front(session_module.FRONT_UNKNOWN)
+            view.front_moved = ""
+            return
+        else:
+            state, failed = taken
+            if failed is not None:
+                raise failed
         view.seen_front = self._front_agreed(None, state, read_bundle, compare=False)
         view.front_moved = ""
 

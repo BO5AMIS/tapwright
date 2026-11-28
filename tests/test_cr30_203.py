@@ -302,7 +302,7 @@ def test_an_expects_picture_check_of_another_app_credits_no_app():
 
 # ---- 4727955280: open_app's record of the front is the app it opened, or unknown ----
 
-def test_open_app_records_unknown_when_another_app_came_forward_before_its_record():
+def test_open_app_records_the_app_it_opened_in_its_turn_not_one_brought_forward_after():
     from test_daemon import make, started
     from test_touch_other_app_203 import CHAT, SHOP
 
@@ -320,10 +320,74 @@ def test_open_app_records_unknown_when_another_app_came_forward_before_its_recor
             return result
         d.control.agent = agent
         await d.run_tool("a", "open_app", {"app": CHAT[1], "look": False})
-        assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_UNKNOWN)
+        # (cycle 2) read in open_app's own turn: Chat, never Shop, which came forward after
+        assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_APP, CHAT[1])
         d.control.agent = real
         e = await refused(d, "tap", {"target": {"x": 200, "y": 400}, "look": False})
-        assert e.code == "not_actionable" and str(e) == session_module.UNSEEN_FRONT
+        assert e.code == "stale" and str(e).startswith(f"{SHOP[1]} is in front now, not {CHAT[1]}") and s.sent == []  # (Shop in front, not the app the call left)
+        await finish(stop, task)
+    run(go)
+
+
+# ---- 4728195250 (cycle 2): open_url's record of the front is read in the link's own turn ----
+
+def _another_agent_brings_shop_forward_after_the_action(d, s):
+    from test_touch_other_app_203 import SHOP
+    real = d.control.agent
+
+    async def agent(act):
+        result = await real(act)
+        s.app, s.front, s.in_front = SHOP, (SHOP[1], 7), [SHOP[1]]  # (another agent's queued call, in between)
+        return result
+    d.control.agent = agent
+    return real
+
+
+def test_open_url_records_the_app_its_link_opened_not_one_another_agent_brought_forward_after():
+    from test_daemon import make, started
+    from test_touch_other_app_203 import CHAT, SHOP
+
+    async def go():
+        s = unread()
+        s.app_names.update({SHOP[1]: SHOP[0], CHAT[1]: CHAT[0]})
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+
+        async def open_url(url):  # (the link opens Chat)
+            s.app, s.front, s.in_front = CHAT, (CHAT[1], 9), [CHAT[1]]
+            return f"opened {url}"
+        s.open_url = open_url
+        _another_agent_brings_shop_forward_after_the_action(d, s)
+        await d.run_tool("a", "open_url", {"url": "chat://thread/1", "look": False})
+        assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_APP, CHAT[1])
+        e = await refused(d, "tap", {"target": {"x": 200, "y": 400}, "look": False})
+        assert e.code == "stale" and str(e).startswith(f"{SHOP[1]} is in front now, not {CHAT[1]}") and s.sent == []  # (Shop in front: never the link's destination)
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_url_whose_turn_was_given_up_before_its_front_read_records_unknown():
+    from test_daemon import make, started
+    from test_touch_other_app_203 import CHAT, SHOP
+
+    async def go():
+        s = unread()
+        s.app_names.update({SHOP[1]: SHOP[0], CHAT[1]: CHAT[0]})
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        turn = []
+
+        async def open_url(url):  # (the link opens Chat; the action ends without the queue's turn)
+            s.app, s.front, s.in_front = CHAT, (CHAT[1], 9), [CHAT[1]]
+            turn.append(True)
+            return f"opened {url}"
+        s.open_url = open_url
+        holds = d.control.holds_turn
+        d.control.holds_turn = lambda: holds() and not turn
+        await d.run_tool("a", "open_url", {"url": "chat://thread/1", "look": False})
+        assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_UNKNOWN)
         await finish(stop, task)
     run(go)
 
