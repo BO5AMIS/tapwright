@@ -4916,7 +4916,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self.session.late_check = self._o_ref_late(*checked) if (checked := _O_REF_CHECK.get()) else None
             touched_token = _SCOPE_TOUCHED.set([])
             try:
-                return await act()
+                done = await act()
+                if box.get("expect") is not None:
+                    # (CodeRabbit, PR #30) "nothing changed" isn't believed until EXPECT_CHANGE_WAIT after the touch
+                    # went out, not after the call began: a banner wait or a queue before it used up that time
+                    box["expect"] = time.monotonic() + self.settle_expect
+                return done
             finally:
                 _SCOPE_TOUCHED.reset(touched_token)
                 if self.control.holds_turn():  # (an action that let go of its turn and ended without it set nothing now)

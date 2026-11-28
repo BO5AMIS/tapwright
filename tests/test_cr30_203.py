@@ -450,3 +450,39 @@ def test_a_log_watcher_stopped_at_its_wait_cancels_its_own_process_question():
         assert asks[0].done()  # (its own question doesn't outlive it)
         await finish(stop, task)
     run(go)
+
+
+# ---- review body, daemon.py:4818: the wait for an element touch's change counts from the touch ----
+
+def test_the_wait_for_an_element_touchs_change_counts_from_the_touch_not_the_calls_start():
+    import time
+
+    from fakes import DescribingSession
+    from test_daemon import make, started
+
+    async def go():
+        s = DescribingSession()
+        s.tree = [button("e1", "Save", "save", rect=(20, 400, 100, 44))]
+        d = make(s)
+        d.settle_expect = 0.5
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        real_tap, real_settle = s.tap, d._settle
+        ended: list[float] = []
+        deadlines: list[float | None] = []
+
+        async def tap(target, hold_ms=60):
+            await asyncio.sleep(0.4)  # (a banner waited out, or a queue, before the touch went)
+            out = await real_tap(target, hold_ms)
+            ended.append(time.monotonic())
+            return out
+
+        async def settle(*a, **k):
+            deadlines.append(k.get("expect"))
+            return await real_settle(*a, **k)
+        s.tap, d._settle = tap, settle
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "screenshot": False})
+        assert ended and deadlines and deadlines[0] is not None
+        assert deadlines[0] >= ended[0] + 0.5 - 0.05
+        await finish(stop, task)
+    run(go)
