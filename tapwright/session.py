@@ -1059,6 +1059,7 @@ class Session:
         # before each one goes out (_gate); None: no check (a person's input, an action that changes the app on purpose)
         self.touch_rules: TouchRules | None = None
         self._gate_at: tuple[float, float] | None = None  # the point of the touch whose check is still to come
+        self._gate_spent: tuple | None = None  # (CodeRabbit, PR #30) the touch's check that ran, for _regate
         self.found_front: Front | None = None  # (review RP2 M2) the app alone in front, as a touch of this action found it
         self.tw_answered: int | None = None  # (review RP2 M1) the last route version a runner answered (kept across starts)
         self.opened_app: str | None = None  # (review RP2 M4) the app the agent's newest open_app named
@@ -2137,6 +2138,7 @@ class Session:
         # (review RP M3) the check of the app in front comes after the hook and right before the touch: the hands' `before`
         # (just before the first HID report) or the runner's touch request (_timed), never earlier
         self._gate_at = at if self.touch_rules is not None and at is not None else None
+        self._gate_spent = None
         trace.mark("guard")
 
     async def _gate(self, wait: bool = True) -> None:
@@ -2149,6 +2151,8 @@ class Session:
         at = self._gate_at
         if at is None or self.touch_rules is None:
             return
+        # (CodeRabbit, PR #30) what this check was, for a fast touch the runner refuses unplayed (_regate)
+        self._gate_spent = (at, getattr(self, "late_check", None))
         try:
             await self._front_rules(at, wait)
             # (round O, review RN-M4) an o ref's text, read again when its check is old. (Round P, review RO-M2) A read
@@ -2167,6 +2171,14 @@ class Session:
             raise
         self._gate_at, self._banner_seen, self._banner_until = None, False, None
         self.late_check = None  # (round P, review RO-M1: once an action; a scroll's later drags don't run it again)
+
+    def _regate(self) -> None:
+        """(CodeRabbit, PR #30) The runner's fast route refused a touch that the gate passed, before anything was played
+        ("invalid argument"): the W3C actions that play it instead are checked again (the app in front, an o ref's text),
+        as the time since may have brought another app or a sheet."""
+        spent, self._gate_spent = getattr(self, "_gate_spent", None), None
+        if spent is not None and self.touch_rules is not None:
+            self._gate_at, self.late_check = spent
 
     async def _wait_banner(self) -> None:
         """(review RP2 H1) Wait a banner out with no lock held, up to BANNER_WAIT; refused `covered` if it stays.
@@ -2987,6 +2999,7 @@ class Session:
                 self.fast_tap = False  # not this runner's route after all
             elif not ("invalid argument" in said or "too many touches" in said):
                 raise  # it may have been played (a timeout, XCTest's own error): touching again could do it twice
+            self._regate()  # (nothing was played: the W3C actions are checked again)
             getattr(self.device, "log", lambda *a: None)(f"fast tap refused ({e}): W3C actions instead")
             return False
         if checked:
@@ -3357,6 +3370,7 @@ class Session:
                 self.fast_drag = False  # not this runner's route after all
             elif not ("invalid argument" in said or "too many touches" in said):
                 raise  # it may have been played (a timeout, XCTest's own error): dragging again could do it twice
+            self._regate()  # (nothing was played: the W3C actions are checked again)
             getattr(self.device, "log", lambda *a: None)(f"fast drag refused ({e}): W3C actions instead")
             return False
         return True

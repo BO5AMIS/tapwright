@@ -88,3 +88,59 @@ def test_a_frame_stamped_ahead_of_the_clock_is_of_unknown_age_and_private_while_
         assert d.hub.arrival_of(during.seq) is None
         assert d.frame_private(during)
     asyncio.run(go())
+
+
+# ---- 4727955291: a fast touch the runner refused unplayed is checked again before its W3C fallback ----
+
+import pytest  # noqa: E402
+
+from tapwright import ui as ui_module  # noqa: E402
+from tapwright.device import DeviceError  # noqa: E402
+from tapwright.session import Refused, Session  # noqa: E402
+
+
+def _gated(runner, monkeypatch):
+    from test_session import FastRunner  # noqa: F401
+    monkeypatch.setattr(session_module.store, "load_state", lambda: {"runner_id": "runner"})
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    monkeypatch.setattr(session_module, "FAST_DRAG", "1")
+    s = Session(runner)
+    checks: list[tuple[float, float]] = []
+
+    async def front_rules(at, wait=True):
+        checks.append(at)
+        if len(checks) > 1:  # another app came to the front after the first check
+            raise Refused("stale", "another app is in front now; look again.")
+    s._front_rules = front_rules
+    s.touch_rules = session_module.TouchRules(session_module.Front(session_module.FRONT_APP, "com.example.shop"))
+    return s, checks
+
+
+@pytest.mark.parametrize("gesture", ["tap", "scroll"])
+def test_a_fast_touch_refused_unplayed_is_checked_again_before_the_w3c_fallback(monkeypatch, gesture):
+    from test_session import FastRunner, _paths
+    runner = FastRunner(version=2)
+    runner.tap_error = DeviceError("WebDriverAgent: invalid argument: x and y must be finite numbers (screen points)")
+    runner.drag_error = DeviceError("WebDriverAgent: invalid argument: point times must be in order, 0-60000 ms")
+    s, checks = _gated(runner, monkeypatch)
+    with pytest.raises(Refused) as e:
+        if gesture == "tap":
+            asyncio.run(s.tap(ui_module.Target(x=30, y=400)))
+        else:
+            asyncio.run(s.scroll(215, 700, 215, 300))
+    assert e.value.code == "stale" and len(checks) == 2
+    assert "/actions" not in _paths(runner)  # (nothing went out by the fallback)
+
+
+def test_a_fast_touch_refused_unplayed_goes_by_w3c_once_checked_again(monkeypatch):
+    from test_session import FastRunner, _paths
+    runner = FastRunner()
+    runner.tap_error = DeviceError("WebDriverAgent: invalid argument: x and y must be finite numbers (screen points)")
+    s, checks = _gated(runner, monkeypatch)
+
+    async def fine(at, wait=True):
+        checks.append(at)
+    s._front_rules = fine
+    asyncio.run(s.tap(ui_module.Target(x=30, y=400)))
+    assert checks == [(30.0, 400.0), (30.0, 400.0)] and _paths(runner)[-1] == "/actions"
+    assert s._gate_at is None
