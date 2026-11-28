@@ -283,13 +283,14 @@ def test_16_a_busy_app_is_clear_by_the_hands_with_no_confirm_and_the_hold_set(li
     run(go)
 
 
-@pytest.mark.parametrize("link", [0.0, 0.4])
-def test_16_rn_h1_by_the_runner_a_free_runner_is_proven_by_the_clock_once_more(link):
-    # (round O, review RN-H1) the runner's own touch goes only once the clock answers again: clear, and no hold
+@pytest.mark.parametrize("link,want", [(0.0, session_module.BANNER_CLEAR), (0.4, session_module.BANNER_SLOW)])
+def test_16_rn_h1_by_the_runner_a_free_runner_is_proven_by_the_clock_once_more(link, want):
+    # (round O, review RN-H1) the runner's own touch goes only once the clock answers again: clear, and no hold.
+    # (Round P, review RO-L1) only when that answer is prompt: one 0.42 s late on the link ends the hold but is slow
     async def go():
         s = _sixteen(lambda n, path, dev: (0.02 + link, status_bar()) if "x=66.00" in path
                      else (0.31 + link, _timed(304)))
-        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=False) == session_module.BANNER_CLEAR
+        assert await s.banner_at((383.0, 168.0), SHOP[1], hands=False) == want
         assert [p for _, p in s.device.asked] == ["x=66.00&y=22.00", "x=383.00&y=168.00", "x=66.00&y=22.00"]
         assert not s._held()
     run(go)

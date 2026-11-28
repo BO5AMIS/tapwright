@@ -2085,14 +2085,22 @@ class Session:
             return
         try:
             await self._front_rules(at, wait)
-            if (late := getattr(self, "late_check", None)) is not None:
-                await late(at)  # (round O, review RN-M4: an o ref's text, read again when its check is old)
+            # (round O, review RN-M4) an o ref's text, read again when its check is old. (Round P, review RO-M2) A read
+            # made then is followed by the front and banner check once more, so the last thing before the finger is
+            # that check (on the hands' path no await between it and the first HID report). Two reads at most: the
+            # second check's own banner wait is inside the touch's single deadline, and a third read is never made
+            reads = 0
+            while reads < 2 and (late := getattr(self, "late_check", None)) is not None and await late(at):
+                reads += 1
+                await self._front_rules(at, wait)
         except (_BannerUp, _HeldUp):
             raise  # (the gate stays: it runs again once the banner, or the runner, is waited out)
         except BaseException:
             self._gate_at, self._banner_seen, self._banner_until = None, False, None
+            self.late_check = None
             raise
         self._gate_at, self._banner_seen, self._banner_until = None, False, None
+        self.late_check = None  # (round P, review RO-M1: once an action; a scroll's later drags don't run it again)
 
     async def _wait_banner(self) -> None:
         """(review RP2 H1) Wait a banner out with no lock held, up to BANNER_WAIT; refused `covered` if it stays.
@@ -2251,14 +2259,28 @@ class Session:
                         # (round O, review RN-H1) the runner's own touch goes through XCTest: that the bounded lookup
                         # left nothing held isn't measured yet (N-F4). The clock asked once more: a real answer proves
                         # the runner free (clear, no hold); "nothing" or a silence: held, slow (round M's refusal)
-                        again, answer, _ = await self._hit_once(HIT_WITNESS, deadline, where, wait=HIT_FREE_WAIT)
+                        again, answer, t_again = await self._hit_once(HIT_WITNESS, deadline, where,
+                                                                      wait=HIT_FREE_WAIT)
                         if again == "answer":
                             self._held_until = 0.0
                             if self._witness_of(answer, where)[0] == BANNER_OVER:
                                 self._banner_real = True  # (a banner came to the clock meanwhile)
                                 return BANNER_OVER
+                            if t_again >= HIT_WITNESS_PROMPT:
+                                # (round P, review RO-L1) the runner is free, but an answer this late leaves the time
+                                # between the point's answer and the touch too long (the clock can't see an ordinary
+                                # banner coming: N-F6): slow, and the gate's next poll asks again
+                                trace.note("banner_slow", {**where, "phone_ms": ms, "confirm_ms": round(t_again * 1000)})
+                                return BANNER_SLOW
                             trace.note("banner_witness", {**where, "frame": holds, "phone_ms": ms, "free": True})
                             return BANNER_CLEAR
+                        if again == "nothing" and not slow_nothing(answer, t_again):
+                            # (round P, review RO-L2) a fast "nothing" at the clock: the status bar being redrawn, a
+                            # banner in motion, as at the first clock question; no hold
+                            self._held_until = 0.0
+                            trace.note("banner_moving", {**where, "witness": True, "confirm": True})
+                            self._banner_moving = True
+                            return BANNER_OVER
                         trace.note("banner_slow", {**where, "phone_ms": ms, "confirm": again})
                         if again == "nothing":
                             self._hold("confirm", at)

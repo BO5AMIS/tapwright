@@ -205,9 +205,10 @@ _PICTURE_AIM: contextvars.ContextVar["int | None"] = contextvars.ContextVar("tap
 # (2.0.1, review R201 M1) the touch under way is aimed by a {text} found in the picture (_by_picture_text): the agent
 # meant what shows the text, not a point of its own, so the touch waits out a notification banner as an element's does
 _PICTURE_TEXT: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_picture_text", default=False)
-# (round O, review RN-M4) an o ref's check for this call: (ref, its text, when it was made: hub.mono()); None otherwise
-_O_REF_CHECK: contextvars.ContextVar["tuple[str, str, float] | None"] = contextvars.ContextVar("tapwright_o_ref_check",
-                                                                                              default=None)
+# (round O, review RN-M4) an o ref's check for this call: (ref, its text, when it was made: hub.mono() before its read
+# (round P, RO-L4), the text's centre it found (round P, RO-M1)); None otherwise
+_O_REF_CHECK: contextvars.ContextVar["tuple[str, str, float, tuple[float, float]] | None"] = contextvars.ContextVar(
+    "tapwright_o_ref_check", default=None)
 # (2.0.3, the phone test of 137b583) how the settle of the action whose answer is being read ended, for that read only: True
 # on frames that stood still, False on its cap with frames still changing (a feed), None when no action's settle came
 # before the read (a look, wait_for's polls) or it said neither. Daemon._still_mark asks it before a slow app's planned
@@ -4595,9 +4596,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         args, read_at = self._ocr_target(client_id, args)
         checked = None
         if read_at is not None and isinstance(o_ref, str) and not args.get("force"):
+            asked = self.hub.mono()  # (round P, review RO-L4: the check's age counts from before its read)
             args = await self._o_ref_still(client_id, name, o_ref, args)  # (round N, N-F7: `dry_run` checks too)
             text = self.control.client(client_id).ocr_text.get(o_ref)
-            checked = (o_ref, text, self.hub.mono()) if text is not None else None
+            found = (float(args["target"]["x"]), float(args["target"]["y"]))
+            checked = (o_ref, text, asked, found) if text is not None else None
         if read_at is not None:
             # (CodeRabbit, PR #26) an o ref is a point of the screen as its text was read: the touch is refused `stale`
             # in its turn when another's action came since (a person, another agent), as a {text} by picture is (K-H2)
@@ -6881,23 +6884,32 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         x, y = self._o_ref_verdict(ref, text, point, seen, note)
         return {**args, "target": {**args["target"], "x": round(x, 1), "y": round(y, 1)}}
 
-    def _o_ref_late(self, ref: str, text: str, checked: float) -> "Callable[[tuple[float, float]], Awaitable[None]]":
+    def _o_ref_late(self, ref: str, text: str, checked: float,
+                    found: "tuple[float, float]") -> "Callable[[tuple[float, float]], Awaitable[bool]]":
         """(round O, review RN-M4) The touch's last step for an o ref (Session._gate, after the queue, the front check and
         any banner wait): a check older than O_REF_FRESH is made again, reading the picture's text without the queue
-        (the touch holds its turn), and the touch goes only when the same text is within O_REF_STILL of the point it
-        goes to; else `stale` with the check's words, nothing touched. The touch's point is the one the first check
-        found (its gesture is made by then): never moved here."""
-        async def late(at: tuple[float, float]) -> None:
-            if self.hub.mono() - checked < O_REF_FRESH:
-                return
+        (the touch holds its turn), and the touch goes only when the same text is still within O_REF_STILL of where the
+        first check found it (round P, review RO-M1: `found`, the text's centre then, not the touch's start, which for a
+        scroll is its drag's); else `stale` with the check's words, nothing touched. Its gesture is made by then: the
+        touch is never moved here. True when it read (the gate checks the front once more after it, RO-M2); False when
+        the check was fresh enough. Its age then counts from before this read."""
+        when = checked
+
+        async def late(at: tuple[float, float]) -> bool:
+            nonlocal when
+            if self.hub.mono() - when < O_REF_FRESH:
+                return False
+            asked = self.hub.mono()
             try:
                 seen, note = await self._screen_text("accurate", implicit=True, queued=False)
             except Refused:
                 raise
             except Exception as e:  # noqa: BLE001 - the picture can't be read now: the touch isn't made
                 seen, note = [], f"{type(e).__name__}"
-            self._o_ref_verdict(ref, text, (float(at[0]), float(at[1])), seen, note)
-            trace.note("o_ref_late", {"ref": ref, "age": round(self.hub.mono() - checked, 2)})
+            self._o_ref_verdict(ref, text, found, seen, note)
+            trace.note("o_ref_late", {"ref": ref, "age": round(asked - when, 2)})
+            when = asked
+            return True
         return late
 
     def _o_ref_verdict(self, ref: str, text: str, point: "tuple[float, float]", seen: "list[ocr.Seen]",
