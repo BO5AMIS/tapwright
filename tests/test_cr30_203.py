@@ -66,3 +66,25 @@ def test_an_element_of_the_system_over_the_app_is_stale_once_the_system_has_gone
         assert s.sent == [("tap", (200, 600))]
         await finish(stop, task)
     run(go)
+
+
+# ---- 4727955265: a frame stamped ahead of the hub's clock (the wall clock stepped back) ----
+
+def test_a_frame_stamped_ahead_of_the_clock_is_of_unknown_age_and_private_while_an_unlock_is_kept():
+    from fakes import DescribingSession
+    from test_daemon import make
+
+    async def go():
+        d = make(DescribingSession())
+        mono, wall = [1000.0], [5_000_000.0]
+        d.hub._mono, d.hub._clock = (lambda: mono[0]), (lambda: wall[0])
+        span = d._unlock_begin()
+        during = d.hub.publish(b"\xff\xd8keys")  # (a picture of the passcode keys)
+        for _ in range(80):  # (it drops out of the hub's kept history)
+            d.hub.publish(b"\xff\xd8more")
+        d._unlock_end(span)
+        mono[0] += 30.0
+        wall[0] -= 3600.0  # (the wall clock stepped back an hour: the frame's stamp is ahead of it)
+        assert d.hub.arrival_of(during.seq) is None
+        assert d.frame_private(during)
+    asyncio.run(go())

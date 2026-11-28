@@ -170,7 +170,10 @@ class CenterTools:
             at = getattr(frame, "at", None)
             if not isinstance(at, (int, float)) or isinstance(at, bool):
                 return bool(self.__dict__.get("_unlock_spans"))
-            came = self.hub.mono() - max(0.0, (self.hub.now_ms() - at) / 1000.0)
+            age_ms = self.hub.now_ms() - at
+            if age_ms < 0:  # (CodeRabbit, PR #30) the wall clock stepped back since its stamp: when it came is unknown
+                return bool(self.__dict__.get("_unlock_spans"))
+            came = self.hub.mono() - age_ms / 1000.0
             return self.unlocked_since(came - UNLOCK_ARRIVAL_SLACK)
         return self.unlock_covers(arrived)
 
