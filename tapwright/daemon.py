@@ -10528,6 +10528,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 if session_module.TRACE:
                     self.log("trace no picture since the one a long read failed on: blocked")
                 return None
+            x, y = kept.frame.thumb, latest.thumb
+            if x is not None and y is not None and x.size != y.size and not self._alike(kept.frame, latest):
+                # (CodeRabbit, PR #30) two pictures of other sizes (the phone turned) can't be compared: that is no
+                # evidence of another screen, and the block holds (_change counts them as all of it, for the stillness)
+                if session_module.TRACE:
+                    self.log("trace the picture can't be compared with the one a long read failed on: blocked")
+                return None
             share, said = self._change(kept.frame, latest)
         except Exception:  # noqa: BLE001 - can't tell: the block holds
             return None

@@ -362,3 +362,29 @@ def test_a_changed_frame_that_came_during_backs_read_is_moved_not_late(monkeypat
         d.hub.publish(b"\xff\xd8still")  # (an unchanged frame and nothing after it: late, as before)
         assert await d._still_across_read(again) == "late"
     asyncio.run(go())
+
+
+# ---- review body, daemon.py:10514: frames that can't be compared don't release a failed screen's block ----
+
+def _jpeg(size, shade):
+    import io
+
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("L", size, shade).save(out, "JPEG")
+    return out.getvalue()
+
+
+def test_pictures_of_two_sizes_cant_tell_another_screen_and_the_block_holds():
+    from test_slow_readable_203 import Stream
+
+    from tapwright.daemon import StillMark
+
+    stream = Stream()
+    d = stream.d
+    d.hub.publish(_jpeg((430, 932), 200))
+    kept = StillMark(d.hub.latest)
+    d.hub.publish(_jpeg((932, 430), 200))  # (the same screen, turned: another size, no comparison)
+    assert d._other_screen(kept) is None
+    d.hub.publish(_jpeg((430, 932), 20))  # (a real comparison that differs all over: another screen)
+    assert d._other_screen(kept) is True
