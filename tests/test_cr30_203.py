@@ -342,3 +342,23 @@ def test_open_app_records_the_app_it_opened():
         assert d.control.client("a").seen_front == session_module.Front(session_module.FRONT_APP, CHAT[1])
         await finish(stop, task)
     run(go)
+
+
+# ---- 4727955282: back's stillness check looks at a changed frame that came before it started ----
+
+def test_a_changed_frame_that_came_during_backs_read_is_moved_not_late(monkeypatch):
+    from fakes import DescribingSession
+    from test_daemon import make
+
+    from tapwright import daemon as daemon_module
+
+    async def go():
+        monkeypatch.setattr(daemon_module, "BACK_STILL_PAUSE", 0.05)
+        d = make(DescribingSession())
+        before = d.hub.publish(b"\xff\xd8sheet low")
+        d.hub.publish(b"\xff\xd8sheet higher")  # (the sheet slid during the read; no frame after it in time)
+        assert await d._still_across_read(before) == "moved"
+        again = d.hub.publish(b"\xff\xd8still")
+        d.hub.publish(b"\xff\xd8still")  # (an unchanged frame and nothing after it: late, as before)
+        assert await d._still_across_read(again) == "late"
+    asyncio.run(go())

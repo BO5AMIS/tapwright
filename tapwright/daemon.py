@@ -10148,6 +10148,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return "none"
         try:
             now = self.hub.latest
+            if now is not None and now.seq > before.seq and not self._alike(before, now):
+                return "moved"  # (CodeRabbit, PR #30) a frame that came during the read already shows the sheet moved
             after = await self.hub.next_after(max(before.seq, now.seq if now is not None else 0),
                                               timeout=BACK_STILL_PAUSE)
             if after is None:
