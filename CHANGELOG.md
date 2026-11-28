@@ -2,26 +2,13 @@
 
 ## 2.0.3
 
-- Runner 16 (`tw-16.15.3.16`). The hit test's point lookup ran outside any accessibility timeout: an app that didn't
-  answer it kept it for as long as the app liked (more than 80 s on a video feed, measured), and every accessibility
-  question after it waited behind it. What runner 16 does: the point lookup is the accessibility client's own, given
-  0.3 s by XCTest's accessibility timeout (as the runner's snapshots and tree reads are given theirs), and so are the
-  point lookups of the front route (when several apps are active) and of the tap's check of the app in front
-  (personal mode's `apps`), which asked the same unbounded question; their list of the active apps is given 0.5 s. A
-  lookup that raises is asked the old way; the hit test says so (`how: daemon` and the exception's name), the front
-  route and the tap's check don't. Its "no
-  element answered" says the lookup's own time, the whole question's time and the way it asked (`(hit 304 ms, all
-  318 ms, client)`); when the accessibility timeout can't be put back after the lookup, the hit test refuses, and the
-  touch is refused as when it can't say. The daemon judges slow and fast by the lookup's own time: 0.25 s or more is
-  an app that didn't answer, less is nothing there right now (a banner coming or going), however slow the link. On a
-  busy app a touch near the top by the computer's hands is clear after the clock and the point, with no confirm
-  question and no promptness asked of the clock: one question fewer, about 0.3 s sooner; the hold is still marked and
-  waited for before the next read. A touch through the phone's runner goes only when the clock, asked once more,
-  answers within 0.15 s (the runner is free, and the hold is cleared); an answer later than that ends the hold but the
-  touch is refused slow, a fast "no element answered" there is a banner in motion (the touch waits), and a slow one or
-  a silence is refused slow, the hold kept, as before. A runner older than 16 keeps the rules below;
-  `tapwright doctor` and the service's status say when the phone's runner is older than 16, what that costs and how to
-  update it (`tapwright doctor --fix`).
+- An app that doesn't answer the hit test's question at its point holds the phone's accessibility. The question stays
+  with it until the app answers (2.4 to 4.6 s measured on a shopping app's first seconds after it opened, more than
+  80 s once on a video app's feed), and every accessibility question after it waits behind it. The service waits a
+  known hold out (below), never repeats the question, and a hold that outlasts 12 s is answered `not_answering` with
+  the connection kept (the next entry). A fix in the runner was tried and isn't shipped (runner 16: on iOS 26.5 Apple's
+  own client lookup raises on every call, and the accessibility timeout doesn't bound the request); it is planned
+  another way for 2.0.4. 2.0.3 stays on runner 15 (`tw-16.15.3.15`).
   Measured on a phone: (the lead fills this in).
 - A runner held by an app no longer costs the connection. On a video feed opened a second time, the runner stayed held
   after a touch for more than 80 s; the wait for it gave up after 12 s, its next question went into the held runner,
@@ -255,11 +242,10 @@
   would land seconds late. A fast "no element answered" anywhere but the screen's top edge is a banner in motion: the
   touch waits a poll. SpringBoard's whole screen at the point over an app is a banner. In one check the app's point is
   asked once and the clock at most twice. Any "no element answered" that took 0.25 s or more marks the runner held,
-  whatever the verdict (a hold missed costs the connection, one set by mistake one question). Known limit, on a
-  runner older than 16 only: while a banner comes or goes the clock too says a fast "nothing", so two answers delayed
-  0.2 s on the link after a prompt one, in that half second, could read as clear; it needs a fast "nothing" at a point
-  below the status bar, not seen on the phone. Runner 16 times its own lookup and closes it (above). After a question
-  the app didn't answer (the
+  whatever the verdict (a hold missed costs the connection, one set by mistake one question). Known limit: while a
+  banner comes or goes the clock too says a fast "nothing", so two answers delayed 0.2 s on the link after a prompt
+  one, in that half second, could read as clear; it needs a fast "nothing" at a point below the status bar, not seen
+  on the phone. After a question the app didn't answer (the
   banner check's, or the one that proves a touch on a view another process draws), the runner is known to be held:
   hit questions stop, the front route and tree reads wait (asking the clock every 0.7 s, 12 s at most) instead of
   stalling into a lost connection, so the answer after a touch on a hung app can take up to about 10 s; a touch by
