@@ -23,10 +23,16 @@
   after them. The service's status says `not-answering` meanwhile, and the service asks the clock once every few seconds
   by itself, so the state ends when the app answers again with no call (a person who closed the app on the phone can
   use the live view again). A hold a call saw and didn't see end (a touch near the top refused slow at its 8 s limit,
-  under the 12 s, every clock question meanwhile "no element answered") is carried the same way, so the next call
-  asks the clock once and never sends the front question into the held runner; and a front question that gets no
-  answer while the runner answers the clock "no element answered" is that state too, not a lost connection (the next
-  look had been taken for one: a reconnect and a new session, 48 s).
+  under the 12 s, every clock question meanwhile "no element answered") is carried to the next call as a hold: that
+  call first waits out the rest of it, asking only the clock (about every 0.7 s, never two questions closer than
+  0.25 s, the phone's turn let go between two so other calls, `close_app` and the service's own check get theirs),
+  never the front question into the held runner, and goes on as usual as soon as the app answers. Only when the hold
+  is 12 s old, counted from its first slow answer and not from the call, is it `not_answering` as above: a shopping
+  app's hold of about 4 s is waited out, as before. And a front question that gets no answer while the runner answers
+  the clock a slow "no element answered" is that state too, not a lost connection (the next look had been taken for
+  one: a reconnect and a new session, 48 s); a fast one (the status bar being redrawn) says nothing of a hold, and a
+  restarted runner ("invalid session") is never taken for one. Any wait for a held runner ends at the hold's 12 s,
+  whatever another call does meanwhile.
 - A system sheet over the app is named. A rating prompt's sheet (another process's whole screen over a system app) was
   refused at the top with "can't tell whether a notification is over the top of the screen": the runner had answered.
   Now: `covered: another app's sheet (<bundle id>) is over the screen; look again.`, and a touch by the picture's text
@@ -123,8 +129,10 @@
   no answer. At worst, on a screen that never answers: in an app that never read whole with 8 s, 4 in the first hour
   (at 0, 5, 15 and 35 minutes), then about one an hour, then fewer, down to one every 6 hours; in an app that has, 6
   in the first hour (at 0, 1, 3, 7, 15 and 31 minutes), then about one an hour, then fewer, down to one every 6
-  hours. Each app pays this on its own. The block holds only on the screen the 8 s read failed on, until three in a row
-  weren't whole: a screen whose picture differs from that one by more than a quarter gets its 8 s read at once (a
+  hours. Each app pays this on its own. The block holds only on the screens the 8 s reads failed on (the last four
+  are kept, each blocked for its own time: going back and forth between two screens that both fail pays no 8 s read at
+  each switch), until three in a row weren't whole: a screen whose picture differs from those by more than a quarter
+  gets its 8 s read at once (a
   product page that never read, the app's own timeouts, blocked the whole app for 60, 120, 240 s: its readable pages,
   the home screen after a relaunch too, answered "0 elements", and the moment the block ran out the home screen read
   whole in 2.5 to 5.3 s); from the third in a row on, the block is the app's, as above, but only for an app none of
@@ -132,8 +140,9 @@
   and from then on only the screens that failed are blocked (on a shopping app the path home, search, results tripped
   the app's block before results, which reads, was ever tried, and a whole session got 0 elements). A long read cut
   while the app was busy redrawing (XCTest lost its application element mid-read: "is not present in the current view
-  anymore") isn't counted in the row; its screen is blocked as any. `type_text` without a target reads its field with
-  the normal budget only, never 8 s more before the keys. A long read that comes back
+  anymore") isn't counted in the row; its screen is blocked as any, for a time that doubles as for any. `type_text`
+  without a target reads its field with the normal budget only, never 8 s more before the keys, and that read, cut on
+  an app that reads whole with 8 s, doesn't give the app the 1.5 s budget for later reads. A long read that comes back
   partly read (an element with a label, a name or a value, or more than five; not all of them) is no miss: it starts no
   block and counts nothing; on a still screen that only ever answers in part, each look then takes up to 8 s and
   returns that part. A page that never reads costs one 8 s read on each visit when the app's readable screens read
